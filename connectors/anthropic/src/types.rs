@@ -331,8 +331,12 @@ pub struct MessageStartData {
 pub enum ContentBlockStartData {
     /// Text block starting
     Text { text: String },
-    /// Tool use starting
-    ToolUse { id: String, name: String, input: String },
+    /// Tool use starting (input starts as empty object)
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 /// Delta for content.

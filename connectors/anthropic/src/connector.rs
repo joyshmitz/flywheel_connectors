@@ -124,7 +124,7 @@ impl AnthropicConnector {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
                                 "default": "claude-sonnet-4-20250514"
                             },
                             "messages": {
@@ -185,7 +185,7 @@ impl AnthropicConnector {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
                                 "default": "claude-sonnet-4-20250514"
                             },
                             "message": { "type": "string" },
@@ -333,11 +333,16 @@ impl AnthropicConnector {
         }
 
         let system = input.get("system").and_then(|v| v.as_str());
-        let max_tokens = input
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(4096);
+        let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
+            Some(v) if v > u64::from(u32::MAX) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
+                });
+            }
+            Some(v) => v as u32,
+            None => 4096,
+        };
         let temperature = input.get("temperature").and_then(|v| v.as_f64());
 
         // Parse tools if provided
@@ -419,11 +424,16 @@ impl AnthropicConnector {
             })?;
 
         let system = input.get("system").and_then(|v| v.as_str());
-        let max_tokens = input
-            .get("max_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(4096);
+        let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
+            Some(v) if v > u64::from(u32::MAX) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
+                });
+            }
+            Some(v) => v as u32,
+            None => 4096,
+        };
 
         // Build messages
         let messages = vec![Message {
