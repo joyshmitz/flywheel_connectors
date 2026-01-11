@@ -400,3 +400,356 @@ impl DiscordApiClient {
         Ok(resp.url)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    /// Create a test config pointing to the mock server.
+    fn test_config(mock_server: &MockServer) -> DiscordConfig {
+        DiscordConfig {
+            bot_token: "test_token_12345".into(),
+            api_url: mock_server.uri(),
+            retry: crate::config::RetryConfig {
+                max_attempts: 1,
+                initial_delay_ms: 10,
+                max_delay_ms: 100,
+                jitter: 0.0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_current_user_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let user = client.get_current_user().await.unwrap();
+        assert_eq!(user.id, "123456789");
+        assert_eq!(user.username, "TestBot");
+        assert!(user.bot);
+    }
+
+    #[tokio::test]
+    async fn test_get_current_user_unauthorized() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "code": 0,
+                "message": "401: Unauthorized"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.get_current_user().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DiscordError::Api { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_create_message_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/channels/987654321/messages"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "111222333",
+                "channel_id": "987654321",
+                "content": "Hello, world!",
+                "timestamp": "2024-01-01T00:00:00.000000+00:00",
+                "tts": false,
+                "mention_everyone": false,
+                "attachments": [],
+                "embeds": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let message = client
+            .create_message("987654321", Some("Hello, world!"), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(message.id, "111222333");
+        assert_eq!(message.channel_id, "987654321");
+        assert_eq!(message.content, "Hello, world!");
+    }
+
+    #[tokio::test]
+    async fn test_create_message_with_embed() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/channels/987654321/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "111222333",
+                "channel_id": "987654321",
+                "content": "",
+                "timestamp": "2024-01-01T00:00:00.000000+00:00",
+                "tts": false,
+                "mention_everyone": false,
+                "attachments": [],
+                "embeds": [{
+                    "title": "Test Embed",
+                    "description": "This is a test embed",
+                    "color": 16711680
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let embed = crate::types::Embed {
+            title: Some("Test Embed".into()),
+            description: Some("This is a test embed".into()),
+            color: Some(0xFF0000),
+            ..Default::default()
+        };
+
+        let message = client
+            .create_message("987654321", None, Some(vec![embed]), None)
+            .await
+            .unwrap();
+
+        assert_eq!(message.embeds.len(), 1);
+        assert_eq!(message.embeds[0].title.as_deref(), Some("Test Embed"));
+    }
+
+    #[tokio::test]
+    async fn test_get_channel_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/channels/987654321"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "987654321",
+                "type": 0,
+                "guild_id": "111111111",
+                "name": "general",
+                "topic": "General discussion"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let channel = client.get_channel("987654321").await.unwrap();
+        assert_eq!(channel.id, "987654321");
+        assert_eq!(channel.name.as_deref(), Some("general"));
+        assert_eq!(channel.channel_type, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_guild_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/guilds/111111111"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "111111111",
+                "name": "Test Server",
+                "icon": "abc123",
+                "owner_id": "222222222"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let guild = client.get_guild("111111111").await.unwrap();
+        assert_eq!(guild.id, "111111111");
+        assert_eq!(guild.name, "Test Server");
+        assert_eq!(guild.owner_id.as_deref(), Some("222222222"));
+    }
+
+    #[tokio::test]
+    async fn test_get_gateway_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/gateway/bot"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": "wss://gateway.discord.gg",
+                "shards": 1,
+                "session_start_limit": {
+                    "total": 1000,
+                    "remaining": 999,
+                    "reset_after": 14400000,
+                    "max_concurrency": 1
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let gateway_url = client.get_gateway().await.unwrap();
+        assert_eq!(gateway_url, "wss://gateway.discord.gg");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limited() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "5")
+                    .set_body_json(serde_json::json!({
+                        "message": "You are being rate limited.",
+                        "retry_after": 5.0,
+                        "global": false
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.get_current_user().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, DiscordError::RateLimited { retry_after } if retry_after == 5.0));
+    }
+
+    #[tokio::test]
+    async fn test_delete_message_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/channels/987654321/messages/111222333"))
+            .and(header("Authorization", "Bot test_token_12345"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.delete_message("987654321", "111222333").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_bot_token_normalization() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .and(header("Authorization", "Bot actual_token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "123",
+                "username": "Bot",
+                "bot": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Test that "Bot " prefix is stripped
+        let config = DiscordConfig {
+            bot_token: "Bot actual_token".into(),
+            api_url: mock_server.uri(),
+            ..Default::default()
+        };
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let user = client.get_current_user().await.unwrap();
+        assert_eq!(user.id, "123");
+    }
+
+    #[tokio::test]
+    async fn test_error_is_retryable() {
+        // 429 is retryable
+        let rate_limited = DiscordError::RateLimited { retry_after: 5.0 };
+        assert!(rate_limited.is_retryable());
+
+        // 500 is retryable
+        let server_error = DiscordError::Api {
+            code: 500,
+            message: "Internal Server Error".into(),
+            retry_after: None,
+        };
+        assert!(server_error.is_retryable());
+
+        // 401 is not retryable
+        let unauthorized = DiscordError::Api {
+            code: 401,
+            message: "Unauthorized".into(),
+            retry_after: None,
+        };
+        assert!(!unauthorized.is_retryable());
+
+        // 404 is not retryable
+        let not_found = DiscordError::Api {
+            code: 404,
+            message: "Not Found".into(),
+            retry_after: None,
+        };
+        assert!(!not_found.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_error_retry_after() {
+        let rate_limited = DiscordError::RateLimited { retry_after: 5.0 };
+        assert_eq!(
+            rate_limited.retry_after(),
+            Some(Duration::from_secs_f64(5.0))
+        );
+
+        let api_error_with_retry = DiscordError::Api {
+            code: 429,
+            message: "Rate limited".into(),
+            retry_after: Some(10.0),
+        };
+        assert_eq!(
+            api_error_with_retry.retry_after(),
+            Some(Duration::from_secs_f64(10.0))
+        );
+
+        let api_error_no_retry = DiscordError::Api {
+            code: 404,
+            message: "Not Found".into(),
+            retry_after: None,
+        };
+        assert_eq!(api_error_no_retry.retry_after(), None);
+    }
+}

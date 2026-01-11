@@ -611,7 +611,10 @@ impl DiscordConnector {
         let task = tokio::spawn(async move {
             while let Some(gateway_event) = event_rx.recv().await {
                 if let Some(event) = gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id) {
-                    let _ = event_tx.send(Ok(event));
+                    if event_tx.send(Ok(event)).is_err() {
+                        tracing::info!("Event receiver dropped, stopping gateway event forwarding");
+                        break;
+                    }
                 }
             }
         });
