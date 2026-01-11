@@ -4,6 +4,7 @@ members = [
     "crates/fcp-core",
     "connectors/telegram",
     "connectors/discord",
+    "connectors/anthropic",
 ]
 
 [workspace.package]
