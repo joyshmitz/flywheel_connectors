@@ -272,6 +272,14 @@ FCP recognizes a small set of data-flow archetypes. Connectors MAY declare one o
 | **CLI/Process** | Agent → spawn | git, kubectl, terraform | Command normalization + guardrails |
 | **Browser** | Agent → CDP → Browser | Automation, scraping | Session isolation + screenshots |
 
+### 4.5 Layered Model (FCP-Pack / FCP-Core / FCP-Policy)
+
+FCP is intentionally layered to keep distribution, runtime, and policy concerns separable:
+
+- **FCP-Pack (Packaging & Trust)** — Manifests, signatures, SBOM, and registry metadata
+- **FCP-Core (Runtime Protocol)** — Handshake, invoke, events, health, shutdown
+- **FCP-Policy (Zones & Capabilities)** — Zone definitions, provenance/taint, approvals, and constraints
+
 ---
 
 ## 5. Security Model
@@ -580,7 +588,19 @@ Principal trust does not override zone policy. A principal MAY only act within a
 
 By default, external principals MUST NOT access high-trust zones (`z:private`, `z:owner`) unless explicitly configured.
 
-### 6.8 Messaging Connector Requirements
+### 6.8 Zone Transition Protocol
+
+When data or control crosses zone boundaries, the Hub MUST enforce an explicit transition check:
+
+1. **Source capability** — Is the requested capability granted in the source zone?
+2. **Target allowlist** — Does the target zone allow this capability and principal class?
+3. **Data flow policy** — Does the source zone allow outbound flow to the target zone?
+4. **Provenance/taint** — If tainted, require elevation or deny
+5. **Audit + token** — Record audit event and mint a scoped capability token (if approved)
+
+If any check fails, the Hub MUST deny the transition and return a structured error (`FCP-4001` or `FCP-4002`).
+
+### 6.9 Messaging Connector Requirements
 
 Messaging connectors MUST:
 - Provide stable principal identity (user id)
@@ -674,7 +694,26 @@ Elevation MUST be:
 - Scoped (capability + zone + constraints)
 - Time-bounded
 
-### 7.5 Example: Public Discord → Gmail Delete (Blocked)
+### 7.5 No-Commingling Guarantee (Messaging Safety)
+
+For any public-facing messaging connector, it MUST be mechanically impossible for an untrusted inbound message to access private tools unless explicitly elevated. The Hub MUST enforce this by:
+
+1. Binding the ingress event to a zone (via ingress bindings)
+2. Spawning the agent session in that zone
+3. Minting capability tokens only for capabilities allowed in that zone
+4. Blocking tainted-origin commands that target higher-trust zones unless explicitly elevated
+
+This is a **protocol-level** guarantee, not a prompt-based policy.
+
+### 7.6 Messaging Connector Requirements
+
+Messaging connectors MUST:
+- Provide stable principal identity (user ID) and trust level
+- Provide channel/thread/chat identifiers on ingress
+- Support allowlist/pairing policy enforcement **or** emit enough metadata for the Hub to enforce it
+- Support reply routing so outbound replies are constrained to the originating context
+
+### 7.7 Example: Public Discord → Gmail Delete (Blocked)
 
 1. Input enters Hub in `z:public` → provenance tainted
 2. Agent decides to call `gmail.delete`
@@ -899,7 +938,7 @@ The JSON-RPC payload SHOULD include a `meta` object with `correlation_id`, `zone
 
 ### 9.2 Transport Options
 
-Every connector MUST implement at least one transport. The Hub MUST support:
+Every connector MUST implement at least one transport and MUST support stdio (LSP framing) in JSON-RPC compat mode for local debugging and tooling. The Hub MUST support:
 - **stdio**: Connector launched as child process; communication via pipes
 - **Unix domain sockets**: For local, high-throughput, long-lived connectors
 
@@ -1116,6 +1155,11 @@ Handshake response SHOULD include:
 - `event_caps` (replay support, buffer size)
 - `auth_caps` (supported auth methods)
 - `op_catalog_hash` (integrity hash of operations list)
+
+Connector MUST reject handshake if:
+- Protocol version is incompatible
+- `host_public_key` is missing while capability verification is required
+- A persistent-storage connector is missing a valid `zone_dir`
 
 ### 9.11 Error Response Format
 
@@ -1359,6 +1403,13 @@ If embedded, the manifest SHOULD be stored in a named section:
 - Mach-O: `__FCP,__manifest`
 - PE: `.fcpmanifest`
 
+Embedded manifests SHOULD use a deterministic header to allow extraction without execution:
+- Magic bytes: `FCP\0\1\0`
+- Length: `u32` little-endian (compressed payload size)
+- Payload: zstd-compressed CBOR (preferred) or MessagePack (acceptable)
+
+The Hub MUST be able to extract the manifest by scanning for the magic bytes, reading the length, decompressing, and verifying the manifest signature. No connector code may execute during extraction.
+
 ### 10.7 Manifest Versioning Strategy
 
 `schema_version` follows semantic versioning:
@@ -1451,6 +1502,7 @@ Provisioning MUST be automation-first:
 - The Hub controls UI/UX and stores secrets
 - Connectors receive only the credentials they need at runtime
 - Secrets MUST NOT be written to plaintext config
+- If full automation is impossible, connectors MUST guide users through the minimum manual steps, validate the result, and remain disabled until verified
 
 ### 11.5 Zone-Local Storage Rules
 
@@ -1594,6 +1646,8 @@ The Hub SHOULD map connector operations into MCP-compatible tools, including:
 
 ### 15.1 Metrics
 
+The Hub MUST generate a `correlation_id` for every ingress chain and every operation invocation. Connectors MUST include that `correlation_id` in logs, events, and error responses.
+
 Connectors and Hub MUST expose:
 - Request counts, latencies, error rates
 - Resource usage
@@ -1606,7 +1660,7 @@ Connectors SHOULD expose metrics via:
 
 ### 15.2 Structured Logs
 
-Logs MUST be structured (JSON) and redact secrets.
+Logs MUST be structured (JSON), redact secrets, and be emitted to stderr or a configured sink.
 
 Required fields:
 - timestamp
@@ -1618,6 +1672,7 @@ Required fields:
 - resource_uri(s) (if present)
 - event_seq / topic (for streaming events)
 - error classification (if applicable)
+- upstream_request_id (if present)
 
 ### 15.3 Audit Events
 
@@ -1690,6 +1745,24 @@ pub struct FcpError {
     pub ai_recovery_hint: Option<String>,
 }
 ```
+
+### 16.4 Canonical Error Names (String Codes)
+
+Some transports (JSON-RPC compat) use string error codes. Implementations SHOULD use the following canonical names and map them to the numeric families above:
+
+| Canonical Name | Meaning | Numeric Family |
+|---------------|---------|----------------|
+| `FCP_INVALID_REQUEST` | Malformed or missing fields | FCP-1000 |
+| `FCP_UNAUTHORIZED` | Connector auth missing/invalid | FCP-2000 |
+| `FCP_FORBIDDEN` | Capability denied | FCP-3000 |
+| `FCP_NOT_FOUND` | Resource missing | FCP-6000 |
+| `FCP_CONFLICT` | State conflict / optimistic concurrency | FCP-6000 |
+| `FCP_RATE_LIMITED` | Rate limit exceeded | FCP-3000 / FCP-6000 |
+| `FCP_DEPENDENCY_UNAVAILABLE` | Upstream dependency down | FCP-7000 |
+| `FCP_TIMEOUT` | Upstream timeout | FCP-7000 |
+| `FCP_INTERNAL` | Internal connector failure | FCP-9000 |
+
+Connectors SHOULD map upstream provider errors into these stable codes to improve automation and recovery behavior.
 
 ---
 
@@ -1807,6 +1880,39 @@ Migration must deliver security wins early using a strangler-fig approach.
 - Connector event emission overhead: < 200 microseconds per event typical
 - Connector cold start (no network handshake): < 100ms target
 - Health check execution: < 10ms typical
+
+**Reliability rules of thumb:**
+- All upstream calls MUST be bounded by timeouts
+- Retries SHOULD use jittered backoff with caps
+- Circuit breakers SHOULD be used for flaky dependencies
+- Auth flows MUST have explicit state machines (no implicit fallthrough)
+- Avoid panics on user input; no `unwrap()` on parse paths
+
+### Appendix G: Reference Flows (Non-Normative)
+
+**Private Telegram “owner bot” (safe)**
+
+- Zone: `z:owner` (trust grade `trusted_remote`)
+- Telegram connector instance bound to that zone
+- Policy: only principals with trust `owner` or `paired` can invoke agent sessions
+- Allowed capabilities: Gmail/Calendar in `z:owner`
+
+Flow:
+1. Telegram inbound event arrives with `principal.id = tg_user_me`
+2. Hub verifies principal is paired/owner → allowed
+3. Hub spawns agent with Gmail/Calendar tools
+4. Response sent with `telegram.send_message` constrained to that chat
+
+**Public Discord “help bot” (safe)**
+
+- Zone: `z:public` (trust grade `public`)
+- Allowed capabilities: public docs/search, `discord.send_message` constrained to server/channel list
+- Explicitly denied: Gmail/Drive/Calendar/DevOps CLIs
+
+Flow:
+1. Discord inbound event arrives with `principal.trust = untrusted`
+2. Hub spawns restricted public agent (no sensitive tools)
+3. Agent responds; outbound message is constrained to the originating channel
 
 **Reliability rules of thumb:**
 - Every upstream call: timeouts, retries with bounded jitter, circuit breakers

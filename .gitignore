@@ -50,4 +50,6 @@ docs/flywheel_connectors_competing_plans.md
 docs/fcp_spec_v1_gpt_pro.md
 docs/flywheel_connector_protocol_v1_specification.md
 docs/fcp_additional_connectors_prioritized.md
-docs/fcp_model_connectors_rust.md
+
+# bv (beads viewer) local config and caches
+.bv/
