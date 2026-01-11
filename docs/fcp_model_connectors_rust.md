@@ -292,6 +292,9 @@ pub struct ConnectorId(pub String);
 pub struct InstanceId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RequestId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ZoneId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -526,7 +529,7 @@ impl ZoneContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeRequest {
     pub r#type: String,
-    pub id: CorrelationId,
+    pub id: RequestId,
     pub operation: OperationId,
     pub input: serde_json::Value,
     pub capability_token: CapabilityToken,
@@ -544,7 +547,7 @@ pub struct InvokeContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeResponse {
     pub r#type: String,
-    pub id: CorrelationId,
+    pub id: RequestId,
     pub result: serde_json::Value,
     pub resource_uris: Vec<String>,
     pub next_cursor: Option<String>,
@@ -554,7 +557,7 @@ pub struct InvokeResponse {
 pub struct SubscribeRequest {
     /// Must be "subscribe"
     pub r#type: String,
-    pub id: CorrelationId,
+    pub id: RequestId,
     pub topics: Vec<String>,
     pub since: Option<String>,
     pub max_events_per_sec: Option<u32>,
@@ -576,7 +579,7 @@ pub struct SubscribeResult {
 pub struct SubscribeResponse {
     /// Must be "response"
     pub r#type: String,
-    pub id: CorrelationId,
+    pub id: RequestId,
     pub result: SubscribeResult,
 }
 
@@ -590,7 +593,7 @@ pub struct ReplayBufferInfo {
 pub struct UnsubscribeRequest {
     /// Must be "unsubscribe"
     pub r#type: String,
-    pub id: CorrelationId,
+    pub id: RequestId,
     pub topics: Vec<String>,
     /// Optional capability token (may be provided via frame/meta in JSON-RPC compat)
     pub capability_token: Option<CapabilityToken>,
@@ -693,6 +696,14 @@ pub struct TraceContext {
 pub struct JsonRpcMeta {
     /// Optional distributed trace context (meta.trace)
     pub trace: Option<TraceContext>,
+    /// Correlation identifier for audit chains
+    pub correlation_id: Option<CorrelationId>,
+    /// Zone associated with this request (compat wrapper)
+    pub zone_id: Option<ZoneId>,
+    /// Principal associated with this request (compat wrapper)
+    pub principal: Option<Principal>,
+    /// Deadline in milliseconds (compat wrapper)
+    pub deadline_ms: Option<u64>,
     /// Optional capability token when carried via meta in JSON-RPC compat mode
     pub capability_token: Option<CapabilityToken>,
 }
@@ -1372,7 +1383,7 @@ pub trait RequestResponse: FcpConnector {
 
 #[async_trait]
 impl RequestResponse for RequestResponseConnector {
-    #[instrument(skip(self), fields(correlation_id = %req.id.0))]
+    #[instrument(skip(self), fields(request_id = %req.id.0))]
     async fn request(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         let start = Instant::now();
         self.requests_total.fetch_add(1, Ordering::Relaxed);
@@ -1710,7 +1721,7 @@ mod tests {
 
         let response = connector.request(InvokeRequest {
             r#type: "invoke".into(),
-            id: CorrelationId::default(),
+            id: RequestId("req_test_1".into()),
             operation: OperationId("http.get".into()),
             input: serde_json::json!({ "path": "/api/test" }),
             capability_token: token,
@@ -1762,7 +1773,7 @@ mod tests {
 
         let result = connector.request(InvokeRequest {
             r#type: "invoke".into(),
-            id: CorrelationId::default(),
+            id: RequestId("req_test_2".into()),
             operation: OperationId("http.get".into()),
             input: serde_json::json!({ "path": "/test" }),
             capability_token: token,
@@ -5657,7 +5668,7 @@ impl FullServiceConnector {
         // Send message via REST API
         let request = InvokeRequest {
             r#type: "invoke".into(),
-            id: CorrelationId::default(),
+            id: RequestId("req_post_message".into()),
             operation: OperationId("http.post".into()),
             input: serde_json::json!({
                 "path": format!("/channels/{}/messages", channel_id),
