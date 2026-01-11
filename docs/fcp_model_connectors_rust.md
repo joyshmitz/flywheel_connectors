@@ -585,8 +585,16 @@ pub struct TransportCaps {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub name: String,
+    pub version: Option<String>,
+    pub build: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
     pub protocol_version: String,
+    pub host: Option<HostInfo>,
     pub zone: ZoneId,
     pub zone_dir: Option<String>,
     pub capabilities_requested: Vec<CapabilityId>,
@@ -1580,6 +1588,7 @@ mod tests {
         let instance_id = InstanceId("inst_test".into());
         connector.handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
+            host: None,
             zone: ZoneId("test".into()),
             zone_dir: None,
             capabilities_requested: vec![CapabilityId("http.get".into())],
@@ -1631,6 +1640,7 @@ mod tests {
         let instance_id = InstanceId("inst_test".into());
         connector.handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
+            host: None,
             zone: ZoneId("test".into()),
             zone_dir: None,
             capabilities_requested: vec![CapabilityId("http.post".into())],
