@@ -281,6 +281,14 @@ pub struct FcpErrorResponse {
     pub ai_recovery_hint: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorResponse {
+    /// Must be "error"
+    pub r#type: String,
+    pub id: RequestId,
+    pub error: FcpErrorResponse,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Identity Types
 // ─────────────────────────────────────────────────────────────────────────────
