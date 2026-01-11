@@ -386,6 +386,7 @@ impl CapabilityVerifier {
     pub fn verify(
         &self,
         token: &CapabilityToken,
+        capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
     ) -> FcpResult<()> {
@@ -413,9 +414,14 @@ impl CapabilityVerifier {
                 });
             }
         }
-        let op_allowed = token.caps.iter().any(|c| match &c.operation {
-            Some(op) => op == operation,
-            None => c.capability.0 == operation.0,
+        let op_allowed = token.caps.iter().any(|c| {
+            if &c.capability != capability {
+                return false;
+            }
+            match &c.operation {
+                Some(op) => op == operation,
+                None => true,
+            }
         });
         if !op_allowed {
             return Err(FcpError::CapabilityDenied {
@@ -1292,7 +1298,12 @@ impl RequestResponse for RequestResponseConnector {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(&req.capability_token, &req.operation, &[])?;
+        verifier.verify(
+            &req.capability_token,
+            &CapabilityId(req.operation.0.clone()),
+            &req.operation,
+            &[],
+        )?;
         
         // Rate limit check
         self.check_rate_limit().await?;
@@ -2585,7 +2596,12 @@ impl FcpConnector for BidirectionalConnector {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(&req.capability_token, &req.operation, &[])?;
+        verifier.verify(
+            &req.capability_token,
+            &CapabilityId(req.operation.0.clone()),
+            &req.operation,
+            &[],
+        )?;
 
         match req.operation.0.as_str() {
             "channel.send" => {
@@ -2662,7 +2678,12 @@ impl Bidirectional for BidirectionalConnector {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(token, &OperationId("channel.send".into()), &[])?;
+        verifier.verify(
+            token,
+            &CapabilityId("channel.send".into()),
+            &OperationId("channel.send".into()),
+            &[],
+        )?;
         
         let tx = self.outbound_tx.as_ref().ok_or(FcpError::Connector {
             code: 5003,
@@ -2697,7 +2718,12 @@ impl Bidirectional for BidirectionalConnector {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(token, &OperationId("channel.request".into()), &[])?;
+        verifier.verify(
+            token,
+            &CapabilityId("channel.request".into()),
+            &OperationId("channel.request".into()),
+            &[],
+        )?;
         
         let tx = self.outbound_tx.as_ref().ok_or(FcpError::Connector {
             code: 5003,
@@ -3304,7 +3330,12 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(&req.capability_token, &req.operation, &[])?;
+        verifier.verify(
+            &req.capability_token,
+            &CapabilityId(req.operation.0.clone()),
+            &req.operation,
+            &[],
+        )?;
 
         match req.operation.0.as_str() {
             "poll.start" => {
@@ -3445,7 +3476,12 @@ impl<F: PollSource, S: CursorStore> Polling for PollingConnector<F, S> {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(token, &OperationId("poll.start".into()), &[])?;
+        verifier.verify(
+            token,
+            &CapabilityId("poll.start".into()),
+            &OperationId("poll.start".into()),
+            &[],
+        )?;
         
         if let Some(ref tx) = self.control_tx {
             tx.send(PollCommand::Start {
@@ -3469,7 +3505,12 @@ impl<F: PollSource, S: CursorStore> Polling for PollingConnector<F, S> {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(token, &OperationId("poll.stop".into()), &[])?;
+        verifier.verify(
+            token,
+            &CapabilityId("poll.stop".into()),
+            &OperationId("poll.stop".into()),
+            &[],
+        )?;
         
         if let Some(ref tx) = self.control_tx {
             let _ = tx.send(PollCommand::Stop {
@@ -3486,7 +3527,12 @@ impl<F: PollSource, S: CursorStore> Polling for PollingConnector<F, S> {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(token, &OperationId("poll.immediate".into()), &[])?;
+        verifier.verify(
+            token,
+            &CapabilityId("poll.immediate".into()),
+            &OperationId("poll.immediate".into()),
+            &[],
+        )?;
         
         // Direct poll without going through the loop
         // Implementation would trigger immediate poll and return count
@@ -3987,7 +4033,12 @@ impl FcpConnector for WebhookConnector {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(&req.capability_token, &req.operation, &[])?;
+        verifier.verify(
+            &req.capability_token,
+            &CapabilityId(req.operation.0.clone()),
+            &req.operation,
+            &[],
+        )?;
 
         match req.operation.0.as_str() {
             "webhook.register" => {
@@ -4071,7 +4122,12 @@ impl Webhook for WebhookConnector {
             message: "Connector not handshaken".into(),
             retryable: false,
         })?;
-        verifier.verify(token, &OperationId("webhook.register".into()), &[])?;
+        verifier.verify(
+            token,
+            &CapabilityId("webhook.register".into()),
+            &OperationId("webhook.register".into()),
+            &[],
+        )?;
         
         let mut handlers = self.handlers.write().await;
         handlers.insert(source.to_string(), Box::new(handler));
@@ -4434,7 +4490,12 @@ impl Browser for BrowserConnector {
                 message: "Connector not handshaken".into(),
                 retryable: false,
             })?
-            .verify(token, &OperationId("browser.new_page".into()), &[])?;
+            .verify(
+                token,
+                &CapabilityId("browser.new_page".into()),
+                &OperationId("browser.new_page".into()),
+                &[],
+            )?;
         
         let page_id = Uuid::new_v4().to_string();
         
@@ -4453,7 +4514,12 @@ impl Browser for BrowserConnector {
                 message: "Connector not handshaken".into(),
                 retryable: false,
             })?
-            .verify(token, &OperationId("browser.close_page".into()), &[])?;
+            .verify(
+                token,
+                &CapabilityId("browser.close_page".into()),
+                &OperationId("browser.close_page".into()),
+                &[],
+            )?;
         
         let mut pages = self.pages.write().await;
         pages.remove(page_id).ok_or(FcpError::Connector {
@@ -4479,7 +4545,12 @@ impl Browser for BrowserConnector {
                 message: "Connector not handshaken".into(),
                 retryable: false,
             })?
-            .verify(token, &OperationId("browser.execute".into()), &[])?;
+            .verify(
+                token,
+                &CapabilityId("browser.execute".into()),
+                &OperationId("browser.execute".into()),
+                &[],
+            )?;
         
         let start = std::time::Instant::now();
         self.actions_executed.fetch_add(1, Ordering::Relaxed);
@@ -4568,7 +4639,12 @@ impl Browser for BrowserConnector {
                         message: "Connector not handshaken".into(),
                         retryable: false,
                     })?
-                    .verify(token, &OperationId("browser.evaluate".into()), &[])?;
+                    .verify(
+                        token,
+                        &CapabilityId("browser.evaluate".into()),
+                        &OperationId("browser.evaluate".into()),
+                        &[],
+                    )?;
                 
                 Ok(serde_json::json!({
                     "result": null
@@ -4697,7 +4773,12 @@ impl Browser for BrowserConnector {
                 message: "Connector not handshaken".into(),
                 retryable: false,
             })?
-            .verify(token, &OperationId("browser.query".into()), &[])?;
+            .verify(
+                token,
+                &CapabilityId("browser.query".into()),
+                &OperationId("browser.query".into()),
+                &[],
+            )?;
         
         // In real implementation, would query DOM
         Ok(vec![])
@@ -4728,7 +4809,12 @@ impl Browser for BrowserConnector {
                 message: "Connector not handshaken".into(),
                 retryable: false,
             })?
-            .verify(token, &OperationId("browser.intercept".into()), &[])?;
+            .verify(
+                token,
+                &CapabilityId("browser.intercept".into()),
+                &OperationId("browser.intercept".into()),
+                &[],
+            )?;
         
         // In real implementation, would set up request interception
         Ok(())
