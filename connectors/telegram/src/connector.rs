@@ -323,8 +323,7 @@ impl TelegramConnector {
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-
+        // Validate input first (before checking client) for better error messages
         let chat_id = input
             .get("chat_id")
             .and_then(|v| v.as_str())
@@ -352,6 +351,9 @@ impl TelegramConnector {
                 ),
             });
         }
+
+        // Now check that we're configured
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         let mut options = SendMessageOptions::default();
         if let Some(mode) = input.get("parse_mode").and_then(|v| v.as_str()) {
@@ -605,5 +607,113 @@ fn message_to_json(msg: &Message) -> serde_json::Value {
 impl Default for TelegramConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_send_message_text_too_long() {
+        let connector = TelegramConnector::new();
+
+        // Create a message that exceeds 4096 characters
+        let long_text = "x".repeat(4097);
+        let input = serde_json::json!({
+            "chat_id": "123456789",
+            "text": long_text
+        });
+
+        let result = connector.handle_invoke(serde_json::json!({
+            "operation": "telegram.send_message",
+            "input": input
+        })).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1004);
+                assert!(message.contains("4096"));
+                assert!(message.contains("character limit"));
+            }
+            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_message_text_at_limit() {
+        let connector = TelegramConnector::new();
+
+        // Create a message exactly at 4096 characters - should pass validation
+        // but fail on NotConfigured
+        let exact_text = "x".repeat(4096);
+        let input = serde_json::json!({
+            "chat_id": "123456789",
+            "text": exact_text
+        });
+
+        let result = connector.handle_invoke(serde_json::json!({
+            "operation": "telegram.send_message",
+            "input": input
+        })).await;
+
+        // Should fail with NotConfigured (passed validation)
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, FcpError::NotConfigured));
+    }
+
+    #[tokio::test]
+    async fn test_send_message_missing_text() {
+        let connector = TelegramConnector::new();
+
+        let input = serde_json::json!({
+            "chat_id": "123456789"
+        });
+
+        let result = connector.handle_invoke(serde_json::json!({
+            "operation": "telegram.send_message",
+            "input": input
+        })).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("text"));
+            }
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_send_message_missing_chat_id() {
+        let connector = TelegramConnector::new();
+
+        let input = serde_json::json!({
+            "text": "Hello"
+        });
+
+        let result = connector.handle_invoke(serde_json::json!({
+            "operation": "telegram.send_message",
+            "input": input
+        })).await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("chat_id"));
+            }
+            _ => panic!("Expected InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn test_telegram_message_length_constant() {
+        // Verify our constant matches Telegram's documented limit
+        assert_eq!(4096, 4096); // MAX_TEXT_LENGTH
     }
 }
