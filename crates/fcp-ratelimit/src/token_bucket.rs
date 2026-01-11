@@ -84,13 +84,31 @@ impl TokenBucket {
 
         if elapsed >= self.refill_interval {
             // Calculate how many refill periods have passed
-            let periods = (elapsed.as_nanos() / self.refill_interval.as_nanos()) as u32;
+            // Use saturating conversion to avoid overflow with large elapsed times
+            let periods = (elapsed.as_nanos() / self.refill_interval.as_nanos())
+                .try_into()
+                .unwrap_or(u32::MAX);
             let tokens_to_add = periods.saturating_mul(self.refill_amount);
 
-            // Add tokens up to capacity
-            let current = self.tokens.load(Ordering::Acquire);
-            let new_tokens = current.saturating_add(tokens_to_add).min(self.capacity);
-            self.tokens.store(new_tokens, Ordering::Release);
+            // Add tokens up to capacity using compare_exchange to avoid race with try_acquire
+            loop {
+                let current = self.tokens.load(Ordering::Acquire);
+                let new_tokens = current.saturating_add(tokens_to_add).min(self.capacity);
+
+                // If already at or above capacity after adding, just break
+                if new_tokens == current {
+                    break;
+                }
+
+                if self
+                    .tokens
+                    .compare_exchange(current, new_tokens, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    break;
+                }
+                // CAS failed, retry with fresh value
+            }
 
             // Update last refill time
             *last_refill = now;

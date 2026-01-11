@@ -13,6 +13,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// Wraps wiremock with convenience methods for common patterns.
 pub struct MockApiServer {
     server: MockServer,
+    /// Recorded requests for manual inspection (future use).
+    #[allow(dead_code)]
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
