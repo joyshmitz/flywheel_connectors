@@ -341,6 +341,18 @@ impl TelegramConnector {
                 message: "Missing text".into(),
             })?;
 
+        // Validate message text length (Telegram limit: 4096 characters)
+        const MAX_TEXT_LENGTH: usize = 4096;
+        if text.len() > MAX_TEXT_LENGTH {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!(
+                    "Message text exceeds {MAX_TEXT_LENGTH} character limit (got {} characters)",
+                    text.len()
+                ),
+            });
+        }
+
         let mut options = SendMessageOptions::default();
         if let Some(mode) = input.get("parse_mode").and_then(|v| v.as_str()) {
             options.parse_mode = Some(mode.into());
