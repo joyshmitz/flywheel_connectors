@@ -1589,7 +1589,7 @@ mod tests {
         connector.handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
             host: None,
-            zone: ZoneId("test".into()),
+            zone: ZoneId("z:test".into()),
             zone_dir: None,
             capabilities_requested: vec![CapabilityId("http.get".into())],
             nonce: [0u8; 32],
@@ -1601,7 +1601,7 @@ mod tests {
         let token = CapabilityToken {
             jti: Uuid::new_v4(),
             sub: PrincipalId("tester".into()),
-            iss: ZoneId("test".into()),
+            iss: ZoneId("z:test".into()),
             aud: ConnectorId("test".into()),
             instance: Some(instance_id),
             iat: 0,
@@ -1641,7 +1641,7 @@ mod tests {
         connector.handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
             host: None,
-            zone: ZoneId("test".into()),
+            zone: ZoneId("z:test".into()),
             zone_dir: None,
             capabilities_requested: vec![CapabilityId("http.post".into())],
             nonce: [0u8; 32],
@@ -1653,7 +1653,7 @@ mod tests {
         let token = CapabilityToken {
             jti: Uuid::new_v4(),
             sub: PrincipalId("tester".into()),
-            iss: ZoneId("test".into()),
+            iss: ZoneId("z:test".into()),
             aud: ConnectorId("test".into()),
             instance: Some(instance_id),
             iat: 0,
