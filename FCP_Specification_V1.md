@@ -2086,3 +2086,223 @@ Flow:
    - cross-zone flow: follow `default_deny`
 
 Hubs SHOULD emit structured audit events for denials, elevation/approval requirements, and flow decisions (including applied transforms).
+
+### Appendix I: FZPF v0.1 JSON Schema (Formal)
+
+This schema validates the FZPF policy file after parsing (TOML → JSON object).
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flywheel.dev/schemas/fzpf-0.1.schema.json",
+  "title": "Flywheel Zone Policy Format (FZPF) v0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["policy", "zones"],
+  "properties": {
+    "policy": { "$ref": "#/$defs/policy_header" },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "zones": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/zone" }
+    },
+    "flows": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/flow_rule" }
+    },
+    "taint_rules": {
+      "type": "array",
+      "default": [],
+      "items": { "$ref": "#/$defs/taint_rule" }
+    }
+  },
+  "$defs": {
+    "nonempty_string": { "type": "string", "minLength": 1 },
+    "glob_string": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "zone_id": {
+      "type": "string",
+      "pattern": "^z:[a-z][a-z0-9:-]*$",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "taint_level": {
+      "type": "string",
+      "enum": ["Untainted", "Tainted", "HighlyTainted"]
+    },
+    "policy_header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "schema_version", "default_deny"],
+      "properties": {
+        "format": { "const": "fzpf" },
+        "schema_version": { "const": "0.1" },
+        "policy_id": { "$ref": "#/$defs/nonempty_string" },
+        "last_updated": { "$ref": "#/$defs/nonempty_string" },
+        "default_deny": { "type": "boolean" }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taint": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "require_elevation_min_risk": { "$ref": "#/$defs/risk_level" },
+            "require_interactive_approval_min_risk": { "$ref": "#/$defs/risk_level" }
+          }
+        }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "trust_level"],
+      "properties": {
+        "id": { "$ref": "#/$defs/zone_id" },
+        "name": { "$ref": "#/$defs/nonempty_string" },
+        "description": { "$ref": "#/$defs/nonempty_string" },
+        "trust_level": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "principals_allow": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "principals_deny": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "connectors_allow": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "connectors_deny": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "cap_allow": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "cap_deny": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "metadata": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "flow_kind": {
+      "type": "string",
+      "enum": ["ingress", "egress", "both"]
+    },
+    "flow_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "kind", "allow"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonempty_string" },
+        "from": { "$ref": "#/$defs/glob_string" },
+        "to": { "$ref": "#/$defs/glob_string" },
+        "kind": { "$ref": "#/$defs/flow_kind" },
+        "allow": { "type": "boolean" },
+        "transform": { "$ref": "#/$defs/nonempty_string" },
+        "audit": { "type": "boolean", "default": true }
+      }
+    },
+    "approval_mode": {
+      "type": "string",
+      "enum": ["interactive", "policy"]
+    },
+    "taint_action_type": {
+      "type": "string",
+      "enum": ["deny", "require_elevation", "require_approval"]
+    },
+    "taint_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "$ref": "#/$defs/taint_action_type" },
+        "ttl_seconds": { "type": "integer", "minimum": 0, "maximum": 86400 },
+        "mode": { "$ref": "#/$defs/approval_mode" },
+        "reason": { "$ref": "#/$defs/nonempty_string" }
+      }
+    },
+    "taint_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "action"],
+      "properties": {
+        "name": { "$ref": "#/$defs/nonempty_string" },
+        "min_taint": { "$ref": "#/$defs/taint_level" },
+        "min_risk": { "$ref": "#/$defs/risk_level" },
+        "when_origin_trust_lt_target": { "type": "boolean", "default": false },
+        "origin_zone_patterns": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "target_zone_patterns": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "capability_patterns": { "type": "array", "default": [], "items": { "$ref": "#/$defs/glob_string" } },
+        "action": { "$ref": "#/$defs/taint_action" }
+      }
+    }
+  }
+}
+```
+
+### Appendix J: Golden Decision Test Vectors (FZPF v0.1)
+
+These vectors assume the example policy in Section 6.10 and the algorithm in Appendix H.
+
+**Vector 1: public web search (allow)**
+```
+principal = "p:public:user_1"
+connector_id = "fcp.web"
+capability = "web.search"
+operation_risk = "low"
+origin_zone = "z:public"
+origin_taint = "Tainted"
+target_zone = "z:public"
+has_elevation = false
+has_interactive_approval = false
+has_policy_approval = false
+→ ALLOW
+```
+
+**Vector 2: public → private email send without elevation (require elevation)**
+```
+principal = "p:public:user_1"
+connector_id = "fcp.gmail"
+capability = "email.send"
+operation_risk = "medium"
+origin_zone = "z:public"
+origin_taint = "Tainted"
+target_zone = "z:private"
+has_elevation = false
+has_interactive_approval = false
+has_policy_approval = false
+→ REQUIRE_ELEVATION (ttl_seconds = 300)
+```
+
+**Vector 3: public → private email send with elevation (allow)**
+```
+principal = "p:owner:me"
+connector_id = "fcp.gmail"
+capability = "email.send"
+operation_risk = "medium"
+origin_zone = "z:public"
+origin_taint = "Tainted"
+target_zone = "z:private"
+has_elevation = true
+has_interactive_approval = false
+has_policy_approval = false
+→ ALLOW
+```
+
+**Vector 4: public → private system.exec (deny by cap_deny)**
+```
+principal = "p:owner:me"
+connector_id = "fcp.gmail"
+capability = "system.exec"
+operation_risk = "critical"
+origin_zone = "z:public"
+origin_taint = "HighlyTainted"
+target_zone = "z:private"
+has_elevation = true
+has_interactive_approval = true
+has_policy_approval = true
+→ DENY (cap_deny)
+```
+
+**Vector 5: private → public flow with redaction (allow + transform)**
+```
+from_zone = "z:private"
+to_zone = "z:public"
+kind = "egress"
+→ ALLOW (audit=true, transform="redact_secrets")
+```
