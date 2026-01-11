@@ -1,21 +1,22 @@
-# Flywheel Connector Protocol (FCP)
+# Flywheel Connectors
 
-A secure, modular, high-performance framework for integrating external services into AI agent ecosystems. FCP enables coding agents to safely interact with messaging platforms, cloud services, databases, and other external systems while maintaining strict security boundaries.
+Secure, high-performance Rust connectors for integrating external services into AI agent ecosystems.
+
+This project implements the **Flywheel Connector Protocol (FCP)** — a protocol specification plus a growing library of production-ready connectors that enable AI coding agents to safely interact with messaging platforms, cloud services, APIs, and databases while maintaining strict security boundaries.
 
 ---
 
 ## TL;DR
 
-**The Problem**: AI coding agents need to interact with external services (Telegram, Gmail, Discord, databases, cloud APIs), but current approaches either:
-- Commingle trust levels (a public Discord bot accessing private Gmail)
-- Rely on prompt-based security (trivially bypassed by injection)
-- Require custom integration code for each service
+**What we're building**: A comprehensive suite of Rust connectors for AI agents — Twitter, Linear, Stripe, YouTube, Telegram, Discord, Gmail, GitHub, browser automation, and more.
 
-**The Solution**: FCP provides a protocol for self-contained connector binaries that are:
-- **Zone-isolated**: Each connector instance binds to exactly one trust zone
-- **Capability-gated**: Operations require cryptographically-scoped tokens
-- **Mechanically enforced**: Security via type system and binary boundaries, not prompts
-- **Self-documenting**: Every operation includes AI hints and introspection
+**Why it matters**: Current multi-service integrations commingle trust levels (a public Discord message could trigger Gmail operations), rely on prompt-based security (trivially bypassed), or require custom integration code per service.
+
+**The approach**: Self-contained Rust binaries with:
+- **Zone isolation**: Each connector binds to exactly one trust domain
+- **Capability tokens**: Cryptographically-scoped authorization for every operation
+- **Mechanical security**: Enforced by type system and binary boundaries, not prompts
+- **Agent-native design**: Every operation is introspectable with AI hints
 
 ### Why Use FCP?
 
@@ -382,36 +383,41 @@ Each connector runs in isolation:
 
 ---
 
-## Planned Connectors
+## Connectors
 
-### Tier 1: Critical Infrastructure
+### Tier 1: Critical Infrastructure (Build First)
 
-| Connector | Archetype | Priority |
+These unlock entire categories of autonomous agent work.
+
+| Connector | Value | Archetype | Why Critical |
+|-----------|-------|-----------|--------------|
+| `fcp.twitter` | 98 | Request-Response + Streaming | Real-time information layer; social listening, posting, DMs |
+| `fcp.linear` | 97 | Request-Response + Webhook | Human↔agent task handoff; bi-directional Beads sync |
+| `fcp.stripe` | 96 | Request-Response + Webhook | Financial operations; invoicing, subscriptions, analytics |
+| `fcp.youtube` | 95 | Request-Response | Video transcripts, channel analytics, content research |
+| `fcp.browser` | 95 | Browser Automation | Universal adapter for any web service without API |
+| `fcp.telegram` | 94 | Bidirectional + Webhook | Real-time messaging, bot automation |
+| `fcp.discord` | 93 | Bidirectional + Webhook | Community management, server automation |
+
+### Tier 2: Productivity & Workspace
+
+| Connector | Archetype | Use Case |
 |-----------|-----------|----------|
-| `fcp.telegram` | Bidirectional + Webhook | Highest |
-| `fcp.discord` | Bidirectional + Webhook | Highest |
-| `fcp.gmail` | Polling + Request-Response | Highest |
-| `fcp.twitter` | Request-Response + Streaming | High |
-| `fcp.linear` | Request-Response + Webhook | High |
-| `fcp.github` | Request-Response + Webhook | High |
+| `fcp.gmail` | Polling + Request-Response | Email automation, inbox management |
+| `fcp.google_calendar` | Request-Response + Polling | Scheduling, availability |
+| `fcp.notion` | Request-Response | Knowledge base, documentation |
+| `fcp.github` | Request-Response + Webhook | Code review, issue management, CI/CD |
+| `fcp.slack` | Bidirectional | Team communication |
 
-### Tier 2: Productivity & Storage
+### Tier 3: Infrastructure & Data
 
-| Connector | Archetype | Priority |
+| Connector | Archetype | Use Case |
 |-----------|-----------|----------|
-| `fcp.notion` | Request-Response | Medium |
-| `fcp.google_calendar` | Request-Response + Polling | Medium |
-| `fcp.s3` | File/Blob | Medium |
-| `fcp.postgresql` | Database | Medium |
-
-### Tier 3: Extended Ecosystem
-
-| Connector | Archetype | Priority |
-|-----------|-----------|----------|
-| `fcp.stripe` | Request-Response + Webhook | Medium |
-| `fcp.twilio` | Request-Response + Webhook | Lower |
-| `fcp.slack` | Bidirectional | Lower |
-| `fcp.elasticsearch` | Database | Lower |
+| `fcp.s3` | File/Blob | Cloud storage operations |
+| `fcp.postgresql` | Database | Direct database queries |
+| `fcp.elasticsearch` | Database | Search and analytics |
+| `fcp.redis` | Queue/Pub-Sub | Caching, message queues |
+| `fcp.whisper` | CLI/Process | Voice transcription |
 
 ---
 
@@ -437,32 +443,29 @@ Each connector runs in isolation:
 
 ---
 
-## Project Structure
+## Project Structure (Planned)
 
 ```
 flywheel_connectors/
-├── fcp-core/              # Core FCP types and traits
-│   └── src/
-│       ├── lib.rs         # Public API
-│       ├── error.rs       # Error taxonomy
-│       ├── capability.rs  # Capability system
-│       ├── zone.rs        # Zone definitions
-│       └── protocol.rs    # Wire protocol
-├── fcp-gateway/           # Gateway implementation
-│   └── src/
-│       ├── main.rs        # Gateway binary
-│       ├── supervisor.rs  # Connector lifecycle
-│       └── ipc.rs         # IPC hub
-├── connectors/            # Individual connectors
+├── crates/
+│   ├── fcp-core/          # Core types: zones, capabilities, provenance, errors
+│   ├── fcp-protocol/      # Wire protocol: CBOR framing, JSON-RPC compat
+│   ├── fcp-manifest/      # Manifest parsing and validation
+│   ├── fcp-sdk/           # SDK for building connectors
+│   ├── fcp-host/          # Hub/Gateway implementation
+│   └── fcp-cli/           # CLI tools (fcp install, fcp doctor, etc.)
+│
+├── connectors/            # Individual connector implementations
+│   ├── twitter/
+│   ├── linear/
+│   ├── stripe/
 │   ├── telegram/
 │   ├── discord/
-│   ├── gmail/
 │   └── ...
-├── fcp-sdk/               # SDK for building connectors
-│   └── src/
-│       ├── lib.rs
-│       └── macros.rs      # Derive macros for manifests
-└── docs/                  # Specifications and design docs
+│
+├── FCP_Specification_V1.md   # Protocol specification
+├── AGENTS.md                 # AI coding agent guidelines
+└── README.md
 ```
 
 ---
