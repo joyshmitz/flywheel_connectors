@@ -16,7 +16,7 @@ use crate::{
     api::DiscordApiClient,
     config::DiscordConfig,
     error::{DiscordError, DiscordResult},
-    types::{GatewayHello, GatewayIdentify, GatewayPayload, GatewayProperties, GatewayReady},
+    types::{GatewayHello, GatewayIdentify, GatewayPayload, GatewayProperties, GatewayReady, GatewayResume},
 };
 
 /// Discord Gateway opcodes.
@@ -73,6 +73,8 @@ impl TryFrom<i32> for GatewayOpcode {
 pub enum GatewayEvent {
     /// Ready event - we're connected.
     Ready(GatewayReady),
+    /// Resumed event - session successfully resumed.
+    Resumed,
     /// Message created.
     MessageCreate(serde_json::Value),
     /// Message updated.
@@ -114,17 +116,50 @@ impl GatewayConnection {
         }
     }
 
+    /// Update session state from a READY event.
+    /// Call this when receiving a READY event to enable session resumption.
+    pub fn update_session(&mut self, session_id: String, resume_url: String) {
+        self.session_id = Some(session_id);
+        self.resume_url = Some(resume_url);
+    }
+
+    /// Update the sequence number.
+    /// Should be called for each dispatch event received.
+    pub fn update_sequence(&mut self, sequence: u64) {
+        self.sequence = Some(sequence);
+    }
+
+    /// Clear session state (e.g., after InvalidSession with resumable=false).
+    pub fn clear_session(&mut self) {
+        self.session_id = None;
+        self.resume_url = None;
+        self.sequence = None;
+    }
+
+    /// Check if we have a resumable session.
+    pub fn can_resume(&self) -> bool {
+        self.session_id.is_some() && self.sequence.is_some()
+    }
+
     /// Connect to the gateway and start receiving events.
+    /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
     pub async fn connect(
         &mut self,
     ) -> DiscordResult<mpsc::Receiver<GatewayEvent>> {
-        let gateway_url = self.get_gateway_url().await?;
+        // Use resume_url if we have one (from previous READY), otherwise get fresh URL
+        let gateway_url = if let Some(ref url) = self.resume_url {
+            info!(url = %url, "Using resume gateway URL");
+            url.clone()
+        } else {
+            self.get_gateway_url().await?
+        };
+
         let (event_tx, event_rx) = mpsc::channel(256);
 
         // Connect to gateway
         let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
-        info!(url = %ws_url, "Connecting to Discord gateway");
+        info!(url = %ws_url, resuming = self.session_id.is_some(), "Connecting to Discord gateway");
 
         let (ws_stream, _) = connect_async(&ws_url)
             .await
@@ -167,13 +202,14 @@ async fn run_gateway_loop(
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     config: DiscordConfig,
     event_tx: mpsc::Sender<GatewayEvent>,
-    _session_id: Option<String>,  // TODO: Implement resume with session_id
+    session_id: Option<String>,
     mut sequence: Option<u64>,
     _resume_url: Option<String>,
 ) -> DiscordResult<()> {
     let (mut write, mut read) = ws_stream.split();
-    // Track session_id for future resume support (currently unused)
-    let mut _tracked_session_id = _session_id;
+    // Track session state for potential reconnection (used for logging and future reconnection support)
+    let mut _tracked_session_id = session_id.clone();
+    let mut _tracked_resume_url: Option<String> = None;
 
     // Wait for Hello
     let hello = match read.next().await {
@@ -199,29 +235,53 @@ async fn run_gateway_loop(
     let heartbeat_interval = Duration::from_millis(hello.heartbeat_interval);
     debug!(interval_ms = hello.heartbeat_interval, "Received Hello");
 
-    // Send Identify
-    let identify = GatewayIdentify {
-        token: config.bot_token.clone(),
-        intents: config.intents,
-        properties: GatewayProperties {
-            os: std::env::consts::OS.into(),
-            browser: "fcp-discord".into(),
-            device: "fcp-discord".into(),
-        },
-        shard: config.shard.as_ref().map(|s| [s.shard_id, s.shard_count]),
-    };
+    // Send Resume if we have a session, otherwise Identify
+    if let (Some(sess_id), Some(seq)) = (&session_id, sequence) {
+        // We have a session to resume
+        info!(session_id = %sess_id, sequence = seq, "Attempting to resume session");
 
-    let identify_payload = GatewayPayload {
-        op: GatewayOpcode::Identify as i32,
-        d: Some(serde_json::to_value(&identify)?),
-        s: None,
-        t: None,
-    };
+        let resume = GatewayResume {
+            token: config.bot_token.clone(),
+            session_id: sess_id.clone(),
+            seq,
+        };
 
-    write
-        .send(WsMessage::Text(serde_json::to_string(&identify_payload)?.into()))
-        .await
-        .map_err(|e| DiscordError::Gateway(format!("Failed to send Identify: {e}")))?;
+        let resume_payload = GatewayPayload {
+            op: GatewayOpcode::Resume as i32,
+            d: Some(serde_json::to_value(&resume)?),
+            s: None,
+            t: None,
+        };
+
+        write
+            .send(WsMessage::Text(serde_json::to_string(&resume_payload)?.into()))
+            .await
+            .map_err(|e| DiscordError::Gateway(format!("Failed to send Resume: {e}")))?;
+    } else {
+        // Fresh connection - send Identify
+        let identify = GatewayIdentify {
+            token: config.bot_token.clone(),
+            intents: config.intents,
+            properties: GatewayProperties {
+                os: std::env::consts::OS.into(),
+                browser: "fcp-discord".into(),
+                device: "fcp-discord".into(),
+            },
+            shard: config.shard.as_ref().map(|s| [s.shard_id, s.shard_count]),
+        };
+
+        let identify_payload = GatewayPayload {
+            op: GatewayOpcode::Identify as i32,
+            d: Some(serde_json::to_value(&identify)?),
+            s: None,
+            t: None,
+        };
+
+        write
+            .send(WsMessage::Text(serde_json::to_string(&identify_payload)?.into()))
+            .await
+            .map_err(|e| DiscordError::Gateway(format!("Failed to send Identify: {e}")))?;
+    }
 
     // Main event loop
     let mut heartbeat_acked = true;
@@ -274,8 +334,17 @@ async fn run_gateway_loop(
                                     "READY" => {
                                         let ready: GatewayReady = serde_json::from_value(data)?;
                                         _tracked_session_id = Some(ready.session_id.clone());
-                                        info!(user = ?ready.user.username, "Gateway ready");
+                                        _tracked_resume_url = Some(ready.resume_gateway_url.clone());
+                                        info!(
+                                            user = ?ready.user.username,
+                                            session_id = %ready.session_id,
+                                            "Gateway ready"
+                                        );
                                         GatewayEvent::Ready(ready)
+                                    }
+                                    "RESUMED" => {
+                                        info!("Session resumed successfully");
+                                        GatewayEvent::Resumed
                                     }
                                     "MESSAGE_CREATE" => GatewayEvent::MessageCreate(data),
                                     "MESSAGE_UPDATE" => GatewayEvent::MessageUpdate(data),
@@ -305,8 +374,11 @@ async fn run_gateway_loop(
                                 let resumable = payload.d.and_then(|v| v.as_bool()).unwrap_or(false);
                                 warn!(resumable, "Session invalidated");
                                 if !resumable {
+                                    // Clear session state - must re-identify
                                     _tracked_session_id = None;
+                                    _tracked_resume_url = None;
                                 }
+                                // TODO: Implement automatic reconnection with resume if resumable
                                 break;
                             }
                             Ok(GatewayOpcode::Heartbeat) => {

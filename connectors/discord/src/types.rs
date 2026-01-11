@@ -303,6 +303,17 @@ pub struct GatewayHello {
     pub heartbeat_interval: u64,
 }
 
+/// Gateway resume payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayResume {
+    /// Bot token
+    pub token: String,
+    /// Session ID from READY event
+    pub session_id: String,
+    /// Last sequence number received
+    pub seq: u64,
+}
+
 /// Create message request.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateMessage {

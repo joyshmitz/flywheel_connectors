@@ -728,6 +728,11 @@ fn gateway_event_to_fcp(
             });
             ("discord.ready", payload, ("bot".into(), ready.user.id.clone()))
         }
+        GatewayEvent::Resumed => {
+            // Session resumed - this is an internal state event, emit as system event
+            let payload = json!({ "event": "session_resumed" });
+            ("discord.resumed", payload, ("system".into(), "gateway".into()))
+        }
         GatewayEvent::MessageCreate(data) => {
             let author_id = data.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()).unwrap_or("unknown");
             let author_name = data.get("author").and_then(|a| a.get("username")).and_then(|v| v.as_str());
