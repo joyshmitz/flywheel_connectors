@@ -4,6 +4,7 @@ members = [
     "crates/fcp-core",
     "crates/fcp-oauth",
     "crates/fcp-ratelimit",
+    "crates/fcp-streaming",
     "crates/fcp-telemetry",
     "crates/fcp-testkit",
     "connectors/telegram",

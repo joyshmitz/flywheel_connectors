@@ -545,6 +545,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-streaming"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "fcp-core",
+ "futures-util",
+ "pin-project-lite",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-telegram"
 version = "0.1.0"
 dependencies = [
