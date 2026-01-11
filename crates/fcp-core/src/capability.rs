@@ -322,7 +322,8 @@ impl CapabilityVerifier {
         self.verify_signature(token)?;
 
         // Check expiry
-        let now = chrono::Utc::now().timestamp() as u64;
+        // Use try_from to safely handle negative timestamps (before Unix epoch)
+        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
         if token.exp <= now {
             return Err(FcpError::TokenExpired);
         }

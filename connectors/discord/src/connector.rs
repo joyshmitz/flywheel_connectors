@@ -399,6 +399,84 @@ impl DiscordConnector {
             });
         }
 
+        // Validate message content length (Discord limit: 2000 characters)
+        const MAX_CONTENT_LENGTH: usize = 2000;
+        if let Some(content) = content {
+            if content.len() > MAX_CONTENT_LENGTH {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
+                        content.len()
+                    ),
+                });
+            }
+        }
+
+        // Validate embed limits
+        if let Some(ref embeds) = embeds {
+            const MAX_EMBEDS: usize = 10;
+            const MAX_EMBED_TOTAL_CHARS: usize = 6000;
+            const MAX_EMBED_TITLE: usize = 256;
+            const MAX_EMBED_DESCRIPTION: usize = 4096;
+
+            if embeds.len() > MAX_EMBEDS {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Too many embeds: {MAX_EMBEDS} maximum, got {}",
+                        embeds.len()
+                    ),
+                });
+            }
+
+            let mut total_chars = 0;
+            for (i, embed) in embeds.iter().enumerate() {
+                if let Some(ref title) = embed.title {
+                    if title.len() > MAX_EMBED_TITLE {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Embed {} title exceeds {MAX_EMBED_TITLE} character limit",
+                                i + 1
+                            ),
+                        });
+                    }
+                    total_chars += title.len();
+                }
+                if let Some(ref desc) = embed.description {
+                    if desc.len() > MAX_EMBED_DESCRIPTION {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Embed {} description exceeds {MAX_EMBED_DESCRIPTION} character limit",
+                                i + 1
+                            ),
+                        });
+                    }
+                    total_chars += desc.len();
+                }
+                for field in &embed.fields {
+                    total_chars += field.name.len() + field.value.len();
+                }
+                if let Some(ref footer) = embed.footer {
+                    total_chars += footer.text.len();
+                }
+                if let Some(ref author) = embed.author {
+                    total_chars += author.name.len();
+                }
+            }
+
+            if total_chars > MAX_EMBED_TOTAL_CHARS {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Total embed content exceeds {MAX_EMBED_TOTAL_CHARS} character limit (got {total_chars} characters)",
+                    ),
+                });
+            }
+        }
+
         let message = api
             .create_message(channel_id, content, embeds, reply_to)
             .await
