@@ -1039,6 +1039,7 @@ Content-Type: application/json\r\n
 ```
 
 The JSON-RPC payload SHOULD include a `meta` object with `correlation_id`, `zone_id`, `principal`, and `deadline_ms`.
+If distributed tracing is enabled, `meta.trace` SHOULD include `trace_id` and `span_id` (W3C-compatible) and MAY include `parent_span_id`.
 
 ### 9.2 Transport Options
 
@@ -1230,6 +1231,7 @@ Connectors SHOULD use standard event classes such as:
 - If buffers fill, connectors MUST apply an explicit policy: pause, drop non-critical events (with audit), or emit `connector.stream.reset`
 - Critical events MUST NOT be silently dropped; if loss is unavoidable, emit a drop audit event or `connector.stream.reset`
 - If `requires_ack` is true, the Hub MUST send `ack` before `ack_deadline_ms` or the connector MAY retry or drop according to policy
+- Recommended: retry up to 3 times with exponential backoff; if still unacked, emit an audit event (delivery failure) and mark the stream as degraded until recovery
 
 Example subscribe request/response:
 
