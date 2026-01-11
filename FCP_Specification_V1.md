@@ -1231,6 +1231,33 @@ Connectors SHOULD use standard event classes such as:
 - Critical events MUST NOT be silently dropped; if loss is unavoidable, emit a drop audit event or `connector.stream.reset`
 - If `requires_ack` is true, the Hub MUST send `ack` before `ack_deadline_ms` or the connector MAY retry or drop according to policy
 
+Example subscribe request/response:
+
+```json
+{
+  "type": "subscribe",
+  "id": "req_sub_1",
+  "topics": ["connector.message.inbound"],
+  "since": "cursor_01JH...",
+  "max_events_per_sec": 500,
+  "batch_ms": 50,
+  "window_size": 1000
+}
+```
+
+```json
+{
+  "type": "response",
+  "id": "req_sub_1",
+  "result": {
+    "confirmed_topics": ["connector.message.inbound"],
+    "cursors": { "connector.message.inbound": "cursor_01JH..." },
+    "replay_supported": true,
+    "buffer": { "min_events": 10000, "overflow": "stream.reset" }
+  }
+}
+```
+
 ### 9.10 Handshake Protocol
 
 ```
@@ -1285,6 +1312,8 @@ Connector MUST reject handshake if:
 - `host_public_key` is missing while capability verification is required
 - A persistent-storage connector is missing a valid `zone_dir`
 
+After a successful handshake, the connector instance MUST remain bound to the declared zone (and `zone_dir` if provided) for its lifetime.
+
 ### 9.11 Error Response Format
 
 Errors MUST be structured and SHOULD include agent-usable remediation:
@@ -1337,7 +1366,7 @@ Health checks are Hub-initiated unless the connector advertises push health.
   "status": "ready",
   "uptime_ms": 123456,
   "load": { "cpu": 0.05, "mem_mb": 42 },
-  "details": { "last_error": null },
+  "details": { "last_error": null, "dependencies": { "api.telegram.org": "ok" } },
   "rate_limit": { "remaining": 120, "reset_ms": 60000 }
 }
 ```
