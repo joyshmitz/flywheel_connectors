@@ -413,11 +413,9 @@ impl CapabilityVerifier {
                 });
             }
         }
-        let op_allowed = token.caps.iter().any(|c| {
-            match &c.operation {
-                Some(op) => op == operation,
-                None => true,
-            }
+        let op_allowed = token.caps.iter().any(|c| match &c.operation {
+            Some(op) => op == operation,
+            None => c.capability.0 == operation.0,
         });
         if !op_allowed {
             return Err(FcpError::CapabilityDenied {
