@@ -1221,6 +1221,8 @@ Connectors SHOULD use standard event classes such as:
 - `connector.file.changed` / `connector.sync.completed`
 - `connector.auth.state_changed` / `connector.auth.action_required`
 
+Event topics MUST be connector-defined but namespaced to avoid collisions. Recommended prefixes: `connector.<connector_id>` or `connectors.<connector_id>`.
+
 ### 9.9 Streaming, Replay, and Backpressure
 
 - Each `topic` MUST have a monotonically increasing `seq`
