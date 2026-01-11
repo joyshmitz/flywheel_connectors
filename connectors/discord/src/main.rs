@@ -3,6 +3,8 @@
 //! A Discord Bot connector implementing the Flywheel Connector Protocol.
 //! Uses the Discord Gateway (WebSocket) for real-time events and REST API for operations.
 
+#![forbid(unsafe_code)]
+
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
