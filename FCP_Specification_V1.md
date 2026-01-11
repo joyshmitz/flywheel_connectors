@@ -1142,6 +1142,7 @@ Connectors MUST implement the following baseline methods:
 - `auth_caps` and `event_caps`
 
 In JSON-RPC compat mode, the methods MUST be exposed as `fcp.handshake`, `fcp.introspect`, `fcp.configure`, `fcp.invoke`, `fcp.subscribe`, `fcp.unsubscribe`, `fcp.health`, and `fcp.shutdown`.
+Events MUST be emitted as JSON-RPC notifications with method `fcp.event` and `params` containing the event envelope. Acknowledgments MUST be sent with method `fcp.ack` and MUST include `topic` + `seq` (and `cursor` if present).
 
 ### 9.7 Invoke Request/Response Shape
 
@@ -1216,6 +1217,7 @@ Connectors SHOULD use standard event classes such as:
 - If replay is not possible, connector MUST emit `connector.stream.reset` with a best-effort snapshot and a new cursor
 - `subscribe` MAY specify `max_events_per_sec`, `batch_ms`, and `window_size`; connectors MUST honor backpressure
 - If buffers fill, connectors MUST apply an explicit policy: pause, drop non-critical events (with audit), or emit `connector.stream.reset`
+- Critical events MUST NOT be silently dropped; if loss is unavoidable, emit a drop audit event or `connector.stream.reset`
 - If `requires_ack` is true, the Hub MUST send `ack` before `ack_deadline_ms` or the connector MAY retry or drop according to policy
 
 ### 9.10 Handshake Protocol
