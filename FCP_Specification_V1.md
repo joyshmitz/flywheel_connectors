@@ -781,6 +781,15 @@ pub struct Capability {
     /// Safety tier (enforcement)
     pub safety_tier: SafetyTier,  // safe | risky | dangerous | forbidden
 
+    /// Parent capability (hierarchy)
+    pub parent: Option<CapabilityId>,
+
+    /// Implied capabilities (auto-granted)
+    pub implies: Vec<CapabilityId>,
+
+    /// Mutually exclusive capabilities
+    pub conflicts_with: Vec<CapabilityId>,
+
     /// Idempotency expectation
     pub idempotency: IdempotencyClass,  // none | best_effort | strict
 
@@ -808,6 +817,8 @@ pub struct AgentHint {
     pub related: Vec<CapabilityId>,
 }
 ```
+
+Optional `parent`/`implies`/`conflicts_with` fields define capability relationships. The Hub SHOULD expand implied capabilities during grant. The Hub MUST reject any policy or manifest that attempts to grant conflicting capabilities in the same zone.
 
 ### 8.3 Safety Tiers
 
@@ -860,6 +871,17 @@ pub struct CapabilityToken {
     pub sig: [u8; 64],
 }
 ```
+
+```rust
+pub struct CapabilityGrant {
+    /// Granted capability
+    pub capability: CapabilityId,
+    /// Optional operation-level restriction
+    pub operation: Option<OperationId>,
+}
+```
+
+If `operation` is present, the token is valid only for that operation. If absent, any operation bound to the granted capability is allowed.
 
 Default token TTL is 300 seconds (5 minutes) unless policy overrides it.
 
@@ -990,9 +1012,13 @@ bitflags! {
         const STREAMING     = 0b0010_0000;  // Part of a stream
         const STREAM_END    = 0b0100_0000;  // Final frame in stream
         const HAS_CAP_TOKEN = 0b1000_0000;  // Contains capability token
+        const ZONE_CROSSING = 0b0001_0000_0000;  // Result of a zone transition
+        const PRIORITY      = 0b0010_0000_0000;  // High-priority frame (skip queue)
     }
 }
 ```
+
+`ZONE_CROSSING` MUST be set by the Hub when a request or response is routed across zones (including elevation). `PRIORITY` MAY be used for shutdown, health, or approval-critical frames; receivers MAY bypass normal queues but MUST preserve ordering within a stream.
 
 ### 9.5 Message Types
 
@@ -1122,6 +1148,7 @@ Hub                                        Connector
  │  {                                          │
  │    protocol_version: "1.0.0",               │
  │    zone: "z:community",                     │
+ │    zone_dir: "/var/lib/fcp/zones/z:community",│
  │    capabilities_requested: [...],           │
  │    nonce: <random 32 bytes>                 │
  │  }                                          │
@@ -1150,6 +1177,8 @@ Handshake SHOULD include:
 - `host_public_key` for capability token verification
 - `transport_caps` (compression, max frame size)
 - `requested_instance_id` (optional)
+- `zone_dir` (required for connectors that persist state)
+- `host` metadata (name/version/build)
 
 Handshake response SHOULD include:
 - `event_caps` (replay support, buffer size)
@@ -1342,6 +1371,12 @@ interval_ms = 30000
 timeout_ms = 3000
 unhealthy_threshold = 3
 
+[telemetry]
+metrics_enabled = true
+metrics_prefix = "fcp_telegram_"
+log_level = "info"
+trace_sampling = 0.01
+
 [automation]
 setup_recipe = "recipe://telegram/setup"
 teardown_recipe = "recipe://telegram/teardown"
@@ -1392,7 +1427,21 @@ rate_limit = { max = 60, per_ms = 60000, burst = 10, scope = "per_principal" }
 
 Valid `scope` values: `per_connector`, `per_zone`, `per_principal`. If unspecified, the default is `per_connector`.
 
-### 10.6 Manifest Embedding
+### 10.6 Telemetry Configuration
+
+Connectors MAY declare a telemetry block to guide metrics and log behavior:
+
+```toml
+[telemetry]
+metrics_enabled = true
+metrics_prefix = "fcp_telegram_"
+log_level = "info"
+trace_sampling = 0.01
+```
+
+`trace_sampling` is a value in `[0.0, 1.0]`. Telemetry settings MUST NOT disable required audit events or secret redaction.
+
+### 10.7 Manifest Embedding
 
 Manifests MUST be extractable without executing connector logic. Acceptable methods:
 - Embedded manifest section in the binary
@@ -1410,7 +1459,7 @@ Embedded manifests SHOULD use a deterministic header to allow extraction without
 
 The Hub MUST be able to extract the manifest by scanning for the magic bytes, reading the length, decompressing, and verifying the manifest signature. No connector code may execute during extraction.
 
-### 10.7 Manifest Versioning Strategy
+### 10.8 Manifest Versioning Strategy
 
 `schema_version` follows semantic versioning:
 - Unknown **major** versions: Hub MUST reject
@@ -1654,6 +1703,14 @@ Connectors and Hub MUST expose:
 - Rate-limit denials
 - Zone/taint denials
 
+Connectors SHOULD expose at least:
+- connector_starts, connector_stops, connector_errors
+- operation_requests, operation_errors, operation_duration
+- ipc_messages_sent/received, ipc_message_size, ipc_latency
+- memory_used_bytes, cpu_usage_percent, file_handles, network_connections
+- capability_checks, capability_denials
+- zone_transitions, zone_transition_denials
+
 Connectors SHOULD expose metrics via:
 - `fcp.metrics.snapshot` RPC
 - or OpenTelemetry exporters (optional)
@@ -1661,6 +1718,8 @@ Connectors SHOULD expose metrics via:
 ### 15.2 Structured Logs
 
 Logs MUST be structured (JSON), redact secrets, and be emitted to stderr or a configured sink.
+
+If trace context is present, logs MUST include `trace_id` and `span_id` and SHOULD propagate W3C `traceparent`/`tracestate` via message metadata.
 
 Required fields:
 - timestamp
@@ -1716,6 +1775,8 @@ FCP-9000..9999  Internal errors
 | Code | Name | Description |
 |------|------|-------------|
 | FCP-1001 | INVALID_REQUEST | Malformed request |
+| FCP-1003 | MALFORMED_FRAME | Frame structure invalid |
+| FCP-1004 | CHECKSUM_MISMATCH | Frame checksum failed |
 | FCP-2001 | UNAUTHORIZED | Missing or invalid auth |
 | FCP-3001 | CAPABILITY_DENIED | Capability not granted |
 | FCP-3002 | RATE_LIMITED | Rate limit exceeded |
