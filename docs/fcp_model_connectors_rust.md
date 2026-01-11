@@ -409,7 +409,7 @@ impl CapabilityVerifier {
         if let Some(ref inst) = token.instance {
             if inst != &self.instance_id {
                 return Err(FcpError::CapabilityDenied {
-                    capability: operation.0.clone(),
+                    capability: capability.0.clone(),
                     reason: "Instance mismatch".into(),
                 });
             }
@@ -425,7 +425,7 @@ impl CapabilityVerifier {
         });
         if !op_allowed {
             return Err(FcpError::CapabilityDenied {
-                capability: operation.0.clone(),
+                capability: capability.0.clone(),
                 reason: "Operation not granted".into(),
             });
         }
@@ -436,7 +436,7 @@ impl CapabilityVerifier {
             });
             if !allowed {
                 return Err(FcpError::CapabilityDenied {
-                    capability: operation.0.clone(),
+                    capability: capability.0.clone(),
                     reason: "Resource not allowed".into(),
                 });
             }
@@ -448,7 +448,7 @@ impl CapabilityVerifier {
             .any(|p| resource_uris.iter().any(|uri| uri.starts_with(p)))
         {
             return Err(FcpError::CapabilityDenied {
-                capability: operation.0.clone(),
+                capability: capability.0.clone(),
                 reason: "Resource explicitly denied".into(),
             });
         }
@@ -552,6 +552,9 @@ pub struct InvokeResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeRequest {
+    /// Must be "subscribe"
+    pub r#type: String,
+    pub id: CorrelationId,
     pub topics: Vec<String>,
     pub since: Option<String>,
     pub max_events_per_sec: Option<u32>,
@@ -562,11 +565,19 @@ pub struct SubscribeRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscribeResponse {
+pub struct SubscribeResult {
     pub confirmed_topics: Vec<String>,
     pub cursors: HashMap<String, String>,
     pub replay_supported: bool,
     pub buffer: Option<ReplayBufferInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeResponse {
+    /// Must be "response"
+    pub r#type: String,
+    pub id: CorrelationId,
+    pub result: SubscribeResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -577,6 +588,9 @@ pub struct ReplayBufferInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeRequest {
+    /// Must be "unsubscribe"
+    pub r#type: String,
+    pub id: CorrelationId,
     pub topics: Vec<String>,
     /// Optional capability token (may be provided via frame/meta in JSON-RPC compat)
     pub capability_token: Option<CapabilityToken>,
@@ -630,6 +644,11 @@ pub struct ShutdownRequest {
 // Event Types (Envelope)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// JSON-RPC compat: emit EventEnvelope as params of "fcp.event" notifications.
+// Acks must be sent/received with method "fcp.ack" and EventAck params.
+// Recommended: retry requires_ack events up to 3 times with exponential backoff,
+// then emit a delivery-failed audit event and mark the stream degraded.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub r#type: String,
@@ -649,8 +668,33 @@ pub struct EventData {
     pub zone_id: ZoneId,
     pub principal: Principal,
     pub payload: serde_json::Value,
-    pub correlation_id: Option<CorrelationId>,
+    pub correlation_id: CorrelationId,
     pub resource_uris: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAck {
+    /// JSON-RPC compat: fcp.ack params for a delivered event
+    pub topic: String,
+    pub seq: u64,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceContext {
+    /// W3C-compatible trace identifier
+    pub trace_id: String,
+    /// W3C-compatible span identifier
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcMeta {
+    /// Optional distributed trace context (meta.trace)
+    pub trace: Option<TraceContext>,
+    /// Optional capability token when carried via meta in JSON-RPC compat mode
+    pub capability_token: Option<CapabilityToken>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -714,10 +758,17 @@ pub trait FcpConnector: Send + Sync {
     /// Unique connector identifier
     fn id(&self) -> &ConnectorId;
 
+    /// Declare connector archetypes for describe()
+    fn archetypes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Describe static connector metadata (manifest-safe subset)
     fn describe(&self) -> DescribeInfo {
         let introspection = self.introspect();
-        DescribeInfo::from_introspection(self.id(), &introspection)
+        let mut info = DescribeInfo::from_introspection(self.id(), &introspection);
+        info.archetypes = self.archetypes();
+        info
     }
     
     /// Apply configuration (validated by Host)
@@ -739,8 +790,8 @@ pub trait FcpConnector: Send + Sync {
     fn introspect(&self) -> Introspection;
 
     /// Full capabilities catalog (stable across runtime sessions)
-    fn capabilities(&self) -> Introspection {
-        self.introspect()
+    fn capabilities(&self) -> CapabilitiesCatalog {
+        CapabilitiesCatalog::from(&self.introspect())
     }
 
     /// Invoke an operation
@@ -766,13 +817,22 @@ pub trait FcpConnector: Send + Sync {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationInfo {
     pub id: OperationId,
     pub summary: String,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     pub capability: CapabilityId,
-    pub risk_level: String, // low | medium | high | critical
+    pub risk_level: RiskLevel,
     pub safety_tier: SafetyTier,
     pub idempotency: IdempotencyClass,
     pub ai_hints: AgentHint,
@@ -861,6 +921,27 @@ pub struct Introspection {
     pub resource_types: Vec<String>,
     pub auth_caps: Option<AuthCaps>,
     pub event_caps: Option<EventCaps>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilitiesCatalog {
+    pub operations: Vec<OperationInfo>,
+    pub events: Vec<EventInfo>,
+    pub resource_types: Vec<String>,
+    pub auth_caps: Option<AuthCaps>,
+    pub event_caps: Option<EventCaps>,
+}
+
+impl From<&Introspection> for CapabilitiesCatalog {
+    fn from(introspection: &Introspection) -> Self {
+        Self {
+            operations: introspection.operations.clone(),
+            events: introspection.events.clone(),
+            resource_types: introspection.resource_types.clone(),
+            auth_caps: introspection.auth_caps.clone(),
+            event_caps: introspection.event_caps.clone(),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1060,6 +1141,10 @@ impl FcpConnector for RequestResponseConnector {
     fn id(&self) -> &ConnectorId {
         &self.id
     }
+
+    fn archetypes(&self) -> Vec<String> {
+        vec!["request_response".into()]
+    }
     
     #[instrument(skip(self, config))]
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
@@ -1222,7 +1307,7 @@ impl FcpConnector for RequestResponseConnector {
                         }
                     }),
                     capability: CapabilityId("http.get".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -1251,7 +1336,7 @@ impl FcpConnector for RequestResponseConnector {
                         }
                     }),
                     capability: CapabilityId("http.post".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::BestEffort,
                     ai_hints: AgentHint {
@@ -1800,6 +1885,7 @@ pub struct StreamingConnector {
     
     // Event broadcasting
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    event_seq: Arc<RwLock<HashMap<String, u64>>>,
     
     // Subscriptions
     subscriptions: Arc<RwLock<Vec<String>>>,
@@ -1829,6 +1915,7 @@ impl StreamingConnector {
             connected: Arc::new(AtomicBool::new(false)),
             shutdown_signal: None,
             event_tx,
+            event_seq: Arc::new(RwLock::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(Vec::new())),
             subscription_tx: None,
             events_received: AtomicU64::new(0),
@@ -1846,6 +1933,10 @@ impl StreamingConnector {
 impl FcpConnector for StreamingConnector {
     fn id(&self) -> &ConnectorId {
         &self.id
+    }
+
+    fn archetypes(&self) -> Vec<String> {
+        vec!["streaming".into()]
     }
     
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
@@ -1965,13 +2056,17 @@ impl FcpConnector for StreamingConnector {
             let _ = Streaming::subscribe(self, topic).await?;
         }
         Ok(SubscribeResponse {
-            confirmed_topics: req.topics,
-            cursors: HashMap::new(),
-            replay_supported: true,
-            buffer: Some(ReplayBufferInfo {
-                min_events: 10_000,
-                overflow: "stream.reset".into(),
-            }),
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics: req.topics,
+                cursors: HashMap::new(),
+                replay_supported: true,
+                buffer: Some(ReplayBufferInfo {
+                    min_events: 10_000,
+                    overflow: "stream.reset".into(),
+                }),
+            },
         })
     }
 
@@ -2085,6 +2180,7 @@ impl StreamingConnector {
         self.subscription_tx = Some(sub_tx);
         
         let event_tx = self.event_tx.clone();
+        let event_seq = self.event_seq.clone();
         let connected = self.connected.clone();
         let subscriptions = self.subscriptions.clone();
         let events_received = &self.events_received as *const AtomicU64;
@@ -2202,13 +2298,24 @@ impl StreamingConnector {
                                         Ok(Message::Text(text)) => {
                                             bytes_received.fetch_add(text.len() as u64, Ordering::Relaxed);
                                             
-                                            if let Ok(event) = Self::parse_event(
+                                            if let Ok(mut event) = Self::parse_event(
                                                 &text,
                                                 &connector_id,
                                                 &instance_id,
                                                 &zone_id,
                                             ) {
                                                 events_received.fetch_add(1, Ordering::Relaxed);
+                                                let seq = {
+                                                    let mut seqs = event_seq.write().await;
+                                                    let counter = seqs.entry(event.topic.clone()).or_insert(0);
+                                                    let current = *counter;
+                                                    *counter = current + 1;
+                                                    current
+                                                };
+                                                event.seq = seq;
+                                                if event.requires_ack {
+                                                    // Track pending acks and retry up to 3 times with backoff.
+                                                }
                                                 let _ = event_tx.send(Ok(event));
                                             }
                                         }
@@ -2316,8 +2423,8 @@ impl StreamingConnector {
             timestamp: chrono::Utc::now(),
             seq: 0,
             cursor: None,
-            requires_ack: false,
-            ack_deadline_ms: None,
+            requires_ack: true,
+            ack_deadline_ms: Some(5000),
             data: EventData {
                 connector_id: connector_id.clone(),
                 instance_id: instance_id.clone(),
@@ -2329,7 +2436,7 @@ impl StreamingConnector {
                     display: None,
                 },
                 payload: raw.data,
-                correlation_id: None,
+                correlation_id: CorrelationId::default(),
                 resource_uris: vec![],
             },
         })
@@ -2448,6 +2555,10 @@ impl FcpConnector for BidirectionalConnector {
     fn id(&self) -> &ConnectorId {
         &self.id
     }
+
+    fn archetypes(&self) -> Vec<String> {
+        vec!["bidirectional".into()]
+    }
     
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let config: BidirectionalConfig = serde_json::from_value(config)
@@ -2543,7 +2654,7 @@ impl FcpConnector for BidirectionalConnector {
                     }),
                     output_schema: serde_json::json!({ "type": "null" }),
                     capability: CapabilityId("channel.send".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::BestEffort,
                     ai_hints: AgentHint {
@@ -2563,7 +2674,7 @@ impl FcpConnector for BidirectionalConnector {
                     }),
                     output_schema: serde_json::json!({ "type": "object" }),
                     capability: CapabilityId("channel.request".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::BestEffort,
                     ai_hints: AgentHint {
@@ -2639,10 +2750,14 @@ impl FcpConnector for BidirectionalConnector {
             req.topics
         };
         Ok(SubscribeResponse {
-            confirmed_topics: confirmed,
-            cursors: HashMap::new(),
-            replay_supported: false,
-            buffer: None,
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics: confirmed,
+                cursors: HashMap::new(),
+                replay_supported: false,
+                buffer: None,
+            },
         })
     }
 
@@ -2866,7 +2981,7 @@ impl BidirectionalConnector {
                     Some(msg) = read.next() => {
                         match msg {
                             Ok(Message::Text(text)) => {
-                                messages_received.fetch_add(1, Ordering::Relaxed);
+                                let seq = messages_received.fetch_add(1, Ordering::Relaxed);
                                 
                                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
                                     // Check if this is a response to a pending request
@@ -2883,7 +2998,7 @@ impl BidirectionalConnector {
                                         r#type: "event".into(),
                                         topic: format!("connector.{}.channel.inbound", connector_id.0),
                                         timestamp: chrono::Utc::now(),
-                                        seq: 0,
+                                        seq,
                                         cursor: None,
                                         requires_ack: false,
                                         ack_deadline_ms: None,
@@ -2898,7 +3013,7 @@ impl BidirectionalConnector {
                                                 display: None,
                                             },
                                             payload: value,
-                                            correlation_id: None,
+                                            correlation_id: CorrelationId::default(),
                                             resource_uris: vec![],
                                         },
                                     };
@@ -3154,6 +3269,10 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
     fn id(&self) -> &ConnectorId {
         &self.id
     }
+
+    fn archetypes(&self) -> Vec<String> {
+        vec!["polling".into()]
+    }
     
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         // Parse polling config
@@ -3254,7 +3373,7 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
                     }),
                     output_schema: serde_json::json!({ "type": "null" }),
                     capability: CapabilityId("poll.start".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -3274,7 +3393,7 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
                     }),
                     output_schema: serde_json::json!({ "type": "null" }),
                     capability: CapabilityId("poll.stop".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -3297,7 +3416,7 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
                         "properties": { "items_count": { "type": "integer" } }
                     }),
                     capability: CapabilityId("poll.immediate".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::BestEffort,
                     ai_hints: AgentHint {
@@ -3418,10 +3537,14 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
             self.start_polling(topic, None, token).await?;
         }
         Ok(SubscribeResponse {
-            confirmed_topics: req.topics,
-            cursors: HashMap::new(),
-            replay_supported: false,
-            buffer: None,
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics: req.topics,
+                cursors: HashMap::new(),
+                replay_supported: false,
+                buffer: None,
+            },
         })
     }
 
@@ -3660,7 +3783,7 @@ impl<F: PollSource, S: CursorStore> PollingConnector<F, S> {
                             match source.poll(&target, &cursor, config.batch_size).await {
                                 Ok(result) => {
                                     let count = result.items.len();
-                                    items_fetched.fetch_add(count as u64, Ordering::Relaxed);
+                                    let base_seq = items_fetched.fetch_add(count as u64, Ordering::Relaxed);
                                     
                                     // Update state
                                     {
@@ -3696,12 +3819,13 @@ impl<F: PollSource, S: CursorStore> PollingConnector<F, S> {
                                     let _ = cursor_store.set(&target, &result.next_cursor).await;
                                     
                                     // Emit events
-                                    for item in result.items {
+                                    for (idx, item) in result.items.into_iter().enumerate() {
+                                        let seq = base_seq + idx as u64;
                                         let event = EventEnvelope {
                                             r#type: "event".into(),
                                             topic: format!("connector.{}.poll.item", connector_id.0),
                                             timestamp: chrono::Utc::now(),
-                                            seq: 0,
+                                            seq,
                                             cursor: None,
                                             requires_ack: false,
                                             ack_deadline_ms: None,
@@ -3716,7 +3840,7 @@ impl<F: PollSource, S: CursorStore> PollingConnector<F, S> {
                                                     display: None,
                                                 },
                                                 payload: item,
-                                                correlation_id: None,
+                                                correlation_id: CorrelationId::default(),
                                                 resource_uris: vec![],
                                             },
                                         };
@@ -3900,6 +4024,10 @@ impl FcpConnector for WebhookConnector {
     fn id(&self) -> &ConnectorId {
         &self.id
     }
+
+    fn archetypes(&self) -> Vec<String> {
+        vec!["webhook".into()]
+    }
     
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let config: WebhookConfig = serde_json::from_value(config)
@@ -4001,7 +4129,7 @@ impl FcpConnector for WebhookConnector {
                 }),
                 output_schema: serde_json::json!({ "type": "null" }),
                 capability: CapabilityId("webhook.register".into()),
-                risk_level: "low".into(),
+                risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
@@ -4070,10 +4198,14 @@ impl FcpConnector for WebhookConnector {
 
     async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
         Ok(SubscribeResponse {
-            confirmed_topics: req.topics,
-            cursors: HashMap::new(),
-            replay_supported: false,
-            buffer: None,
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics: req.topics,
+                cursors: HashMap::new(),
+                replay_supported: false,
+                buffer: None,
+            },
         })
     }
 
@@ -4268,7 +4400,7 @@ async fn handle_webhook(
         }
     }
     
-    state.webhooks_verified.fetch_add(1, Ordering::Relaxed);
+    let seq = state.webhooks_verified.fetch_add(1, Ordering::Relaxed);
     
     // Parse body
     let data: serde_json::Value = match serde_json::from_slice(&body) {
@@ -4291,13 +4423,19 @@ async fn handle_webhook(
             current.as_str().map(String::from)
         })
         .unwrap_or_else(|| "webhook".into());
+    let correlation_id = headers
+        .get("x-correlation-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .map(CorrelationId)
+        .unwrap_or_else(CorrelationId::default);
     
     // Create event
     let event = EventEnvelope {
         r#type: "event".into(),
         topic: format!("connector.{}.webhook.received", state.connector_id.0),
         timestamp: chrono::Utc::now(),
-        seq: 0,
+        seq,
         cursor: None,
         requires_ack: false,
         ack_deadline_ms: None,
@@ -4312,11 +4450,7 @@ async fn handle_webhook(
                 display: None,
             },
             payload: data,
-            correlation_id: headers
-                .get("x-correlation-id")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .map(CorrelationId),
+            correlation_id,
             resource_uris: vec![],
         },
     };
