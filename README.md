@@ -1,14 +1,16 @@
-# Flywheel Connectors
+# Flywheel Connector Protocol (FCP)
 
-Secure, high-performance Rust connectors for integrating external services into AI agent ecosystems.
-
-This project implements the **Flywheel Connector Protocol (FCP)** — a protocol specification plus a growing library of production-ready connectors that enable AI coding agents to safely interact with messaging platforms, cloud services, APIs, and databases while maintaining strict security boundaries.
+A secure, modular protocol for integrating external services into AI agent ecosystems — plus a growing library of production-ready Rust connectors implementing that protocol.
 
 ---
 
 ## TL;DR
 
-**What we're building**: A comprehensive suite of Rust connectors for AI agents — Twitter, Linear, Stripe, YouTube, Telegram, Discord, Gmail, GitHub, browser automation, and more.
+**This project is two things:**
+
+1. **The FCP Protocol** — A specification for how AI agents securely interact with external services through zone-isolated, capability-gated connectors
+
+2. **Connector Implementations** — Production Rust binaries for Twitter, Linear, Stripe, Telegram, Discord, Gmail, GitHub, browser automation, and more
 
 **Why it matters**: Current multi-service integrations commingle trust levels (a public Discord message could trigger Gmail operations), rely on prompt-based security (trivially bypassed), or require custom integration code per service.
 
