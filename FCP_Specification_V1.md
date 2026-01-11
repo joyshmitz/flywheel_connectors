@@ -608,6 +608,41 @@ Messaging connectors MUST:
 - Enforce allowlist/pairing policy **or** emit sufficient metadata for the Hub to enforce it
 - Support reply routing so outbound replies are constrained to the originating context
 
+### 6.10 Zone Policy Format (FZPF)
+
+The Hub MUST support a deterministic, auditable policy file format for zones and flow rules. The **Flywheel Zone Policy Format (FZPF)** is the canonical format.
+
+**Policy header (required):**
+- `format = "fzpf"`
+- `schema_version = "0.1"`
+- `default_deny = true|false` (recommended `true`)
+
+**Zones (required):** each zone MAY define:
+- `principals_allow` / `principals_deny`
+- `connectors_allow` / `connectors_deny`
+- `cap_allow` / `cap_deny`
+
+**Flows (optional):** ordered rules for cross-zone data movement:
+- `from`, `to` (pattern strings)
+- `kind` one of `ingress`, `egress`, `both`
+- `allow` boolean
+- `transform` optional identifier (e.g., `redact_secrets`)
+- `audit` optional (default true)
+
+**Taint rules (optional):** ordered rules for provenance-aware gating:
+- `min_taint`: `Untainted` | `Tainted` | `HighlyTainted`
+- `min_risk`: `low` | `medium` | `high` | `critical`
+- filters: origin/target zone patterns, capability patterns
+- `action`: `deny` | `require_elevation` | `require_approval`
+
+**Pattern matching:** anchored glob with `*` wildcard, case-sensitive. `*` matches zero or more characters, including `:` and `.`.
+
+**Determinism rules:**
+- Deny overrides allow.
+- Rule order matters (first match wins) for `flows` and `taint_rules`.
+
+Appendix H specifies the evaluation algorithms.
+
 ---
 
 ## 7. Provenance and Taint Tracking
@@ -1980,3 +2015,27 @@ Flow:
 - Explicit auth state machine (no implicit credential states)
 - Explicit shutdown behavior (no orphaned inflight operations)
 - Never panic on user input; avoid `unwrap` on parse paths
+
+### Appendix H: Policy Evaluation (FZPF v0.1)
+
+**Pattern Language (anchored glob)**
+- `*` matches zero or more characters (including `.` and `:`)
+- Matching is case-sensitive and anchored (entire value must match)
+
+**Invoke Authorization (deterministic)**
+1. Resolve target zone; if missing, deny.
+2. Enforce principals allow/deny (deny overrides allow; empty allowlist follows `default_deny`).
+3. Enforce connectors allow/deny.
+4. Enforce capability allow/deny.
+5. Apply ordered `taint_rules` (first match wins): may deny or require elevation/approval.
+6. If no taint rule matched, apply default taint thresholds (if configured).
+7. If all checks pass, allow.
+
+**Flow Authorization (data movement)**
+1. Evaluate ordered `flows` (first match wins).
+2. If a rule matches, allow/deny and apply `transform`/`audit` settings.
+3. If no rule matched:
+   - same-zone flow: allow (audit true)
+   - cross-zone flow: follow `default_deny`
+
+Hubs SHOULD emit structured audit events for denials, elevation/approval requirements, and flow decisions (including applied transforms).
