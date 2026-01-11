@@ -1,6 +1,6 @@
 //! Server-Sent Events (SSE) implementation.
 //!
-//! Implements RFC 6455 compliant SSE parsing and client.
+//! Implements SSE parsing and client per the WHATWG HTML Living Standard.
 
 use std::collections::HashMap;
 use std::pin::Pin;

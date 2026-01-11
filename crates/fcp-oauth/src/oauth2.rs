@@ -389,6 +389,7 @@ impl OAuth2Client {
 struct TokenErrorResponse {
     error: String,
     error_description: Option<String>,
+    #[allow(dead_code)] // Part of OAuth spec, kept for debugging/future use
     error_uri: Option<String>,
 }
 

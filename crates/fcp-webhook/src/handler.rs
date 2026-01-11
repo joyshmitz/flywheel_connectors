@@ -179,7 +179,9 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// Clean up old seen events.
     fn cleanup_seen_events(&self) {
         let now = Utc::now();
-        let ttl = chrono::Duration::from_std(self.config.idempotency_ttl).unwrap();
+        // Use saturating conversion to avoid panic on extreme durations
+        let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
+            .unwrap_or(chrono::TimeDelta::MAX);
         let mut seen = self.seen_events.write();
         seen.retain(|_, time| now - *time < ttl);
     }

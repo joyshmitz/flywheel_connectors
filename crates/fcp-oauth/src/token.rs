@@ -135,7 +135,10 @@ impl OAuthTokens {
     pub fn needs_refresh_within(&self, threshold: Duration) -> bool {
         self.expires_at
             .map(|exp| {
-                let threshold_time = Utc::now() + chrono::Duration::from_std(threshold).unwrap();
+                // Use saturating conversion to avoid panic on extreme durations
+                let threshold_chrono = chrono::Duration::from_std(threshold)
+                    .unwrap_or(chrono::TimeDelta::MAX);
+                let threshold_time = Utc::now() + threshold_chrono;
                 threshold_time >= exp
             })
             .unwrap_or(false)
