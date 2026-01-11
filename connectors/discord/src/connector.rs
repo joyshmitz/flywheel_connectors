@@ -316,6 +316,69 @@ impl DiscordConnector {
                         related: vec![],
                     },
                 },
+                OperationInfo {
+                    id: OperationId("discord.get_guild".into()),
+                    summary: "Get information about a Discord server (guild)".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "guild_id": { "type": "string", "description": "Guild/server ID" }
+                        },
+                        "required": ["guild_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "name": { "type": "string" },
+                            "icon": { "type": "string" },
+                            "owner_id": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId("discord.read".into()),
+                    risk_level: "low".into(),
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get Discord server/guild metadata.".into(),
+                        common_mistakes: vec![
+                            "Using server name instead of guild ID".into(),
+                        ],
+                        examples: vec![
+                            r#"{"guild_id": "123456789012345678"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId("discord.trigger_typing".into()),
+                    summary: "Show typing indicator in a Discord channel".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "channel_id": { "type": "string", "description": "Channel ID" }
+                        },
+                        "required": ["channel_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "triggered": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId("discord.send".into()),
+                    risk_level: "low".into(),
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Show typing indicator before sending a message (lasts 10 seconds).".into(),
+                        common_mistakes: vec![],
+                        examples: vec![
+                            r#"{"channel_id": "123456789012345678"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
             ],
             events: vec![
                 EventInfo {
@@ -496,8 +559,7 @@ impl DiscordConnector {
     }
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let api = self.require_api()?;
-
+        // Validate input first (before checking api) for better error messages
         let channel_id = input
             .get("channel_id")
             .and_then(|v| v.as_str())
@@ -518,6 +580,87 @@ impl DiscordConnector {
         let embeds: Option<Vec<Embed>> = input
             .get("embeds")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+        // Validate message content length (Discord limit: 2000 characters)
+        const MAX_CONTENT_LENGTH: usize = 2000;
+        if let Some(content) = content {
+            if content.len() > MAX_CONTENT_LENGTH {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
+                        content.len()
+                    ),
+                });
+            }
+        }
+
+        // Validate embed limits
+        if let Some(ref embeds) = embeds {
+            const MAX_EMBEDS: usize = 10;
+            const MAX_EMBED_TOTAL_CHARS: usize = 6000;
+            const MAX_EMBED_TITLE: usize = 256;
+            const MAX_EMBED_DESCRIPTION: usize = 4096;
+
+            if embeds.len() > MAX_EMBEDS {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Too many embeds: {MAX_EMBEDS} maximum, got {}",
+                        embeds.len()
+                    ),
+                });
+            }
+
+            let mut total_chars = 0;
+            for (i, embed) in embeds.iter().enumerate() {
+                if let Some(ref title) = embed.title {
+                    if title.len() > MAX_EMBED_TITLE {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Embed {} title exceeds {MAX_EMBED_TITLE} character limit",
+                                i + 1
+                            ),
+                        });
+                    }
+                    total_chars += title.len();
+                }
+                if let Some(ref desc) = embed.description {
+                    if desc.len() > MAX_EMBED_DESCRIPTION {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Embed {} description exceeds {MAX_EMBED_DESCRIPTION} character limit",
+                                i + 1
+                            ),
+                        });
+                    }
+                    total_chars += desc.len();
+                }
+                for field in &embed.fields {
+                    total_chars += field.name.len() + field.value.len();
+                }
+                if let Some(ref footer) = embed.footer {
+                    total_chars += footer.text.len();
+                }
+                if let Some(ref author) = embed.author {
+                    total_chars += author.name.len();
+                }
+            }
+
+            if total_chars > MAX_EMBED_TOTAL_CHARS {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Total embed content exceeds {MAX_EMBED_TOTAL_CHARS} character limit (got {total_chars} characters)",
+                    ),
+                });
+            }
+        }
+
+        // Now check that we're configured
+        let api = self.require_api()?;
 
         let message = api
             .edit_message(channel_id, message_id, content, embeds)
