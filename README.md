@@ -1,5 +1,9 @@
 # Flywheel Connector Protocol (FCP)
 
+<div align="center">
+  <img src="illustration.webp" alt="FCP - Secure connectors for AI agents with zone-based isolation and capability tokens">
+</div>
+
 A secure, modular protocol for integrating external services into AI agent ecosystems — plus a growing library of production-ready Rust connectors implementing that protocol.
 
 ---
