@@ -641,6 +641,53 @@ The Hub MUST support a deterministic, auditable policy file format for zones and
 - Deny overrides allow.
 - Rule order matters (first match wins) for `flows` and `taint_rules`.
 
+**Brief example (FZPF v0.1):**
+
+```toml
+[policy]
+format = "fzpf"
+schema_version = "0.1"
+default_deny = true
+
+[defaults.taint]
+require_elevation_min_risk = "medium"
+require_interactive_approval_min_risk = "high"
+
+[[zones]]
+id = "z:public"
+trust_level = 10
+principals_allow = ["*"]
+connectors_allow = ["fcp.discord", "fcp.web"]
+cap_allow = ["discord.*", "web.*"]
+cap_deny  = ["email.*", "calendar.*", "files.*"]
+
+[[zones]]
+id = "z:private"
+trust_level = 90
+principals_allow = ["p:owner:*", "p:agent:*"]
+connectors_allow = ["fcp.gmail"]
+cap_allow = ["email.*"]
+cap_deny  = ["system.exec"]
+
+[[flows]]
+from = "z:private"
+to = "z:public"
+kind = "egress"
+allow = true
+transform = "redact_secrets"
+audit = true
+
+[[taint_rules]]
+name = "public_to_private_email_requires_elevation"
+min_taint = "Tainted"
+min_risk = "medium"
+when_origin_trust_lt_target = true
+origin_zone_patterns = ["z:public", "z:community"]
+target_zone_patterns = ["z:private"]
+capability_patterns = ["email.*"]
+action = { type = "require_elevation", ttl_seconds = 300 }
+```
+
 Appendix H specifies the evaluation algorithms.
 
 ---
