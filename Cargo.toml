@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/fcp-core",
+    "crates/fcp-telemetry",
     "crates/fcp-testkit",
     "connectors/telegram",
     "connectors/discord",
