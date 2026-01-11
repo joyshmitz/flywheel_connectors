@@ -1,0 +1,47 @@
+[package]
+name = "fcp-testkit"
+description = "Testing framework and mock infrastructure for FCP connectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Core FCP types
+fcp-core = { path = "../fcp-core" }
+
+# Async runtime
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread"] }
+futures-util.workspace = true
+tokio-stream.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Mock HTTP server
+wiremock.workspace = true
+
+# Logging/tracing for tests
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+# Identifiers
+uuid.workspace = true
+chrono.workspace = true
+
+# HTTP client for test assertions
+reqwest.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -41,6 +41,14 @@ impl fmt::Display for CapabilityId {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectorId(pub String);
 
+impl ConnectorId {
+    /// Create a new connector ID with full details.
+    #[must_use]
+    pub fn new(name: impl Into<String>, archetype: impl Into<String>, version: impl Into<String>) -> Self {
+        Self(format!("{}:{}:{}", name.into(), archetype.into(), version.into()))
+    }
+}
+
 impl<S: Into<String>> From<S> for ConnectorId {
     fn from(s: S) -> Self {
         Self(s.into())
@@ -209,6 +217,30 @@ pub struct CapabilityToken {
     /// Ed25519 signature over the token payload
     #[serde(with = "signature_bytes")]
     pub sig: [u8; 64],
+}
+
+impl CapabilityToken {
+    /// Create a test token with minimal fields for testing.
+    ///
+    /// This token has a dummy signature and should only be used in tests.
+    #[must_use]
+    pub fn test_token() -> Self {
+        Self {
+            jti: Uuid::new_v4(),
+            sub: PrincipalId::from("test-principal"),
+            iss: ZoneId::work(),
+            aud: ConnectorId::from("test-connector"),
+            instance: None,
+            iat: u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0),
+            exp: u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0) + 3600,
+            caps: vec![CapabilityGrant {
+                capability: CapabilityId::new("*"),
+                operation: None,
+            }],
+            constraints: CapabilityConstraints::default(),
+            sig: [0u8; 64], // Dummy signature for testing
+        }
+    }
 }
 
 mod signature_bytes {
