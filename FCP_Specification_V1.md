@@ -1128,12 +1128,21 @@ Connectors MUST implement the following baseline methods:
 | Method | Purpose |
 |--------|---------|
 | `handshake` | Bind instance to zone, negotiate protocol |
+| `describe` | Return manifest-safe static metadata |
 | `introspect` | Return operations, events, resource types, auth/event caps |
+| `capabilities` | Return full operation/event/resource catalog for tooling |
 | `configure` | Apply validated configuration |
 | `invoke` | Execute an operation |
 | `health` | Report readiness and dependency status |
 | `subscribe` / `unsubscribe` | Event stream control (if streaming) |
 | `shutdown` | Graceful termination |
+
+`describe` MUST return a manifest-safe subset (no secrets, no runtime state), including:
+- connector id/name/version/description
+- documentation and repository URLs (if any)
+- archetypes
+- `auth_caps` and `event_caps` (if declared)
+- resource types (if declared)
 
 `introspect` MUST include:
 - Operations (id, schemas, safety tier, idempotency, AI hints)
@@ -1141,7 +1150,9 @@ Connectors MUST implement the following baseline methods:
 - Resource types supported
 - `auth_caps` and `event_caps`
 
-In JSON-RPC compat mode, the methods MUST be exposed as `fcp.handshake`, `fcp.introspect`, `fcp.configure`, `fcp.invoke`, `fcp.subscribe`, `fcp.unsubscribe`, `fcp.health`, and `fcp.shutdown`.
+`capabilities` MUST return the full static catalog used for tooling and UI (operations, events, resource types, schemas, and safety metadata). It SHOULD be stable across runtime sessions.
+
+In JSON-RPC compat mode, the methods MUST be exposed as `fcp.handshake`, `fcp.describe`, `fcp.introspect`, `fcp.capabilities`, `fcp.configure`, `fcp.invoke`, `fcp.subscribe`, `fcp.unsubscribe`, `fcp.health`, and `fcp.shutdown`.
 Events MUST be emitted as JSON-RPC notifications with method `fcp.event` and `params` containing the event envelope. Acknowledgments MUST be sent with method `fcp.ack` and MUST include `topic` + `seq` (and `cursor` if present).
 
 ### 9.7 Invoke Request/Response Shape
@@ -1946,7 +1957,7 @@ Migration must deliver security wins early using a strangler-fig approach.
 
 **Connector MUST:**
 - [ ] Implement `--manifest` flag
-- [ ] Implement handshake, introspect, configure, invoke, health, shutdown
+- [ ] Implement handshake, describe, introspect, capabilities, configure, invoke, health, shutdown
 - [ ] Implement `subscribe`/`unsubscribe` if emitting events
 - [ ] Support event cursors + replay or emit `connector.stream.reset`
 - [ ] Declare required/optional/forbidden capabilities
@@ -2004,7 +2015,7 @@ Migration must deliver security wins early using a strangler-fig approach.
 
 | Level | Requirement |
 |-------|-------------|
-| **Level 1 (Core)** | handshake, health, introspect, invoke, error model |
+| **Level 1 (Core)** | handshake, describe, capabilities, introspect, health, invoke, error model |
 | **Level 2 (Streaming)** | subscribe, event envelope, seq/replay/reset semantics |
 | **Level 3 (Provisioning)** | provisioning state machine, secret storage rules |
 | **Level 4 (Zone-hardening)** | capability enforcement, resource constraint enforcement |
