@@ -41,6 +41,9 @@ coverage/
 *.temp
 *.log
 
+# Source images (keep only webp)
+illustration.png
+
 # Planning docs (not for repo)
 docs/flywheel_connectors_planning_pack.md
 docs/flywheel_connectors_competing_plans.md
