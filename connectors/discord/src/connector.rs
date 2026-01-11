@@ -679,8 +679,7 @@ impl DiscordConnector {
     }
 
     async fn invoke_delete_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let api = self.require_api()?;
-
+        // Validate input first (before checking api) for consistent error messages
         let channel_id = input
             .get("channel_id")
             .and_then(|v| v.as_str())
@@ -697,6 +696,8 @@ impl DiscordConnector {
                 message: "Missing message_id".into(),
             })?;
 
+        let api = self.require_api()?;
+
         api.delete_message(channel_id, message_id)
             .await
             .map_err(|e| FcpError::External {
@@ -711,8 +712,7 @@ impl DiscordConnector {
     }
 
     async fn invoke_get_channel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let api = self.require_api()?;
-
+        // Validate input first (before checking api) for consistent error messages
         let channel_id = input
             .get("channel_id")
             .and_then(|v| v.as_str())
@@ -720,6 +720,8 @@ impl DiscordConnector {
                 code: 1003,
                 message: "Missing channel_id".into(),
             })?;
+
+        let api = self.require_api()?;
 
         let channel = api.get_channel(channel_id).await.map_err(|e| {
             FcpError::External {
@@ -737,8 +739,7 @@ impl DiscordConnector {
     }
 
     async fn invoke_get_guild(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let api = self.require_api()?;
-
+        // Validate input first (before checking api) for consistent error messages
         let guild_id = input
             .get("guild_id")
             .and_then(|v| v.as_str())
@@ -746,6 +747,8 @@ impl DiscordConnector {
                 code: 1003,
                 message: "Missing guild_id".into(),
             })?;
+
+        let api = self.require_api()?;
 
         let guild = api.get_guild(guild_id).await.map_err(|e| {
             FcpError::External {
@@ -763,8 +766,7 @@ impl DiscordConnector {
     }
 
     async fn invoke_trigger_typing(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let api = self.require_api()?;
-
+        // Validate input first (before checking api) for consistent error messages
         let channel_id = input
             .get("channel_id")
             .and_then(|v| v.as_str())
@@ -772,6 +774,8 @@ impl DiscordConnector {
                 code: 1003,
                 message: "Missing channel_id".into(),
             })?;
+
+        let api = self.require_api()?;
 
         api.trigger_typing(channel_id).await.map_err(|e| {
             FcpError::External {
@@ -965,9 +969,15 @@ mod tests {
             "input": input
         })).await;
 
-        // Should fail with NotConfigured since we haven't configured, but let's test
-        // the validation path by looking at the error
+        // Validation happens before config check, so we get InvalidRequest for too-long content
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("character limit"), "Expected content length error, got: {}", message);
+            }
+            _ => panic!("Expected InvalidRequest error for content too long, got: {:?}", err),
+        }
     }
 
     #[tokio::test]
