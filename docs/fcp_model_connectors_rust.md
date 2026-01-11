@@ -1917,7 +1917,7 @@ impl FcpConnector for StreamingConnector {
         Introspection {
             operations: vec![],
             events: vec![EventInfo {
-                topic: "connector.stream.event".into(),
+                topic: format!("connector.{}.stream.event", self.id.0),
                 schema: serde_json::json!({ "type": "object" }),
                 requires_ack: true,
             }],
@@ -2540,7 +2540,7 @@ impl FcpConnector for BidirectionalConnector {
                 },
             ],
             events: vec![EventInfo {
-                topic: "connector.channel.inbound".into(),
+                topic: format!("connector.{}.channel.inbound", self.id.0),
                 schema: serde_json::json!({ "type": "object" }),
                 requires_ack: false,
             }],
@@ -3257,7 +3257,7 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
                 },
             ],
             events: vec![EventInfo {
-                topic: "connector.poll.item".into(),
+                topic: format!("connector.{}.poll.item", self.id.0),
                 schema: serde_json::json!({ "type": "object" }),
                 requires_ack: false,
             }],
@@ -3935,7 +3935,7 @@ impl FcpConnector for WebhookConnector {
                 },
             }],
             events: vec![EventInfo {
-                topic: "connector.webhook.received".into(),
+                topic: format!("connector.{}.webhook.received", self.id.0),
                 schema: serde_json::json!({ "type": "object" }),
                 requires_ack: false,
             }],
