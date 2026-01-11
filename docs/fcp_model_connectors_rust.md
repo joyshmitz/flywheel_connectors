@@ -355,7 +355,7 @@ pub struct CapabilityToken {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityGrant {
     pub capability: CapabilityId,
-    pub operation: OperationId,
+    pub operation: Option<OperationId>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -413,7 +413,13 @@ impl CapabilityVerifier {
                 });
             }
         }
-        if !token.caps.iter().any(|c| &c.operation == operation) {
+        let op_allowed = token.caps.iter().any(|c| {
+            match &c.operation {
+                Some(op) => op == operation,
+                None => true,
+            }
+        });
+        if !op_allowed {
             return Err(FcpError::CapabilityDenied {
                 capability: operation.0.clone(),
                 reason: "Operation not granted".into(),
@@ -556,6 +562,13 @@ pub struct SubscribeResponse {
     pub confirmed_topics: Vec<String>,
     pub cursors: HashMap<String, String>,
     pub replay_supported: bool,
+    pub buffer: Option<ReplayBufferInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayBufferInfo {
+    pub min_events: u32,
+    pub overflow: String, // e.g., "stream.reset"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -575,6 +588,7 @@ pub struct TransportCaps {
 pub struct HandshakeRequest {
     pub protocol_version: String,
     pub zone: ZoneId,
+    pub zone_dir: Option<String>,
     pub capabilities_requested: Vec<CapabilityId>,
     pub nonce: [u8; 32],
     pub host_public_key: [u8; 32],
@@ -658,6 +672,7 @@ pub struct LoadMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthDetails {
     pub last_error: Option<String>,
+    pub dependencies: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -686,6 +701,12 @@ pub struct ConnectorMetrics {
 pub trait FcpConnector: Send + Sync {
     /// Unique connector identifier
     fn id(&self) -> &ConnectorId;
+
+    /// Describe static connector metadata (manifest-safe subset)
+    fn describe(&self) -> DescribeInfo {
+        let introspection = self.introspect();
+        DescribeInfo::from_introspection(self.id(), &introspection)
+    }
     
     /// Apply configuration (validated by Host)
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()>;
@@ -704,6 +725,11 @@ pub trait FcpConnector: Send + Sync {
     
     /// Introspection: operations, events, and resource types
     fn introspect(&self) -> Introspection;
+
+    /// Full capabilities catalog (stable across runtime sessions)
+    fn capabilities(&self) -> Introspection {
+        self.introspect()
+    }
 
     /// Invoke an operation
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse>;
@@ -783,6 +809,37 @@ pub struct EventCaps {
     pub replay: bool,
     pub min_buffer_events: u32,
     pub requires_ack: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescribeInfo {
+    pub id: ConnectorId,
+    pub name: String,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub documentation: Option<String>,
+    pub repository: Option<String>,
+    pub archetypes: Vec<String>,
+    pub auth_caps: Option<AuthCaps>,
+    pub event_caps: Option<EventCaps>,
+    pub resource_types: Vec<String>,
+}
+
+impl DescribeInfo {
+    pub fn from_introspection(id: &ConnectorId, introspection: &Introspection) -> Self {
+        Self {
+            id: id.clone(),
+            name: id.0.clone(),
+            version: None,
+            description: None,
+            documentation: None,
+            repository: None,
+            archetypes: Vec::new(),
+            auth_caps: introspection.auth_caps.clone(),
+            event_caps: introspection.event_caps.clone(),
+            resource_types: introspection.resource_types.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1106,6 +1163,7 @@ impl FcpConnector for RequestResponseConnector {
                 load: None,
                 details: Some(HealthDetails {
                     last_error: Some(e.to_string()),
+                    dependencies: None,
                 }),
                 rate_limit: None,
             },
@@ -1523,6 +1581,7 @@ mod tests {
         connector.handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
             zone: ZoneId("test".into()),
+            zone_dir: None,
             capabilities_requested: vec![CapabilityId("http.get".into())],
             nonce: [0u8; 32],
             host_public_key: [0u8; 32],
@@ -1540,7 +1599,7 @@ mod tests {
             exp: u64::MAX,
             caps: vec![CapabilityGrant {
                 capability: CapabilityId("http.get".into()),
-                operation: OperationId("http.get".into()),
+                operation: Some(OperationId("http.get".into())),
             }],
             constraints: CapabilityConstraints::default(),
             sig: [0u8; 64],
@@ -1573,6 +1632,7 @@ mod tests {
         connector.handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
             zone: ZoneId("test".into()),
+            zone_dir: None,
             capabilities_requested: vec![CapabilityId("http.post".into())],
             nonce: [0u8; 32],
             host_public_key: [0u8; 32],
@@ -1590,7 +1650,7 @@ mod tests {
             exp: u64::MAX,
             caps: vec![CapabilityGrant {
                 capability: CapabilityId("http.post".into()),
-                operation: OperationId("http.post".into()),
+                operation: Some(OperationId("http.post".into())),
             }],
             constraints: CapabilityConstraints::default(),
             sig: [0u8; 64],
@@ -1889,6 +1949,10 @@ impl FcpConnector for StreamingConnector {
             confirmed_topics: req.topics,
             cursors: HashMap::new(),
             replay_supported: true,
+            buffer: Some(ReplayBufferInfo {
+                min_events: 10_000,
+                overflow: "stream.reset".into(),
+            }),
         })
     }
 
@@ -2538,6 +2602,7 @@ impl FcpConnector for BidirectionalConnector {
             confirmed_topics: confirmed,
             cursors: HashMap::new(),
             replay_supported: false,
+            buffer: None,
         })
     }
 
@@ -3299,6 +3364,7 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
             confirmed_topics: req.topics,
             cursors: HashMap::new(),
             replay_supported: false,
+            buffer: None,
         })
     }
 
@@ -3925,6 +3991,7 @@ impl FcpConnector for WebhookConnector {
             confirmed_topics: req.topics,
             cursors: HashMap::new(),
             replay_supported: false,
+            buffer: None,
         })
     }
 
@@ -4135,7 +4202,7 @@ async fn handle_webhook(
     // Create event
     let event = EventEnvelope {
         r#type: "event".into(),
-        topic: format!("{}.{}", source, event_type),
+        topic: format!("connector.webhook.{}.{}", source, event_type),
         timestamp: chrono::Utc::now(),
         seq: 0,
         cursor: None,
