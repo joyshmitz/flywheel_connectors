@@ -2077,6 +2077,11 @@ impl StreamingConnector {
             .as_ref()
             .map(|verifier| verifier.instance_id.clone())
             .unwrap_or_else(|| InstanceId("inst_unknown".into()));
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map(|verifier| verifier.zone_id.clone())
+            .unwrap_or_else(|| ZoneId("z:unknown".into()));
         
         // Spawn connection management task
         tokio::spawn(async move {
@@ -2182,6 +2187,7 @@ impl StreamingConnector {
                                                 &text,
                                                 &connector_id,
                                                 &instance_id,
+                                                &zone_id,
                                             ) {
                                                 events_received.fetch_add(1, Ordering::Relaxed);
                                                 let _ = event_tx.send(Ok(event));
@@ -2264,6 +2270,7 @@ impl StreamingConnector {
         text: &str,
         connector_id: &ConnectorId,
         instance_id: &InstanceId,
+        zone_id: &ZoneId,
     ) -> Result<EventEnvelope, serde_json::Error> {
         #[derive(Deserialize)]
         struct RawEvent {
@@ -2274,10 +2281,19 @@ impl StreamingConnector {
         }
         
         let raw: RawEvent = serde_json::from_str(text)?;
+        let default_topic = format!("connector.{}.stream.event", connector_id.0);
+        let raw_topic = raw.topic.unwrap_or_default();
+        let topic = if raw_topic.is_empty() {
+            default_topic
+        } else if raw_topic.starts_with("connector.") || raw_topic.starts_with("connectors.") {
+            raw_topic
+        } else {
+            format!("connector.{}.{}", connector_id.0, raw_topic)
+        };
         
         Ok(EventEnvelope {
             r#type: "event".into(),
-            topic: raw.topic.unwrap_or_else(|| "default".into()),
+            topic,
             timestamp: chrono::Utc::now(),
             seq: 0,
             cursor: None,
@@ -2286,7 +2302,7 @@ impl StreamingConnector {
             data: EventData {
                 connector_id: connector_id.clone(),
                 instance_id: instance_id.clone(),
-                zone_id: ZoneId("external".into()),
+                zone_id: zone_id.clone(),
                 principal: Principal {
                     kind: "external".into(),
                     id: "unknown".into(),
@@ -2791,6 +2807,11 @@ impl BidirectionalConnector {
             .as_ref()
             .map(|verifier| verifier.instance_id.clone())
             .unwrap_or_else(|| InstanceId("inst_unknown".into()));
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map(|verifier| verifier.zone_id.clone())
+            .unwrap_or_else(|| ZoneId("z:unknown".into()));
         
         // Spawn read/write tasks
         tokio::spawn(async move {
@@ -2826,10 +2847,7 @@ impl BidirectionalConnector {
                                     // Otherwise, broadcast as event
                                     let event = EventEnvelope {
                                         r#type: "event".into(),
-                                        topic: value.get("type")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("message")
-                                            .to_string(),
+                                        topic: format!("connector.{}.channel.inbound", connector_id.0),
                                         timestamp: chrono::Utc::now(),
                                         seq: 0,
                                         cursor: None,
@@ -2838,7 +2856,7 @@ impl BidirectionalConnector {
                                         data: EventData {
                                             connector_id: connector_id.clone(),
                                             instance_id: instance_id.clone(),
-                                            zone_id: ZoneId("external".into()),
+                                            zone_id: zone_id.clone(),
                                             principal: Principal {
                                                 kind: "external".into(),
                                                 id: "unknown".into(),
@@ -3515,6 +3533,11 @@ impl<F: PollSource, S: CursorStore> PollingConnector<F, S> {
             .as_ref()
             .map(|verifier| verifier.instance_id.clone())
             .unwrap_or_else(|| InstanceId("inst_unknown".into()));
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map(|verifier| verifier.zone_id.clone())
+            .unwrap_or_else(|| ZoneId("z:unknown".into()));
         
         tokio::spawn(async move {
             let polls_total = unsafe { &*polls_total };
@@ -3622,7 +3645,7 @@ impl<F: PollSource, S: CursorStore> PollingConnector<F, S> {
                                     for item in result.items {
                                         let event = EventEnvelope {
                                             r#type: "event".into(),
-                                            topic: target.clone(),
+                                            topic: format!("connector.{}.poll.item", connector_id.0),
                                             timestamp: chrono::Utc::now(),
                                             seq: 0,
                                             cursor: None,
@@ -3631,7 +3654,7 @@ impl<F: PollSource, S: CursorStore> PollingConnector<F, S> {
                                             data: EventData {
                                                 connector_id: connector_id.clone(),
                                                 instance_id: instance_id.clone(),
-                                                zone_id: ZoneId("poll".into()),
+                                                zone_id: zone_id.clone(),
                                                 principal: Principal {
                                                     kind: "system".into(),
                                                     id: "poller".into(),
@@ -4086,6 +4109,7 @@ struct AppState {
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     connector_id: ConnectorId,
     instance_id: InstanceId,
+    zone_id: ZoneId,
     webhooks_received: Arc<AtomicU64>,
     webhooks_verified: Arc<AtomicU64>,
     webhooks_rejected: Arc<AtomicU64>,
@@ -4108,6 +4132,11 @@ impl WebhookConnector {
                 .as_ref()
                 .map(|verifier| verifier.instance_id.clone())
                 .unwrap_or_else(|| InstanceId("inst_unknown".into())),
+            zone_id: self
+                .verifier
+                .as_ref()
+                .map(|verifier| verifier.zone_id.clone())
+                .unwrap_or_else(|| ZoneId("z:unknown".into())),
             webhooks_received: Arc::new(AtomicU64::new(0)),
             webhooks_verified: Arc::new(AtomicU64::new(0)),
             webhooks_rejected: Arc::new(AtomicU64::new(0)),
@@ -4202,7 +4231,7 @@ async fn handle_webhook(
     // Create event
     let event = EventEnvelope {
         r#type: "event".into(),
-        topic: format!("connector.webhook.{}.{}", source, event_type),
+        topic: format!("connector.{}.webhook.received", state.connector_id.0),
         timestamp: chrono::Utc::now(),
         seq: 0,
         cursor: None,
@@ -4211,7 +4240,7 @@ async fn handle_webhook(
         data: EventData {
             connector_id: state.connector_id.clone(),
             instance_id: state.instance_id.clone(),
-            zone_id: ZoneId(format!("webhook:{}", source)),
+            zone_id: state.zone_id.clone(),
             principal: Principal {
                 kind: "webhook".into(),
                 id: source.clone(),
