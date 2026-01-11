@@ -1,0 +1,46 @@
+[package]
+name = "fcp-oauth"
+version = "0.1.0"
+edition = "2021"
+description = "Unified OAuth library for FCP connectors"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anthropics/fcp"
+
+[dependencies]
+fcp-core = { path = "../fcp-core" }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "time"] }
+async-trait.workspace = true
+
+# HTTP client
+reqwest = { workspace = true, features = ["json"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Time handling
+chrono.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Crypto for OAuth
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+rand = "0.8"
+url = "2.5"
+serde_urlencoded = "0.7"
+
+# Concurrent data structures
+parking_lot = "0.12"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+wiremock = "0.6"
