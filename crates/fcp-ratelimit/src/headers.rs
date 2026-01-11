@@ -1,0 +1,353 @@
+//! Rate limit header parsing for various providers.
+//!
+//! Parses standard and provider-specific rate limit headers.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+/// Parsed rate limit information from HTTP headers.
+#[derive(Debug, Clone, Default)]
+pub struct RateLimitHeaders {
+    /// Maximum requests allowed.
+    pub limit: Option<u32>,
+
+    /// Remaining requests in current window.
+    pub remaining: Option<u32>,
+
+    /// Seconds until reset.
+    pub reset_seconds: Option<u64>,
+
+    /// Unix timestamp of reset.
+    pub reset_at: Option<u64>,
+
+    /// Retry after duration (from 429 response).
+    pub retry_after: Option<Duration>,
+
+    /// Provider-specific additional info.
+    pub provider_info: HashMap<String, String>,
+}
+
+impl RateLimitHeaders {
+    /// Create empty headers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Parse headers from a header map.
+    #[must_use]
+    pub fn parse(headers: &HashMap<String, String>) -> Self {
+        let mut result = Self::new();
+
+        // Standard headers
+        result.limit = parse_header_u32(headers, "x-ratelimit-limit")
+            .or_else(|| parse_header_u32(headers, "x-rate-limit-limit"))
+            .or_else(|| parse_header_u32(headers, "ratelimit-limit"));
+
+        result.remaining = parse_header_u32(headers, "x-ratelimit-remaining")
+            .or_else(|| parse_header_u32(headers, "x-rate-limit-remaining"))
+            .or_else(|| parse_header_u32(headers, "ratelimit-remaining"));
+
+        result.reset_seconds = parse_header_u64(headers, "x-ratelimit-reset")
+            .or_else(|| parse_header_u64(headers, "x-rate-limit-reset"))
+            .or_else(|| parse_header_u64(headers, "ratelimit-reset"));
+
+        // Retry-After header
+        if let Some(retry) = headers.get("retry-after") {
+            if let Ok(secs) = retry.parse::<u64>() {
+                result.retry_after = Some(Duration::from_secs(secs));
+            }
+        }
+
+        result
+    }
+
+    /// Parse GitHub-specific headers.
+    #[must_use]
+    pub fn parse_github(headers: &HashMap<String, String>) -> Self {
+        let mut result = Self::parse(headers);
+
+        // GitHub uses x-ratelimit-* headers
+        if let Some(reset) = parse_header_u64(headers, "x-ratelimit-reset") {
+            result.reset_at = Some(reset);
+            // Convert to seconds from now
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                let now_secs = now.as_secs();
+                if reset > now_secs {
+                    result.reset_seconds = Some(reset - now_secs);
+                }
+            }
+        }
+
+        // GitHub secondary rate limits
+        if let Some(used) = parse_header_u32(headers, "x-ratelimit-used") {
+            result.provider_info.insert("used".to_string(), used.to_string());
+        }
+        if let Some(resource) = headers.get("x-ratelimit-resource") {
+            result.provider_info.insert("resource".to_string(), resource.clone());
+        }
+
+        result
+    }
+
+    /// Parse Twitter/X-specific headers.
+    #[must_use]
+    pub fn parse_twitter(headers: &HashMap<String, String>) -> Self {
+        let mut result = Self::parse(headers);
+
+        // Twitter uses x-rate-limit-* headers
+        result.limit = result.limit.or_else(|| parse_header_u32(headers, "x-rate-limit-limit"));
+        result.remaining = result.remaining.or_else(|| parse_header_u32(headers, "x-rate-limit-remaining"));
+
+        if let Some(reset) = parse_header_u64(headers, "x-rate-limit-reset") {
+            result.reset_at = Some(reset);
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                let now_secs = now.as_secs();
+                if reset > now_secs {
+                    result.reset_seconds = Some(reset - now_secs);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Parse Stripe-specific headers.
+    #[must_use]
+    pub fn parse_stripe(headers: &HashMap<String, String>) -> Self {
+        let mut result = Self::parse(headers);
+
+        // Stripe uses different header naming
+        if let Some(request_id) = headers.get("request-id") {
+            result.provider_info.insert("request_id".to_string(), request_id.clone());
+        }
+
+        result
+    }
+
+    /// Parse OpenAI-specific headers.
+    #[must_use]
+    pub fn parse_openai(headers: &HashMap<String, String>) -> Self {
+        let mut result = Self::parse(headers);
+
+        // OpenAI has specific rate limit headers
+        if let Some(limit_requests) = parse_header_u32(headers, "x-ratelimit-limit-requests") {
+            result.limit = Some(limit_requests);
+        }
+        if let Some(remaining_requests) = parse_header_u32(headers, "x-ratelimit-remaining-requests") {
+            result.remaining = Some(remaining_requests);
+        }
+
+        // Token limits (for LLM APIs)
+        if let Some(limit_tokens) = parse_header_u32(headers, "x-ratelimit-limit-tokens") {
+            result.provider_info.insert("limit_tokens".to_string(), limit_tokens.to_string());
+        }
+        if let Some(remaining_tokens) = parse_header_u32(headers, "x-ratelimit-remaining-tokens") {
+            result.provider_info.insert("remaining_tokens".to_string(), remaining_tokens.to_string());
+        }
+
+        // Reset times
+        if let Some(reset_requests) = headers.get("x-ratelimit-reset-requests") {
+            if let Some(duration) = parse_duration_string(reset_requests) {
+                result.reset_seconds = Some(duration.as_secs());
+            }
+        }
+
+        result
+    }
+
+    /// Parse Anthropic-specific headers.
+    #[must_use]
+    pub fn parse_anthropic(headers: &HashMap<String, String>) -> Self {
+        let mut result = Self::parse(headers);
+
+        // Anthropic uses similar headers to OpenAI
+        if let Some(limit_requests) = parse_header_u32(headers, "anthropic-ratelimit-requests-limit") {
+            result.limit = Some(limit_requests);
+        }
+        if let Some(remaining_requests) = parse_header_u32(headers, "anthropic-ratelimit-requests-remaining") {
+            result.remaining = Some(remaining_requests);
+        }
+
+        // Token limits
+        if let Some(limit_tokens) = parse_header_u32(headers, "anthropic-ratelimit-tokens-limit") {
+            result.provider_info.insert("limit_tokens".to_string(), limit_tokens.to_string());
+        }
+        if let Some(remaining_tokens) = parse_header_u32(headers, "anthropic-ratelimit-tokens-remaining") {
+            result.provider_info.insert("remaining_tokens".to_string(), remaining_tokens.to_string());
+        }
+
+        // Reset time
+        if let Some(reset) = headers.get("anthropic-ratelimit-requests-reset") {
+            result.provider_info.insert("reset_time".to_string(), reset.clone());
+        }
+
+        result
+    }
+
+    /// Get suggested wait time.
+    #[must_use]
+    pub fn suggested_wait(&self) -> Option<Duration> {
+        // Prefer retry_after if present
+        if let Some(retry) = self.retry_after {
+            return Some(retry);
+        }
+
+        // Fall back to reset_seconds
+        if let Some(secs) = self.reset_seconds {
+            return Some(Duration::from_secs(secs));
+        }
+
+        None
+    }
+
+    /// Check if rate limited.
+    #[must_use]
+    pub fn is_limited(&self) -> bool {
+        self.remaining == Some(0) || self.retry_after.is_some()
+    }
+}
+
+/// Helper to parse a header as u32.
+fn parse_header_u32(headers: &HashMap<String, String>, key: &str) -> Option<u32> {
+    headers.get(key).and_then(|v| v.parse().ok())
+}
+
+/// Helper to parse a header as u64.
+fn parse_header_u64(headers: &HashMap<String, String>, key: &str) -> Option<u64> {
+    headers.get(key).and_then(|v| v.parse().ok())
+}
+
+/// Parse duration strings like "1s", "500ms", "1m30s".
+fn parse_duration_string(s: &str) -> Option<Duration> {
+    let s = s.trim();
+
+    // Try simple seconds
+    if let Ok(secs) = s.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+
+    // Try with suffix
+    if s.ends_with("ms") {
+        if let Ok(ms) = s.trim_end_matches("ms").parse::<u64>() {
+            return Some(Duration::from_millis(ms));
+        }
+    }
+    if s.ends_with('s') && !s.ends_with("ms") {
+        if let Ok(secs) = s.trim_end_matches('s').parse::<f64>() {
+            return Some(Duration::from_secs_f64(secs));
+        }
+    }
+    if s.ends_with('m') {
+        if let Ok(mins) = s.trim_end_matches('m').parse::<u64>() {
+            return Some(Duration::from_secs(mins * 60));
+        }
+    }
+    if s.ends_with('h') {
+        if let Ok(hours) = s.trim_end_matches('h').parse::<u64>() {
+            return Some(Duration::from_secs(hours * 3600));
+        }
+    }
+
+    None
+}
+
+/// Provider type for automatic header parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    /// Standard rate limit headers.
+    Standard,
+    /// GitHub API.
+    GitHub,
+    /// Twitter/X API.
+    Twitter,
+    /// Stripe API.
+    Stripe,
+    /// OpenAI API.
+    OpenAI,
+    /// Anthropic API.
+    Anthropic,
+}
+
+impl Provider {
+    /// Parse headers for this provider.
+    #[must_use]
+    pub fn parse_headers(&self, headers: &HashMap<String, String>) -> RateLimitHeaders {
+        match self {
+            Self::Standard => RateLimitHeaders::parse(headers),
+            Self::GitHub => RateLimitHeaders::parse_github(headers),
+            Self::Twitter => RateLimitHeaders::parse_twitter(headers),
+            Self::Stripe => RateLimitHeaders::parse_stripe(headers),
+            Self::OpenAI => RateLimitHeaders::parse_openai(headers),
+            Self::Anthropic => RateLimitHeaders::parse_anthropic(headers),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_standard_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit".to_string(), "100".to_string());
+        headers.insert("x-ratelimit-remaining".to_string(), "50".to_string());
+        headers.insert("x-ratelimit-reset".to_string(), "60".to_string());
+
+        let parsed = RateLimitHeaders::parse(&headers);
+
+        assert_eq!(parsed.limit, Some(100));
+        assert_eq!(parsed.remaining, Some(50));
+        assert_eq!(parsed.reset_seconds, Some(60));
+        assert!(!parsed.is_limited());
+    }
+
+    #[test]
+    fn test_parse_retry_after() {
+        let mut headers = HashMap::new();
+        headers.insert("retry-after".to_string(), "30".to_string());
+
+        let parsed = RateLimitHeaders::parse(&headers);
+
+        assert_eq!(parsed.retry_after, Some(Duration::from_secs(30)));
+        assert!(parsed.is_limited());
+    }
+
+    #[test]
+    fn test_parse_openai_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-limit-requests".to_string(), "60".to_string());
+        headers.insert("x-ratelimit-remaining-requests".to_string(), "59".to_string());
+        headers.insert("x-ratelimit-limit-tokens".to_string(), "150000".to_string());
+        headers.insert("x-ratelimit-remaining-tokens".to_string(), "149000".to_string());
+
+        let parsed = RateLimitHeaders::parse_openai(&headers);
+
+        assert_eq!(parsed.limit, Some(60));
+        assert_eq!(parsed.remaining, Some(59));
+        assert_eq!(parsed.provider_info.get("limit_tokens"), Some(&"150000".to_string()));
+    }
+
+    #[test]
+    fn test_parse_duration_string() {
+        assert_eq!(parse_duration_string("30"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration_string("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration_string("1.5s"), Some(Duration::from_secs_f64(1.5)));
+        assert_eq!(parse_duration_string("5m"), Some(Duration::from_secs(300)));
+        assert_eq!(parse_duration_string("2h"), Some(Duration::from_secs(7200)));
+    }
+
+    #[test]
+    fn test_suggested_wait() {
+        let mut headers = RateLimitHeaders::new();
+        headers.retry_after = Some(Duration::from_secs(30));
+        headers.reset_seconds = Some(60);
+
+        // Should prefer retry_after
+        assert_eq!(headers.suggested_wait(), Some(Duration::from_secs(30)));
+
+        headers.retry_after = None;
+        assert_eq!(headers.suggested_wait(), Some(Duration::from_secs(60)));
+    }
+}

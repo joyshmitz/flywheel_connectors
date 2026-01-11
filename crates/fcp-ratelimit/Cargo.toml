@@ -1,0 +1,38 @@
+[package]
+name = "fcp-ratelimit"
+description = "Production-grade rate limiting library for FCP connectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core = { path = "../fcp-core" }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "time"] }
+async-trait.workspace = true
+
+# Synchronization
+parking_lot = "0.12"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Time
+chrono.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
