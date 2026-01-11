@@ -1,0 +1,42 @@
+[package]
+name = "fcp-webhook"
+version = "0.1.0"
+edition = "2021"
+description = "Production webhook handling library for FCP connectors"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anthropics/fcp"
+
+[dependencies]
+fcp-core = { path = "../fcp-core" }
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "time"] }
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Time handling
+chrono.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Crypto for signatures
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+ed25519-dalek.workspace = true
+hex.workspace = true
+
+# Utilities
+parking_lot = "0.12"
+bytes.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
