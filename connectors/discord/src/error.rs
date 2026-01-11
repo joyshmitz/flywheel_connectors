@@ -1,0 +1,150 @@
+//! Discord-specific error types.
+
+use std::time::Duration;
+
+use fcp_core::FcpError;
+use thiserror::Error;
+
+/// Discord-specific errors.
+#[derive(Error, Debug)]
+pub enum DiscordError {
+    /// HTTP request failed
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    /// JSON serialization/deserialization failed
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// WebSocket error
+    #[error("WebSocket error: {0}")]
+    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+
+    /// Discord API returned an error
+    #[error("Discord API error {code}: {message}")]
+    Api {
+        code: i32,
+        message: String,
+        retry_after: Option<f64>,
+    },
+
+    /// Rate limited
+    #[error("Rate limited, retry after {retry_after} seconds")]
+    RateLimited { retry_after: f64 },
+
+    /// Invalid token
+    #[error("Invalid bot token")]
+    InvalidToken,
+
+    /// Not configured
+    #[error("Connector not configured")]
+    NotConfigured,
+
+    /// Not connected
+    #[error("Not connected to Discord Gateway")]
+    NotConnected,
+
+    /// Gateway connection failed
+    #[error("Gateway connection failed: {0}")]
+    GatewayConnectionFailed(String),
+
+    /// Generic gateway error
+    #[error("Gateway error: {0}")]
+    Gateway(String),
+}
+
+impl DiscordError {
+    /// Check if this error is retryable.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(_) => true,
+            Self::WebSocket(_) => true,
+            Self::Api { code, .. } => *code >= 500 || *code == 429,
+            Self::RateLimited { .. } => true,
+            Self::GatewayConnectionFailed(_) => true,
+            Self::Gateway(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Get the suggested retry delay.
+    #[must_use]
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after } => {
+                Some(Duration::from_secs_f64(*retry_after))
+            }
+            Self::Api { retry_after, .. } => {
+                retry_after.map(Duration::from_secs_f64)
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert to FCP error.
+    #[must_use]
+    pub fn to_fcp_error(&self) -> FcpError {
+        match self {
+            Self::Http(e) => FcpError::External {
+                service: "discord".into(),
+                message: e.to_string(),
+                status_code: e.status().map(|s| s.as_u16()),
+                retryable: self.is_retryable(),
+                retry_after: self.retry_after(),
+            },
+            Self::WebSocket(e) => FcpError::External {
+                service: "discord_gateway".into(),
+                message: e.to_string(),
+                status_code: None,
+                retryable: self.is_retryable(),
+                retry_after: None,
+            },
+            Self::Api {
+                code,
+                message,
+                retry_after,
+            } => {
+                if *code == 429 {
+                    // Clamp retry_after to reasonable bounds to prevent overflow
+                    let retry_secs = retry_after.unwrap_or(30.0).clamp(0.0, 3600.0);
+                    FcpError::RateLimited {
+                        retry_after_ms: (retry_secs * 1000.0) as u64,
+                    }
+                } else {
+                    FcpError::External {
+                        service: "discord".into(),
+                        message: message.clone(),
+                        status_code: u16::try_from(*code).ok(),
+                        retryable: self.is_retryable(),
+                        retry_after: self.retry_after(),
+                    }
+                }
+            }
+            Self::RateLimited { retry_after } => {
+                // Clamp retry_after to reasonable bounds to prevent overflow
+                let retry_secs = retry_after.clamp(0.0, 3600.0);
+                FcpError::RateLimited {
+                    retry_after_ms: (retry_secs * 1000.0) as u64,
+                }
+            }
+            Self::InvalidToken => FcpError::Unauthorized {
+                code: 2001,
+                message: "Invalid Discord bot token".into(),
+            },
+            Self::NotConfigured => FcpError::NotConfigured,
+            Self::NotConnected | Self::GatewayConnectionFailed(_) | Self::Gateway(_) => {
+                FcpError::ConnectorUnavailable {
+                    code: 5001,
+                    message: "Not connected to Discord Gateway".into(),
+                }
+            }
+            Self::Json(e) => FcpError::Internal {
+                message: format!("JSON error: {e}"),
+            },
+        }
+    }
+}
+
+/// Result type for Discord operations.
+pub type DiscordResult<T> = Result<T, DiscordError>;

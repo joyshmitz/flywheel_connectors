@@ -1,0 +1,597 @@
+//! FCP Connector implementation for Telegram.
+//!
+//! Implements the FcpConnector trait with Telegram-specific operations.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
+
+use fcp_core::*;
+use serde_json::json;
+use tokio::sync::{broadcast, RwLock};
+use tracing::{error, info, warn};
+
+use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
+use crate::types::{GetUpdatesRequest, Message, Update, UpdateKind};
+
+/// Telegram connector configuration.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct TelegramConfig {
+    /// Bot token (required)
+    pub token: Option<String>,
+
+    /// Polling timeout in seconds
+    #[serde(default = "default_poll_timeout")]
+    pub poll_timeout: i32,
+
+    /// Allowed updates filter
+    #[serde(default)]
+    pub allowed_updates: Vec<String>,
+}
+
+fn default_poll_timeout() -> i32 {
+    30
+}
+
+/// Telegram FCP connector.
+pub struct TelegramConnector {
+    id: ConnectorId,
+    config: Option<TelegramConfig>,
+    client: Option<TelegramClient>,
+    verifier: Option<CapabilityVerifier>,
+    session_id: Option<SessionId>,
+    instance_id: InstanceId,
+
+    // Polling state
+    last_update_id: Arc<RwLock<Option<i64>>>,
+    poll_running: Arc<RwLock<bool>>,
+    poll_task: Option<tokio::task::JoinHandle<()>>,
+
+    // Event broadcast
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+
+    // Metrics
+    start_time: Instant,
+    messages_received: Arc<AtomicU64>,
+    messages_sent: Arc<AtomicU64>,
+    requests_total: Arc<AtomicU64>,
+    requests_error: Arc<AtomicU64>,
+}
+
+impl TelegramConnector {
+    /// Create a new Telegram connector.
+    pub fn new() -> Self {
+        let (event_tx, _) = broadcast::channel(1000);
+
+        Self {
+            id: ConnectorId("telegram".into()),
+            config: None,
+            client: None,
+            verifier: None,
+            session_id: None,
+            instance_id: InstanceId::new(),
+            last_update_id: Arc::new(RwLock::new(None)),
+            poll_running: Arc::new(RwLock::new(false)),
+            poll_task: None,
+            event_tx,
+            start_time: Instant::now(),
+            messages_received: Arc::new(AtomicU64::new(0)),
+            messages_sent: Arc::new(AtomicU64::new(0)),
+            requests_total: Arc::new(AtomicU64::new(0)),
+            requests_error: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Handle configure method.
+    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let config: TelegramConfig = serde_json::from_value(params)
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+
+        if config.token.is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: "Missing required 'token' in configuration".into(),
+            });
+        }
+
+        let token = config.token.clone().unwrap();
+        let client = TelegramClient::new(&token).map_err(|e| FcpError::Internal {
+            message: format!("Failed to create HTTP client: {e}"),
+        })?;
+        self.client = Some(client);
+        self.config = Some(config);
+
+        info!("Telegram connector configured");
+        Ok(json!({ "status": "configured" }))
+    }
+
+    /// Handle handshake method.
+    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest = serde_json::from_value(params)
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {e}"),
+            })?;
+
+        // Verify bot is reachable
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let bot_info = client.get_me().await.map_err(|e: TelegramError| FcpError::External {
+            service: "telegram".into(),
+            message: format!("Failed to verify bot: {e}"),
+            status_code: None,
+            retryable: e.is_retryable(),
+            retry_after: None,
+        })?;
+
+        info!(
+            bot_username = ?bot_info.username,
+            bot_id = bot_info.id,
+            "Telegram bot verified"
+        );
+
+        // Set up verifier
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.instance_id.clone(),
+        ));
+
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
+
+        // Start polling if not already running
+        self.start_polling().await?;
+
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted: req.capabilities_requested,
+            session_id,
+            manifest_hash: "sha256:telegram-connector-v1".into(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    /// Handle health check.
+    pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
+        let client = match &self.client {
+            Some(c) => c,
+            None => {
+                return Ok(json!({
+                    "status": "not_configured",
+                    "uptime_ms": self.start_time.elapsed().as_millis() as u64
+                }));
+            }
+        };
+
+        // Check if we can reach Telegram
+        let result: Result<_, TelegramError> = client.get_me().await;
+        match result {
+            Ok(_) => Ok(json!({
+                "status": "ready",
+                "uptime_ms": self.start_time.elapsed().as_millis() as u64,
+                "polling": *self.poll_running.read().await
+            })),
+            Err(e) => Ok(json!({
+                "status": "degraded",
+                "uptime_ms": self.start_time.elapsed().as_millis() as u64,
+                "error": e.to_string()
+            })),
+        }
+    }
+
+    /// Handle introspection.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: vec![
+                OperationInfo {
+                    id: OperationId("telegram.send_message".into()),
+                    summary: "Send a text message to a Telegram chat".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "chat_id": { "type": "string", "description": "Chat ID or @username" },
+                            "text": { "type": "string", "description": "Message text" },
+                            "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
+                            "reply_to_message_id": { "type": "integer" }
+                        },
+                        "required": ["chat_id", "text"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "message_id": { "type": "integer" },
+                            "chat_id": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId("telegram.send".into()),
+                    risk_level: "medium".into(),
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Send a message to a Telegram user or group.".into(),
+                        common_mistakes: vec![
+                            "Using invite links instead of chat IDs".into(),
+                            "Forgetting the @ prefix for usernames".into(),
+                        ],
+                        examples: vec![
+                            r#"{"chat_id": "@username", "text": "Hello!"}"#.into(),
+                            r#"{"chat_id": "-100123456789", "text": "Group message"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId("telegram.get_file".into()),
+                    summary: "Get file information for downloading".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "file_id": { "type": "string", "description": "File ID from a message" }
+                        },
+                        "required": ["file_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "file_id": { "type": "string" },
+                            "file_path": { "type": "string" },
+                            "file_size": { "type": "integer" }
+                        }
+                    }),
+                    capability: CapabilityId("telegram.read".into()),
+                    risk_level: "low".into(),
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Get download URL for files attached to messages.".into(),
+                        common_mistakes: vec![],
+                        examples: vec![],
+                        related: vec![],
+                    },
+                },
+            ],
+            events: vec![EventInfo {
+                topic: "telegram.message".into(),
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "message_id": { "type": "integer" },
+                        "from": { "type": "object" },
+                        "chat": { "type": "object" },
+                        "text": { "type": "string" }
+                    }
+                }),
+                requires_ack: false,
+            }],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+        };
+
+        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize introspection: {e}"),
+        })
+    }
+
+    /// Handle invoke method.
+    pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        self.requests_total.fetch_add(1, Ordering::Relaxed);
+
+        let operation = params
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation".into(),
+            })?;
+
+        let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        let result = match operation {
+            "telegram.send_message" => self.invoke_send_message(input).await,
+            "telegram.get_file" => self.invoke_get_file(input).await,
+            _ => Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            }),
+        };
+
+        if result.is_err() {
+            self.requests_error.fetch_add(1, Ordering::Relaxed);
+        }
+
+        result
+    }
+
+    async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let chat_id = input
+            .get("chat_id")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing chat_id".into(),
+            })?;
+
+        let text = input
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing text".into(),
+            })?;
+
+        let mut options = SendMessageOptions::default();
+        if let Some(mode) = input.get("parse_mode").and_then(|v| v.as_str()) {
+            options.parse_mode = Some(mode.into());
+        }
+        if let Some(reply_to) = input.get("reply_to_message_id").and_then(|v| v.as_i64()) {
+            options.reply_to_message_id = Some(reply_to);
+        }
+
+        let message = client
+            .send_message(chat_id, text, options)
+            .await
+            .map_err(|e: TelegramError| FcpError::External {
+                service: "telegram".into(),
+                message: e.to_string(),
+                status_code: match &e {
+                    TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                    _ => None,
+                },
+                retryable: e.is_retryable(),
+                retry_after: None,
+            })?;
+
+        self.messages_sent.fetch_add(1, Ordering::Relaxed);
+
+        Ok(json!({
+            "message_id": message.message_id,
+            "chat_id": message.chat.id
+        }))
+    }
+
+    async fn invoke_get_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let file_id = input
+            .get("file_id")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing file_id".into(),
+            })?;
+
+        let file = client.get_file(file_id).await.map_err(|e: TelegramError| FcpError::External {
+            service: "telegram".into(),
+            message: e.to_string(),
+            status_code: match &e {
+                TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                _ => None,
+            },
+            retryable: e.is_retryable(),
+            retry_after: None,
+        })?;
+
+        let download_url = file
+            .file_path
+            .as_ref()
+            .map(|p| client.file_download_url(p));
+
+        Ok(json!({
+            "file_id": file.file_id,
+            "file_unique_id": file.file_unique_id,
+            "file_size": file.file_size,
+            "file_path": file.file_path,
+            "download_url": download_url
+        }))
+    }
+
+    /// Handle subscribe method.
+    pub async fn handle_subscribe(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let topics = params
+            .get("topics")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(json!({
+            "confirmed_topics": topics,
+            "replay_supported": false
+        }))
+    }
+
+    /// Handle shutdown method.
+    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        info!("Shutting down Telegram connector");
+
+        // Stop polling
+        *self.poll_running.write().await = false;
+
+        if let Some(task) = self.poll_task.take() {
+            task.abort();
+        }
+
+        Ok(json!({ "status": "shutdown" }))
+    }
+
+    /// Start the polling loop.
+    async fn start_polling(&mut self) -> FcpResult<()> {
+        if *self.poll_running.read().await {
+            return Ok(()); // Already running
+        }
+
+        let client = self.client.clone().ok_or(FcpError::NotConfigured)?;
+        let config = self.config.clone().ok_or(FcpError::NotConfigured)?;
+        let event_tx = self.event_tx.clone();
+        let last_update_id = self.last_update_id.clone();
+        let poll_running = self.poll_running.clone();
+        let messages_received = self.messages_received.clone();
+        let instance_id = self.instance_id.clone();
+        let connector_id = self.id.clone();
+
+        *poll_running.write().await = true;
+
+        let task = tokio::spawn(async move {
+            info!("Starting Telegram polling loop");
+
+            while *poll_running.read().await {
+                let offset = last_update_id.read().await.map(|id| id + 1);
+
+                let request = GetUpdatesRequest {
+                    offset,
+                    limit: Some(100),
+                    timeout: Some(config.poll_timeout),
+                    allowed_updates: if config.allowed_updates.is_empty() {
+                        None
+                    } else {
+                        Some(config.allowed_updates.clone())
+                    },
+                };
+
+                let result: Result<Vec<Update>, TelegramError> = client.get_updates(request).await;
+                match result {
+                    Ok(updates) => {
+                        for update in updates {
+                            // Update the offset
+                            *last_update_id.write().await = Some(update.update_id);
+
+                            // Convert to event
+                            if let Some(event) = update_to_event(
+                                &update,
+                                &connector_id,
+                                &instance_id,
+                            ) {
+                                messages_received.fetch_add(1, Ordering::Relaxed);
+                                if event_tx.send(Ok(event)).is_err() {
+                                    info!("Event receiver dropped, closing polling loop");
+                                    *poll_running.write().await = false;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Polling error: {}", e);
+                        if !e.is_retryable() {
+                            error!("Non-retryable error, stopping polling");
+                            *poll_running.write().await = false;
+                            break;
+                        }
+                        // Wait before retry
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }
+
+            info!("Telegram polling loop stopped");
+        });
+
+        self.poll_task = Some(task);
+        Ok(())
+    }
+}
+
+/// Convert a Telegram Update to an FCP EventEnvelope.
+fn update_to_event(
+    update: &Update,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+) -> Option<EventEnvelope> {
+    let (topic, payload) = match &update.kind {
+        UpdateKind::Message(msg) | UpdateKind::EditedMessage(msg) => {
+            ("telegram.message", message_to_json(msg))
+        }
+        UpdateKind::ChannelPost(msg) | UpdateKind::EditedChannelPost(msg) => {
+            ("telegram.channel_post", message_to_json(msg))
+        }
+        UpdateKind::CallbackQuery(cb) => {
+            ("telegram.callback_query", json!({
+                "id": cb.id,
+                "from": cb.from,
+                "data": cb.data,
+                "chat_instance": cb.chat_instance
+            }))
+        }
+        UpdateKind::Unknown => return None,
+    };
+
+    let principal = Principal {
+        kind: "telegram_user".into(),
+        id: payload
+            .get("from")
+            .and_then(|f| f.get("id"))
+            .and_then(|id| id.as_i64())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "unknown".into()),
+        trust: TrustLevel::Untrusted,
+        display: payload
+            .get("from")
+            .and_then(|f| f.get("username"))
+            .and_then(|u| u.as_str())
+            .map(String::from),
+    };
+
+    let event_data = EventData {
+        connector_id: connector_id.clone(),
+        instance_id: instance_id.clone(),
+        zone_id: ZoneId::community(),
+        principal,
+        payload,
+        correlation_id: None,
+        resource_uris: vec![],
+    };
+
+    // update_id is always positive per Telegram API, but use saturating conversion for safety
+    let seq = u64::try_from(update.update_id).unwrap_or(0);
+    Some(EventEnvelope::new(topic, event_data).with_seq(seq))
+}
+
+/// Convert a Message to JSON.
+fn message_to_json(msg: &Message) -> serde_json::Value {
+    json!({
+        "message_id": msg.message_id,
+        "from": msg.from,
+        "chat": msg.chat,
+        "date": msg.date,
+        "text": msg.text,
+        "caption": msg.caption,
+        "has_photo": msg.photo.is_some(),
+        "has_document": msg.document.is_some(),
+        "has_audio": msg.audio.is_some(),
+        "has_video": msg.video.is_some(),
+        "has_voice": msg.voice.is_some(),
+        "reply_to_message_id": msg.reply_to_message.as_ref().map(|m| m.message_id),
+        "message_thread_id": msg.message_thread_id
+    })
+}
+
+impl Default for TelegramConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
