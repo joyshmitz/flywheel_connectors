@@ -644,36 +644,88 @@ pub struct Principal {
     pub display: Option<String>,
 }
 
-/// Trust level for principals and data sources.
+/// Trust level for principals.
+///
+/// Per FCP Specification Section 6.5 (Ingress Bindings):
+/// These are the canonical trust levels for external principals.
+/// Order is from lowest to highest trust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustLevel {
-    /// Fully untrusted - external/unknown origin
+    /// Explicitly denied access
+    Blocked,
+    /// Unauthenticated user
+    Anonymous,
+    /// Authenticated but not approved
     Untrusted,
-    /// Community content - public but verified source
-    Community,
-    /// Work-level trust - project collaborators
-    Work,
-    /// Private trust - personal data
-    Private,
-    /// Owner-level trust - full system access
-    Owner,
-    /// Admin-level trust - internal system processes
+    /// Explicitly approved external user
+    Paired,
+    /// Elevated but not root
     Admin,
+    /// Root trust (owner)
+    Owner,
+}
+
+/// Taint level for provenance tracking.
+///
+/// Per FCP Specification Section 7.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum TaintLevel {
+    /// Trusted source only
+    Untainted,
+    /// Untrusted input present in chain
+    Tainted,
+    /// Direct untrusted instruction
+    HighlyTainted,
+}
+
+impl Default for TaintLevel {
+    fn default() -> Self {
+        Self::Untainted
+    }
+}
+
+/// A step in the provenance chain.
+///
+/// Per FCP Specification Section 7.2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceStep {
+    /// Timestamp in milliseconds since epoch
+    pub timestamp_ms: u64,
+
+    /// Zone where this step occurred
+    pub zone: ZoneId,
+
+    /// Actor (agent/user/connector id)
+    pub actor: String,
+
+    /// Action performed (e.g., "discord.message", "tool.invoke")
+    pub action: String,
+
+    /// Resource URI or capability identifier
+    pub resource: String,
 }
 
 /// Provenance metadata for tracking data origin.
+///
+/// Per FCP Specification Section 7.2:
+/// - `origin_zone`: Where the triggering input originated
+/// - `chain`: Monotonic chain of causal steps
+/// - `taint`: Highest taint severity observed in the chain
+/// - `elevated`: Whether explicit elevation has been granted
+/// - `elevation_token`: Token proving elevation (if elevated)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     /// The zone where the request/data originated
     pub origin_zone: ZoneId,
 
-    /// The principal that initiated the request
-    pub origin_principal: String,
-
-    /// Taint labels attached to this request
+    /// Monotonic chain of causal steps
     #[serde(default)]
-    pub taints: Vec<TaintLabel>,
+    pub chain: Vec<ProvenanceStep>,
+
+    /// Highest taint severity observed in the chain
+    #[serde(default)]
+    pub taint: TaintLevel,
 
     /// Whether this request has been elevated
     #[serde(default)]
@@ -685,41 +737,69 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// Create provenance from a zone and principal.
+    /// Create provenance from an origin zone.
     #[must_use]
-    pub fn new(origin_zone: ZoneId, origin_principal: impl Into<String>) -> Self {
+    pub fn new(origin_zone: ZoneId) -> Self {
         Self {
             origin_zone,
-            origin_principal: origin_principal.into(),
-            taints: Vec::new(),
+            chain: Vec::new(),
+            taint: TaintLevel::Untainted,
             elevated: false,
             elevation_token: None,
         }
     }
-}
 
-/// Taint label indicating untrusted origin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaintLabel {
-    /// Source of the taint (e.g., "discord", "webhook")
-    pub source: String,
-
-    /// When the taint was applied
-    pub applied_at: chrono::DateTime<chrono::Utc>,
-
-    /// Zones this taint blocks access to
-    #[serde(default)]
-    pub blocked_zones: Vec<ZoneId>,
-}
-
-impl TaintLabel {
-    /// Create a new taint label from a source.
+    /// Create tainted provenance from an untrusted source.
     #[must_use]
-    pub fn new(source: impl Into<String>) -> Self {
+    pub fn tainted(origin_zone: ZoneId) -> Self {
         Self {
-            source: source.into(),
-            applied_at: chrono::Utc::now(),
-            blocked_zones: Vec::new(),
+            origin_zone,
+            chain: Vec::new(),
+            taint: TaintLevel::Tainted,
+            elevated: false,
+            elevation_token: None,
         }
+    }
+
+    /// Create highly tainted provenance from a direct untrusted instruction.
+    #[must_use]
+    pub fn highly_tainted(origin_zone: ZoneId) -> Self {
+        Self {
+            origin_zone,
+            chain: Vec::new(),
+            taint: TaintLevel::HighlyTainted,
+            elevated: false,
+            elevation_token: None,
+        }
+    }
+
+    /// Add a step to the provenance chain.
+    #[must_use]
+    pub fn with_step(mut self, step: ProvenanceStep) -> Self {
+        self.chain.push(step);
+        self
+    }
+
+    /// Mark as elevated with a token.
+    #[must_use]
+    pub fn elevated_with(mut self, token: impl Into<String>) -> Self {
+        self.elevated = true;
+        self.elevation_token = Some(token.into());
+        self
+    }
+
+    /// Check if this provenance is tainted.
+    #[must_use]
+    pub fn is_tainted(&self) -> bool {
+        !matches!(self.taint, TaintLevel::Untainted)
+    }
+
+    /// Check if this provenance can access a higher-trust zone.
+    ///
+    /// Per FCP spec, tainted provenance cannot access higher-trust zones
+    /// without explicit elevation.
+    #[must_use]
+    pub fn can_access_higher_trust(&self) -> bool {
+        !self.is_tainted() || self.elevated
     }
 }
