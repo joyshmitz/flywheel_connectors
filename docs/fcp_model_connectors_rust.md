@@ -35,8 +35,15 @@
 14. Registry and Supply Chain
     - 14.3 Supply Chain Attestations
 15. Lifecycle Management and Revocation
+    - 15.3 Revocation (RevocationEvent, RevocationHead, RevocationRegistry)
 16. Device-Aware Execution and Execution Leases
+    - 16.1 Execution Leases (NORMATIVE)
+    - 16.2 Device Profiles and Execution Planner
+    - 16.3 Device Requirements and Preferences
 17. Observability and Audit
+    - 17.1 Metrics (NORMATIVE)
+    - 17.2 Structured Logs
+    - 17.3 Audit Chain (AuditEvent, AuditHead, ZoneFrontier)
 18. Connector Archetypes (V2) and Patterns
 19. Rust Connector Skeleton (SDK-aligned)
 20. Conformance Checklist (Connector)
@@ -354,7 +361,7 @@ Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput
 |----------------|------------------|
 | invoke, response | health |
 | receipts | handshake, handshake_ack |
-| approvals (ApprovalToken) | decode_status |
+| approvals (elevation, declassification) | decode_status |
 | secret access | symbol_ack |
 | revocations | introspect |
 | audit events/heads | configure |
@@ -522,6 +529,34 @@ impl ApprovalToken {
     /// Default TTL: 5 minutes
     pub const DEFAULT_TTL_SECS: u64 = 300;
 
+    /// Verify token is valid
+    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), VerifyError> {
+        // Check expiry
+        if current_timestamp() > self.expires_at {
+            return Err(VerifyError::Expired);
+        }
+
+        // Verify approver authority
+        let approver_key = trust_anchors.get_principal_key(&self.approved_by)?;
+        approver_key.verify(&self.signable_bytes(), &self.signature)?;
+
+        // Verify approver has appropriate authority for the scope
+        match &self.scope {
+            ApprovalScope::Elevation { .. } => {
+                if !trust_anchors.can_approve_elevation(&self.approved_by) {
+                    return Err(VerifyError::InsufficientAuthority);
+                }
+            }
+            ApprovalScope::Declassification { from_zone, to_zone, .. } => {
+                if !trust_anchors.can_approve_declassification(&self.approved_by, from_zone, to_zone) {
+                    return Err(VerifyError::InsufficientAuthority);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create an elevation approval
     pub fn create_elevation(
         operation: OperationId,
@@ -640,13 +675,41 @@ Cross-zone movement updates `current_zone` and records zone crossings.
 ### 6.1 Capability Taxonomy (Non-exhaustive)
 
 ```
-fcp.*            Protocol/meta
-network.*        Network operations
-network.tls.*    TLS identity constraints (SNI / SPKI pin)
-storage.*        Persistence
-ipc.*            IPC
-system.*         System operations (restricted)
-[service].*      Service-specific capabilities
+fcp.*                    Protocol/meta operations
+├── fcp.connect          Establish connection
+├── fcp.handshake        Complete handshake
+└── fcp.introspect       Query capabilities
+
+network.*                Network operations
+├── network.egress       Outbound access via MeshNode egress proxy (DEFAULT in strict/moderate sandboxes)
+├── network.raw_outbound:* Direct sockets (RARE; permissive sandbox only)
+├── network.inbound:*    Listen for connections
+└── network.dns          DNS resolution (explicit capability; policy surface)
+
+network.tls.*            TLS identity constraints (NORMATIVE for sensitive connectors)
+├── network.tls.sni       Enforce SNI hostname match
+└── network.tls.spki_pin  Enforce SPKI pin(s) for target host(s)
+
+storage.*                Data persistence
+├── storage.persistent   Durable storage
+├── storage.ephemeral    Temporary storage
+└── storage.encrypted    Encrypted storage
+
+ipc.*                    Inter-process communication
+├── ipc.gateway          Gateway communication
+└── ipc.agent            Agent communication
+
+system.*                 System operations (restricted)
+├── system.info          System information (readonly)
+├── system.exec          Execute commands (dangerous)
+└── system.env           Environment variables
+
+[service].*              Service-specific capabilities
+├── telegram.*           Telegram operations
+├── discord.*            Discord operations
+├── gmail.*              Gmail operations
+├── calendar.*           Calendar operations
+└── ...                  Other services
 ```
 
 ### 6.2 Capability Definition
@@ -811,6 +874,36 @@ pub struct CapabilityToken {
     pub rev_seq: u64,
     /// Ed25519 signature (by iss_node's issuance key)
     pub sig: [u8; 64],
+}
+
+pub struct CapabilityGrant {
+    /// Granted capability
+    pub capability: CapabilityId,
+    /// Optional operation-level restriction
+    pub operation: Option<OperationId>,
+}
+
+impl CapabilityToken {
+    /// Default TTL: 5 minutes
+    pub const DEFAULT_TTL_SECS: u64 = 300;
+
+    /// Verify token validity (NORMATIVE)
+    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), TokenError> {
+        // Check expiry
+        if current_timestamp() > self.exp {
+            return Err(TokenError::Expired);
+        }
+
+        // Verify signature using node issuance pubkey (NOT signing key, NOT zone key)
+        // The issuing node must have a valid NodeKeyAttestation from owner
+        let issuer_pubkey = trust_anchors.get_node_iss_pubkey(&self.iss_node, &self.kid)?;
+        issuer_pubkey.verify(&self.signable_bytes(), &self.sig)?;
+
+        // Enforce that issuing node is authorized to mint tokens for this zone
+        trust_anchors.enforce_token_issuer_policy(&self.iss_zone, &self.iss_node)?;
+
+        Ok(())
+    }
 }
 ```
 
@@ -1366,6 +1459,8 @@ impl RevocationRegistry {
 ---
 
 ## 16. Device-Aware Execution and Execution Leases
+
+### 16.1 Execution Leases (NORMATIVE)
 
 Execution leases prevent duplicate side effects and stabilize migration:
 
