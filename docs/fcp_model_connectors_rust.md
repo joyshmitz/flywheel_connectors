@@ -1394,6 +1394,7 @@ Lease semantics:
 Device-aware execution uses profiles and placement policies to choose the best node:
 
 ```rust
+/// Device profile (NORMATIVE)
 pub struct DeviceProfile {
     pub node_id: TailscaleNodeId,
     pub hostname: String,
@@ -1402,8 +1403,66 @@ pub struct DeviceProfile {
     pub current_state: DeviceState,
 }
 
+pub enum DeviceClass {
+    Desktop { os: String },
+    Laptop { os: String, battery: bool },
+    Phone { os: String },
+    Tablet { os: String },
+    Server,
+    Browser,
+}
+
+pub struct DeviceCapabilities {
+    pub cpu_cores: u8,
+    pub memory_mb: u32,
+    pub gpu: Option<GpuInfo>,
+    pub storage_mb: u64,
+    pub network: NetworkCapability,
+}
+
+/// Execution planner (NORMATIVE)
 pub struct ExecutionPlanner {
     pub devices: Vec<DeviceProfile>,
+}
+```
+
+### 16.3 Device Requirements and Preferences
+
+The placement policy uses requirements and preferences to guide device selection:
+
+```rust
+/// Device requirements (NORMATIVE)
+pub enum DeviceRequirement {
+    /// Must have GPU
+    Gpu { min_vram_mb: u32 },
+    /// Must have minimum memory
+    Memory { min_mb: u32 },
+    /// Must be on power (not battery)
+    OnPower,
+    /// Must have specific software
+    Software { name: String, version: Option<String> },
+    /// Must have network connectivity
+    Network { min_bandwidth_mbps: Option<u32> },
+    /// Must have specific Tailscale tag
+    TailscaleTag(String),
+    /// Required connector must be available (installed or fetchable)
+    ConnectorAvailable { connector_id: ConnectorId, min_version: Option<Version> },
+    /// Secret must be reconstructable under current policy
+    SecretReconstructable { secret_id: SecretId, min_nodes: u8 },
+    /// Must have sufficient quota headroom in the target zone store
+    ZoneQuotaHeadroom { zone_id: ZoneId, min_free_mb: u32 },
+}
+
+/// Device preferences (NORMATIVE)
+pub enum DevicePreference {
+    /// Prefer devices with lower latency
+    LowLatency { max_ms: u32, weight: f32 },
+    /// Prefer devices with more resources
+    HighResources { weight: f32 },
+    /// Prefer specific device
+    SpecificDevice { node_id: TailscaleNodeId, weight: f32 },
+    /// Prefer devices where data is local
+    DataLocality { object_ids: Vec<ObjectId>, weight: f32 },
 }
 ```
 
@@ -1414,18 +1473,27 @@ including latency, resources, data locality, secret reconstruction cost, and DER
 
 ## 17. Observability and Audit
 
-Metrics (NORMATIVE):
+### 17.1 Metrics (NORMATIVE)
+
+Required metrics:
 
 - Request counts, latencies, error rates
 - Resource usage
 - Rate-limit denials
 - Zone/taint denials
 
+### 17.2 Structured Logs
+
 Structured logs MUST:
 
 - Be JSON
 - Redact secrets
 - Include `correlation_id`, `zone_id`, and `connector_id`
+
+### 17.3 Audit Chain (NORMATIVE)
+
+Audit is an append-only, hash-linked object chain per zone. This makes "tamper-evident by construction"
+a testable, interoperable mechanism.
 
 Audit events MUST be recorded for:
 
@@ -1435,14 +1503,79 @@ Audit events MUST be recorded for:
 - Zone transitions
 - Security violations
 
-Audit chain (per zone) is append-only and hash-linked. Audit heads are quorum-signed; nodes MUST refuse to
-advance an audit head without quorum unless explicitly in degraded mode.
+```rust
+/// Audit event (NORMATIVE)
+pub struct AuditEvent {
+    pub header: ObjectHeader,
+    /// Correlation ID for request tracing
+    pub correlation_id: [u8; 16],
+    /// Event type (e.g., "secret.access", "capability.invoke", "elevation.granted")
+    pub event_type: String,
+    /// Actor who triggered the event
+    pub actor: PrincipalId,
+    /// Zone where event occurred
+    pub zone_id: ZoneId,
+    /// Connector ID (if applicable)
+    pub connector_id: Option<ConnectorId>,
+    /// Operation ID (if applicable)
+    pub operation: Option<OperationId>,
+    /// Capability token JTI (if applicable)
+    pub capability_token_jti: Option<Uuid>,
+    /// Request object ID (if applicable)
+    pub request_object_id: Option<ObjectId>,
+    /// Result object ID (if applicable)
+    pub result_object_id: Option<ObjectId>,
+    /// Previous event in chain (hash link)
+    pub prev: Option<ObjectId>,
+    /// Monotonic chain sequence number (NORMATIVE)
+    pub seq: u64,
+    /// When event occurred
+    pub occurred_at: u64,
+    /// Signature by executing node
+    pub signature: Signature,
+}
 
-Fork detection (NORMATIVE): if multiple heads are discovered for the same epoch, nodes MUST log the fork,
-refuse to advance, and alert the owner for manual resolution.
+/// Audit head checkpoint (NORMATIVE)
+pub struct AuditHead {
+    pub header: ObjectHeader,
+    /// Zone this head covers
+    pub zone_id: ZoneId,
+    /// Head event ObjectId
+    pub head_event: ObjectId,
+    /// Sequence number of head_event (NORMATIVE)
+    pub head_seq: u64,
+    /// Fraction of expected nodes contributing
+    pub coverage: f64,
+    /// Epoch this head was checkpointed
+    pub epoch_id: EpochId,
+    /// Quorum signatures from nodes
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
 
-Audit events carry a monotonic `seq`. Audit heads include `head_seq`. For fast synchronization,
-nodes use `ZoneFrontier` checkpoints that include `rev_head`, `rev_seq`, `audit_head`, and `audit_seq`.
+/// Frontier checkpoint for fast sync (NORMATIVE)
+///
+/// Compact checkpoint of zone state for efficient synchronization.
+/// Nodes can compare frontiers to quickly determine staleness.
+pub struct ZoneFrontier {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub rev_head: ObjectId,
+    pub rev_seq: u64,
+    pub audit_head: ObjectId,
+    pub audit_seq: u64,
+    pub as_of_epoch: EpochId,
+    /// Signature by executing node
+    pub signature: Signature,
+}
+```
+
+**Quorum Rule (default):** CriticalWrite requires n - f signatures (see V2 spec §18).
+Nodes MUST refuse to advance AuditHead if quorum is not satisfied, unless in explicit degraded mode.
+
+**Fork Detection (NORMATIVE):** Nodes discovering multiple heads for the same epoch MUST:
+1. Log the fork event
+2. Refuse to advance until reconciled
+3. Alert owner for manual resolution
 
 ---
 
