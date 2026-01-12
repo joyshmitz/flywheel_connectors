@@ -37,7 +37,7 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
 | **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
-| **Capability Tokens** | Cryptographically-scoped authorization signed by attested node issuance keys |
+| **Capability Tokens** | Provable authority with grant_object_ids linking to issuing attestations; mechanically verifiable chains |
 | **Threshold Owner Key** | FROST signing so no single device holds the complete owner private key |
 | **Threshold Secrets** | Shamir secret sharing with k-of-n across devices—never complete anywhere |
 | **Computation Migration** | Operations execute on the optimal device automatically |
@@ -117,7 +117,7 @@ FCP addresses these through:
 | **Zone** | A cryptographic namespace with HKDF-derived encryption key |
 | **Epoch** | A logical time unit; no ordering within, ordering between |
 | **MeshNode** | A device participating in the FCP mesh |
-| **Capability** | An authorized operation with cryptographic proof |
+| **Capability** | An authorized operation with cryptographic proof; grant_object_ids enable mechanical verification |
 | **Connector** | A sandboxed binary that bridges external services to FCP |
 | **Receipt** | Signed proof of operation execution for idempotency |
 | **Revocation** | First-class object that invalidates tokens, keys, or devices |
@@ -235,6 +235,7 @@ Symbol Approach:
 | **DoS Resistant** | Attackers can't target "important" symbols |
 | **Offline Resilient** | Partial availability = partial reconstruction |
 | **Key Rotation Safe** | zone_key_id in each symbol enables seamless rotation |
+| **Chunked Objects** | Large payloads split via ChunkedObjectManifest for partial retrieval and targeted repair |
 
 ### Frame Format (FCPS)
 
@@ -253,12 +254,12 @@ Symbol Approach:
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
 │  Bytes 58-73:  Zone ID hash (16 bytes)                                      │
 │  Bytes 74-81:  Epoch ID (u64 LE)                                            │
-│  Bytes 82-89:  Nonce Base (8 bytes, for per-symbol nonce derivation)        │
+│  Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic counter)             │
 │  Bytes 90+:    Symbol payloads (encrypted, concatenated)                    │
 │  Final 8:      Checksum (XXH3-64)                                           │
 │                                                                             │
 │  Fixed header: 90 bytes                                                     │
-│  Per-symbol nonce: derived as nonce_base || esi_le (NOT stored per-symbol)  │
+│  Per-symbol nonce: derived as frame_seq || esi_le (deterministic)           │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -267,11 +268,14 @@ Symbol Approach:
 
 High-throughput symbol delivery uses per-session authentication (not per-frame signatures):
 
-1. **Handshake**: One-time X25519 ECDH authenticated by attested node signing keys
-2. **Session key**: HKDF-derived from ECDH shared secret
-3. **Per-frame MAC**: Poly1305 MAC + monotonic sequence number for anti-replay
+1. **Handshake**: X25519 ECDH authenticated by attested node signing keys, with crypto suite negotiation
+2. **Session keys**: HKDF-derived directional MAC keys (k_mac_i2r, k_mac_r2i) from ECDH shared secret
+3. **Per-sender subkeys**: Each sender derives a unique subkey via HKDF to eliminate cross-sender nonce collision risk
+4. **Per-frame MAC**: HMAC-SHA256 or BLAKE3 (negotiated) with per-sender monotonic frame_seq for anti-replay
 
-This amortizes Ed25519 signature cost over many frames while preserving cryptographic attribution.
+**Crypto Suite Negotiation**: Initiator proposes supported suites; responder selects. Suite1 uses HMAC-SHA256 (broad compatibility), Suite2 uses BLAKE3 (performance). This avoids Poly1305 single-use constraints while enabling future algorithm agility.
+
+This amortizes Ed25519 signature cost over many frames while preserving cryptographic attribution and preventing nonce reuse across senders.
 
 ---
 
@@ -449,13 +453,15 @@ ConnectorStateObject {
 }
 ```
 
+**Periodic Snapshots**: Connectors emit `ConnectorStateSnapshot` objects at configurable intervals, enabling compaction of the state chain while preserving fork detection for singleton_writer connectors.
+
 **Local `$CONNECTOR_STATE` is a cache only**—the authoritative state lives as mesh objects. This enables:
 
 - **Safe failover**: Another node can resume from last committed state
 - **Resumable polling**: Cursors survive node restarts and migrations
 - **Deterministic migration**: State is explicit, not implicit in process memory
 
-**Single-Writer Semantics**: Connectors declaring `singleton_writer = true` use execution leases to ensure only one node writes state at a time, preventing double-polling and cursor conflicts.
+**Single-Writer Semantics**: Connectors declaring `singleton_writer = true` use execution leases to ensure only one node writes state at a time. Leases are coordinated via HRW (rendezvous hashing) to deterministically select a coordinator from online nodes, with quorum signatures for distributed issuance. This prevents double-polling and cursor conflicts while surviving coordinator failures.
 
 ---
 
@@ -474,6 +480,7 @@ FCP defends against:
 | Prompt injection via messages | Protocol-level filtering, taint tracking with proof-carrying reductions, no code execution |
 | Privilege escalation | Static capability allocation, no runtime grants, unified ApprovalToken for elevation/declassification |
 | Replay attacks | Session MACs with monotonic seq, epoch binding, receipts |
+| DoS / resource exhaustion | Admission control with PeerBudget, anti-amplification rules, per-peer rate limiting |
 | Key compromise | Revocation objects with monotonic seq for O(1) freshness, key rotation with zone_key_id |
 | Supply chain attacks | in-toto attestations, SLSA provenance, reproducible builds, transparency log, mesh mirroring |
 
@@ -521,6 +528,8 @@ OperationReceipt {
 
 On retry with same idempotency key, mesh returns prior receipt instead of re-executing.
 
+**OperationIntent Pre-commit**: For Strict or Risky operations, callers first write an `OperationIntent` object containing the idempotency key, then invoke. Executors check that the intent exists, preventing accidental re-execution during retries. This provides exactly-once semantics for operations with external side effects.
+
 ### Revocation
 
 First-class revocation objects can invalidate:
@@ -534,6 +543,17 @@ First-class revocation objects can invalidate:
 | ConnectorBinary | Supply chain incident response |
 
 Revocations are owner-signed and enforced before every operation.
+
+### Admission Control
+
+Nodes enforce per-peer resource budgets to prevent DoS:
+
+| Mechanism | Purpose |
+|-----------|---------|
+| **PeerBudget** | Per-peer limits on bytes/sec, frames/sec, pending requests |
+| **Anti-amplification** | Response size ≤ N × request size until peer authenticated |
+| **Rate limiting** | Sliding window enforcement with configurable burst |
+| **Backpressure** | Reject new requests when budget exhausted |
 
 ### Audit Chain
 
@@ -556,6 +576,7 @@ ZoneFrontier {
 - ZoneFrontier enables fast sync without chain traversal
 - Fork detection triggers alerts
 - Required events: secret access, risky operations, approvals, zone transitions
+- **TraceContext propagation**: W3C-compatible trace_id/span_id flow through InvokeRequest and AuditEvent for end-to-end distributed tracing
 
 ---
 
