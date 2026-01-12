@@ -32,15 +32,6 @@ pub trait StreamExt: Stream {
         BatchStream::new(self, max_size, max_wait)
     }
 
-    /// Filter and map in one operation.
-    fn filter_map_async<F, Fut, U>(self, f: F) -> FilterMapStream<Self, F>
-    where
-        Self: Sized,
-        F: FnMut(Self::Item) -> Fut,
-        Fut: Future<Output = Option<U>>,
-    {
-        FilterMapStream::new(self, f)
-    }
 }
 
 impl<S: Stream> StreamExt for S {}
@@ -194,22 +185,6 @@ where
     }
 }
 
-pin_project! {
-    /// Async filter-map stream.
-    pub struct FilterMapStream<S, F> {
-        #[pin]
-        inner: S,
-        f: F,
-    }
-}
-
-impl<S, F> FilterMapStream<S, F> {
-    /// Create a new filter-map stream.
-    pub fn new(inner: S, f: F) -> Self {
-        Self { inner, f }
-    }
-}
-
 /// Counting stream that tracks items processed.
 #[derive(Debug)]
 pub struct CountingStream<S> {
@@ -244,11 +219,17 @@ impl<S: Stream + Unpin> Stream for CountingStream<S> {
     }
 }
 
-/// Rate-limited stream.
-pub struct RateLimitedStream<S> {
-    inner: S,
-    interval: Duration,
-    next_allowed: Option<tokio::time::Instant>,
+pin_project! {
+    /// Rate-limited stream.
+    ///
+    /// Ensures minimum interval between stream items.
+    pub struct RateLimitedStream<S> {
+        #[pin]
+        inner: S,
+        interval: Duration,
+        #[pin]
+        delay: Option<Sleep>,
+    }
 }
 
 impl<S> RateLimitedStream<S> {
@@ -257,28 +238,31 @@ impl<S> RateLimitedStream<S> {
         Self {
             inner,
             interval,
-            next_allowed: None,
+            delay: None,
         }
     }
 }
 
-impl<S: Stream + Unpin> Stream for RateLimitedStream<S> {
+impl<S: Stream> Stream for RateLimitedStream<S> {
     type Item = S::Item;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let now = tokio::time::Instant::now();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
 
-        // Check if we need to wait
-        if let Some(next) = self.next_allowed {
-            if now < next {
-                cx.waker().wake_by_ref();
-                return Poll::Pending;
+        // If there's a pending delay, wait for it
+        if let Some(delay) = this.delay.as_mut().as_pin_mut() {
+            match delay.poll(cx) {
+                Poll::Ready(()) => {
+                    this.delay.set(None);
+                }
+                Poll::Pending => return Poll::Pending,
             }
         }
 
-        match Pin::new(&mut self.inner).poll_next(cx) {
+        match this.inner.poll_next(cx) {
             Poll::Ready(Some(item)) => {
-                self.next_allowed = Some(now + self.interval);
+                // Schedule delay for next item
+                this.delay.set(Some(sleep(*this.interval)));
                 Poll::Ready(Some(item))
             }
             other => other,
