@@ -2071,6 +2071,11 @@ Implementation notes:
 
 ## 20. Conformance Checklist (Connector)
 
+**Per-Sender Nonce/Subkey Summary (Connector-Facing):**
+For every zone, maintain a per-sender monotonic `frame_seq` per `(zone_id, zone_key_id)` and
+derive nonces as `frame_seq_le || esi_le`. Encrypt/decrypt symbols with a per-sender subkey
+derived from the zone key and `source_id`. Never reuse a `frame_seq` for the same zone key.
+
 Connector MUST:
 
 **Protocol:**
