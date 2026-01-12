@@ -145,9 +145,19 @@ impl TelegramConnector {
         // Start polling if not already running
         self.start_polling().await?;
 
+        // Convert capability IDs to grants
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {
+                capability: cap,
+                operation: None,
+            })
+            .collect();
+
         let response = HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            capabilities_granted,
             session_id,
             manifest_hash: "sha256:telegram-connector-v1".into(),
             nonce: req.nonce,
@@ -201,6 +211,7 @@ impl TelegramConnector {
                 OperationInfo {
                     id: OperationId("telegram.send_message".into()),
                     summary: "Send a text message to a Telegram chat".into(),
+                    description: Some("Sends a text message to a specified Telegram chat, user, or group.".into()),
                     input_schema: json!({
                         "type": "object",
                         "properties": {
@@ -219,7 +230,7 @@ impl TelegramConnector {
                         }
                     }),
                     capability: CapabilityId("telegram.send".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
@@ -234,10 +245,13 @@ impl TelegramConnector {
                         ],
                         related: vec![],
                     },
+                    rate_limit: None,
+                    requires_approval: None,
                 },
                 OperationInfo {
                     id: OperationId("telegram.get_file".into()),
                     summary: "Get file information for downloading".into(),
+                    description: Some("Retrieves file information including download path for files attached to messages.".into()),
                     input_schema: json!({
                         "type": "object",
                         "properties": {
@@ -254,7 +268,7 @@ impl TelegramConnector {
                         }
                     }),
                     capability: CapabilityId("telegram.read".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -263,6 +277,8 @@ impl TelegramConnector {
                         examples: vec![],
                         related: vec![],
                     },
+                    rate_limit: None,
+                    requires_approval: None,
                 },
             ],
             events: vec![EventInfo {

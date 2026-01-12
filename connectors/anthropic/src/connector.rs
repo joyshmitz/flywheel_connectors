@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, CapabilityId, FcpError, FcpResult, IdempotencyClass, Introspection, OperationId,
-    OperationInfo, SafetyTier,
+    OperationInfo, RiskLevel, SafetyTier,
 };
 use serde_json::json;
 use tracing::{info, instrument};
@@ -162,7 +162,10 @@ impl AnthropicConnector {
                         }
                     }),
                     capability: CapabilityId("anthropic.messages".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
@@ -209,7 +212,10 @@ impl AnthropicConnector {
                         }
                     }),
                     capability: CapabilityId("anthropic.messages".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
@@ -239,7 +245,10 @@ impl AnthropicConnector {
                         }
                     }),
                     capability: CapabilityId("anthropic.messages".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {

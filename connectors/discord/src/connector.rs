@@ -5,7 +5,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use fcp_core::*;
+use fcp_core::{
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId, EventCaps,
+    EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, Principal, RiskLevel,
+    SafetyTier, SessionId, TrustLevel, ZoneId,
+};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -139,9 +144,19 @@ impl DiscordConnector {
         // Connect to gateway
         self.connect_gateway().await?;
 
+        // Convert capability IDs to grants
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {
+                capability: cap,
+                operation: None,
+            })
+            .collect();
+
         let response = HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            capabilities_granted,
             session_id,
             manifest_hash: "sha256:discord-connector-v1".into(),
             nonce: req.nonce,
@@ -213,7 +228,10 @@ impl DiscordConnector {
                         }
                     }),
                     capability: CapabilityId("discord.send".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
@@ -249,7 +267,10 @@ impl DiscordConnector {
                         }
                     }),
                     capability: CapabilityId("discord.edit".into()),
-                    risk_level: "medium".into(),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -277,7 +298,10 @@ impl DiscordConnector {
                         }
                     }),
                     capability: CapabilityId("discord.delete".into()),
-                    risk_level: "high".into(),
+                    risk_level: RiskLevel::High,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Dangerous,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -306,7 +330,10 @@ impl DiscordConnector {
                         }
                     }),
                     capability: CapabilityId("discord.read".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -336,7 +363,10 @@ impl DiscordConnector {
                         }
                     }),
                     capability: CapabilityId("discord.read".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
@@ -367,7 +397,10 @@ impl DiscordConnector {
                         }
                     }),
                     capability: CapabilityId("discord.send".into()),
-                    risk_level: "low".into(),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
