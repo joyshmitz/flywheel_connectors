@@ -15,10 +15,16 @@
 
 1. Scope and Alignment
 2. Connector Model and Lifecycle (V2)
+   - 2.2 Connector State (NORMATIVE)
 3. Control-Plane Protocol (FCP2-SYM)
+   - 3.5 Session Authentication (NORMATIVE)
+   - 3.6 Control Plane Retention Classes (NORMATIVE)
 4. Canonical Types and Serialization
-5. Zones, Declassification, Provenance, Taint, Elevation
+5. Zones, Approval Tokens, Provenance, and Taint
+   - 5.2 Unified Approval Token
+   - 5.3 Provenance and Taint (with taint_reductions)
 6. Capability System
+   - 6.3 Network Constraints (with CIDR deny, Egress Proxy)
 7. Invoke, Receipts, and Event Envelopes
 8. Streaming, Replay, and Acks
 9. Error Taxonomy
@@ -27,6 +33,7 @@
 12. Sandbox Profiles and Enforcement
 13. Automation Recipes and Provisioning Interface
 14. Registry and Supply Chain
+    - 14.3 Supply Chain Attestations
 15. Lifecycle Management and Revocation
 16. Device-Aware Execution and Execution Leases
 17. Observability and Audit
@@ -114,6 +121,61 @@ DISCOVERED -> VERIFIED -> INSTALLED -> CONFIGURED -> ACTIVE
                                           -> STOPPED
 ```
 
+### 2.2 Connector State (NORMATIVE)
+
+Connectors with polling/cursors/dedup caches MUST externalize their canonical state into the mesh.
+Local `$CONNECTOR_STATE` is a **cache only** — the authoritative state lives as mesh objects.
+
+This enables:
+- **Safe failover**: Another node can resume from the last committed state
+- **Resumable polling**: Cursors survive node restarts and migrations
+- **Deterministic migration semantics**: State is explicit, not implicit in process memory
+
+```rust
+/// Stable root for connector state (NORMATIVE)
+pub struct ConnectorStateRoot {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    /// Latest ConnectorStateObject (or None if no state yet)
+    pub head: Option<ObjectId>,
+}
+
+/// Append-only connector state update (NORMATIVE)
+pub struct ConnectorStateObject {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    pub prev: Option<ObjectId>,
+    /// Monotonic sequence for ordering
+    pub seq: u64,
+    /// Canonical connector-specific state blob
+    pub state_cbor: Vec<u8>,
+    pub updated_at: u64,
+    /// Signature by executing node
+    pub signature: Signature,
+}
+```
+
+**Single-Writer Semantics (NORMATIVE):**
+
+For any connector declaring `singleton_writer = true` in its manifest, the MeshNode MUST ensure
+only one node writes `ConnectorStateObject` updates at a time. This is enforced using
+`ExecutionLease` over `ConnectorStateRoot.object_id` or an equivalent lease primitive.
+
+```toml
+# In connector manifest
+[connector]
+singleton_writer = true  # Only one node can write state at a time
+```
+
+This prevents:
+- Double-polling the same messages
+- Duplicate event processing
+- Cursor conflicts during migration
+
 ---
 
 ## 3. Control-Plane Protocol (FCP2-SYM)
@@ -143,6 +205,40 @@ DISCOVERED -> VERIFIED -> INSTALLED -> CONFIGURED -> ACTIVE
 | `symbol_delivery` | Any -> Any | Deliver symbols (mesh) |
 | `decode_status` | Any -> Any | Feedback: received/needed symbols |
 | `symbol_ack` | Any -> Any | Stop condition for delivery |
+
+**FCPS Frame Format (90-byte header):**
+
+```
+Bytes 0-3:    Magic (0x46 0x43 0x50 0x53 = "FCPS")
+Bytes 4-5:    Version (u16 LE)
+Bytes 6-7:    Flags (u16 LE)
+Bytes 8-11:   Symbol Count (u32 LE)
+Bytes 12-15:  Total Payload Length (u32 LE)
+Bytes 16-47:  Object ID (32 bytes)
+Bytes 48-49:  Symbol Size (u16 LE, default 1024)
+Bytes 50-57:  Zone Key ID (8 bytes, for rotation)
+Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)
+Bytes 74-81:  Epoch ID (u64 LE)
+Bytes 82-89:  Nonce Base (8 bytes, for per-symbol nonce derivation)
+Bytes 90+:    Symbol payloads (concatenated)
+Final 8:      Checksum (XXH3-64)
+```
+
+**Nonce Derivation (NORMATIVE):**
+
+Per-symbol nonces are derived from frame_nonce_base and ESI, eliminating per-symbol RNG overhead
+and saving 12 bytes/symbol bandwidth:
+
+```rust
+/// Derive per-symbol nonce from frame_nonce_base and ESI
+/// nonce = frame_nonce_base[0..8] || esi_le[0..4]
+fn derive_nonce(frame_nonce_base: &[u8; 8], esi: u32) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[0..8].copy_from_slice(frame_nonce_base);
+    nonce[8..12].copy_from_slice(&esi.to_le_bytes());
+    nonce
+}
+```
 
 ### 3.3 Standard Methods
 
@@ -181,6 +277,75 @@ Transport options:
 
 When `FrameFlags::CONTROL_PLANE` is set, receivers MUST verify checksum, decrypt symbols, reconstruct the object,
 verify schema, and store the object (subject to node-local retention policy).
+
+### 3.5 Session Authentication (NORMATIVE)
+
+Ed25519 signatures per data-plane frame are too expensive when frames are near MTU (often ~1 symbol/frame).
+FCP authenticates data-plane FCPS frames via a **session**:
+
+1. A one-time handshake authenticated by attested node signing keys
+2. Session-key derivation (X25519 ECDH + HKDF)
+3. Per-frame MAC + sequence number for anti-replay
+
+```rust
+/// Session handshake: initiator → responder
+pub struct MeshSessionHello {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub timestamp: u64,
+    /// Node signature over transcript
+    pub signature: Signature,
+}
+
+/// Session handshake: responder → initiator
+pub struct MeshSessionAck {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub session_id: [u8; 16],
+    pub timestamp: u64,
+    /// Node signature over transcript
+    pub signature: Signature,
+}
+
+/// Session key derivation (NORMATIVE)
+/// session_key = HKDF-SHA256(
+///     ikm = ECDH(initiator_eph, responder_eph),
+///     salt = session_id,
+///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
+/// )
+
+/// Authenticated FCPS frame (NORMATIVE)
+pub struct AuthenticatedFcpsFrame {
+    pub frame: FcpsFrame,
+    pub source_id: TailscaleNodeId,
+    pub session_id: [u8; 16],
+    /// Monotonic sequence for anti-replay
+    pub seq: u64,
+    /// Poly1305(session_key, session_id || seq || frame_bytes)
+    pub mac: [u8; 16],
+}
+```
+
+**Why session MACs instead of per-frame signatures:**
+- Ed25519 signing is expensive at scale (especially mobile)
+- AEAD already provides per-symbol cryptographic integrity
+- Session establishment amortizes signature cost over many frames
+- Preserves "cryptographic attribution independent of transport" goal
+
+Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput delivery MUST support session MACs.
+
+### 3.6 Control Plane Retention Classes (NORMATIVE)
+
+| Must Be Stored | May Be Ephemeral |
+|----------------|------------------|
+| invoke, response | health |
+| receipts | handshake, handshake_ack |
+| approvals (elevation, declassification) | decode_status |
+| secret access | symbol_ack |
+| revocations | introspect |
+| audit events/heads | configure |
 
 ---
 
@@ -290,7 +455,7 @@ background repair to maintain target coverage.
 
 ---
 
-## 5. Zones, Declassification, Provenance, Taint, Elevation
+## 5. Zones, Approval Tokens, Provenance, and Taint
 
 ### 5.1 Zone
 
@@ -308,22 +473,61 @@ pub struct Zone {
 }
 ```
 
-### 5.2 Declassification Token
+### 5.2 Unified Approval Token
 
-Used when moving data from higher confidentiality to lower confidentiality (e.g., z:private -> z:public).
+The unified ApprovalToken replaces separate elevation and declassification tokens with a single type.
+This simplifies: UI prompting, audit, verification code paths, and policy enforcement.
 
 ```rust
-/// Declassification token for confidentiality downgrades (NORMATIVE)
-pub struct DeclassificationToken {
+/// Unified approval token (NORMATIVE)
+pub struct ApprovalToken {
     pub token_id: ObjectId,
-    pub from_zone: ZoneId,
-    pub to_zone: ZoneId,
-    pub object_ids: Vec<ObjectId>,
+    pub scope: ApprovalScope,
+    /// Human-readable justification (UI + audit)
     pub justification: String,
     pub approved_by: PrincipalId,
     pub approved_at: u64,
     pub expires_at: u64,
     pub signature: Signature,
+}
+
+/// Approval scope (NORMATIVE)
+pub enum ApprovalScope {
+    /// Integrity elevation for a specific operation + provenance
+    Elevation {
+        operation: OperationId,
+        original_provenance: Provenance,
+    },
+    /// Confidentiality downgrade for specific objects
+    Declassification {
+        from_zone: ZoneId,
+        to_zone: ZoneId,
+        object_ids: Vec<ObjectId>,
+    },
+}
+
+impl ApprovalToken {
+    /// Default TTL: 5 minutes
+    pub const DEFAULT_TTL_SECS: u64 = 300;
+
+    /// Create an elevation approval
+    pub fn create_elevation(
+        operation: OperationId,
+        provenance: &Provenance,
+        approver: &Identity,
+        justification: &str,
+        ttl: Option<u64>,
+    ) -> Self;
+
+    /// Create a declassification approval
+    pub fn create_declassification(
+        from_zone: ZoneId,
+        to_zone: ZoneId,
+        object_ids: Vec<ObjectId>,
+        approver: &Identity,
+        justification: &str,
+        ttl: Option<u64>,
+    ) -> Self;
 }
 ```
 
@@ -334,24 +538,46 @@ pub struct DeclassificationToken {
 #[derive(Clone)]
 pub struct Provenance {
     pub origin_zone: ZoneId,
+    /// Current zone (updated on every zone crossing)
     pub current_zone: ZoneId,
     pub origin_integrity: u8,
     pub origin_confidentiality: u8,
     pub origin_principal: Option<PrincipalId>,
+    /// Taint flags (compositional: merged via OR across inputs)
     pub taint: TaintFlags,
+    /// Taint reductions, each justified by a verifiable attestation (NORMATIVE)
+    /// Allows specific taints to be cleared with proof (e.g., URL scan, malware check)
+    pub taint_reductions: Vec<TaintReduction>,
     pub zone_crossings: Vec<ZoneCrossing>,
     pub created_at: u64,
+}
+
+/// Proof-carrying taint reduction (NORMATIVE)
+///
+/// Allows clearing specific taints when you can point to a verifiable attestation.
+/// Examples:
+/// - URL scanning cleared UNVERIFIED_LINK
+/// - Malware scan cleared UNVERIFIED_LINK
+/// - Strict schema validation cleared PROMPT_SURFACE for that field
+#[derive(Clone)]
+pub struct TaintReduction {
+    /// Which taints are cleared
+    pub clears: TaintFlags,
+    /// Attestation/receipt ObjectId that justifies the reduction
+    pub by_attestation: ObjectId,
+    /// When the reduction was applied
+    pub applied_at: u64,
 }
 
 bitflags! {
     /// Taint flags (NORMATIVE)
     pub struct TaintFlags: u32 {
         const NONE            = 0;
-        const PUBLIC_INPUT    = 1 << 0;
-        const EXTERNAL_INPUT  = 1 << 1;
-        const UNVERIFIED_LINK = 1 << 2;
-        const USER_SUPPLIED   = 1 << 3;
-        const PROMPT_SURFACE  = 1 << 4;
+        const PUBLIC_INPUT    = 1 << 0;  // e.g. z:public messages, web
+        const EXTERNAL_INPUT  = 1 << 1;  // e.g. paired external identities
+        const UNVERIFIED_LINK = 1 << 2;  // URLs / attachments not scanned
+        const USER_SUPPLIED   = 1 << 3;  // direct human input
+        const PROMPT_SURFACE  = 1 << 4;  // content interpreted by an LLM
     }
 }
 
@@ -362,37 +588,38 @@ pub struct ZoneCrossing {
     pub crossed_at: u64,
     pub authorized_by: Option<ObjectId>,
 }
+
+impl Provenance {
+    /// Effective taint after applying reductions (NORMATIVE)
+    ///
+    /// Taint reductions allow specific taints to be cleared with proof.
+    /// Without this, taint-only-accumulates leads to "approve everything" fatigue.
+    pub fn effective_taint(&self) -> TaintFlags {
+        let mut t = self.taint;
+        for r in &self.taint_reductions {
+            t.remove(r.clears);
+        }
+        t
+    }
+}
 ```
 
-Taint decisions are enforced before invocation:
+Taint decisions are enforced before invocation using `effective_taint()`:
 
 - Public-tainted input cannot directly drive Dangerous operations.
-- If `taint != NONE` and `operation.safety_tier >= Risky` and `target_zone.integrity_level > origin_integrity`,
-  an ElevationToken is required.
+- If `effective_taint() != NONE` and `operation.safety_tier >= Risky` and `target_zone.integrity_level > origin_integrity`,
+  an ApprovalToken with `ApprovalScope::Elevation` is required.
 - Otherwise, the operation is allowed.
 
 Cross-zone movement updates `current_zone` and records zone crossings.
 
-### 5.4 Elevation Token
-
-```rust
-/// Elevation token for tainted operations (NORMATIVE)
-pub struct ElevationToken {
-    pub token_id: ObjectId,
-    pub operation: OperationId,
-    pub original_provenance: Provenance,
-    pub approved_by: PrincipalId,
-    pub approved_at: u64,
-    pub expires_at: u64,
-    pub signature: Signature,
-}
-```
-
-Connector implications:
+### 5.4 Connector Implications
 
 - Objects stored in the mesh MUST include an `ObjectHeader`, which includes provenance.
 - When a connector creates objects, it must supply provenance as part of the header and compute
   `ObjectId` from the canonical encoding of `(header, body)`.
+- Elevation is handled by `ApprovalToken` with `ApprovalScope::Elevation` (see §5.2).
+- Declassification is handled by `ApprovalToken` with `ApprovalScope::Declassification` (see §5.2).
 
 ---
 
@@ -435,7 +662,16 @@ pub enum SafetyTier { Safe, Risky, Dangerous, Forbidden }
 
 pub enum IdempotencyClass { None, BestEffort, Strict }
 
-pub enum ApprovalMode { None, Policy, Interactive, ElevationToken }
+pub enum ApprovalMode {
+    /// No approval needed
+    None,
+    /// Policy-based auto-approval
+    Policy,
+    /// Interactive human approval
+    Interactive,
+    /// Requires ApprovalToken (elevation or other scope)
+    ApprovalRequired,
+}
 
 pub struct AgentHint {
     pub when_to_use: String,
@@ -475,16 +711,45 @@ pub struct CapabilityConstraints {
     pub network: Option<NetworkConstraints>,
 }
 
+/// Network/TLS constraints (NORMATIVE for sensitive connectors)
+///
+/// Prevents DNS pivot, SSRF, and host confusion attacks.
 pub struct NetworkConstraints {
+    /// Allowed hostnames (exact or suffix match)
     pub host_allow: Vec<String>,
+    /// Allowed ports
     pub port_allow: Vec<u16>,
+    /// Optional explicit IP allow-list
+    pub ip_allow: Vec<IpAddr>,
+    /// CIDR blocks denied by policy
+    /// NORMATIVE default includes: localhost (127.0.0.0/8, ::1), link-local (169.254.0.0/16),
+    /// RFC1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), and tailnet ranges (100.64.0.0/10)
+    pub cidr_deny: Vec<String>,
+    /// Deny localhost unless explicitly allowed (NORMATIVE default: true)
+    pub deny_localhost: bool,
+    /// Deny private ranges unless explicitly allowed (NORMATIVE default: true)
+    pub deny_private_ranges: bool,
+    /// Deny tailnet address ranges unless explicitly allowed (NORMATIVE default: true)
+    pub deny_tailnet_ranges: bool,
+    /// Require SNI hostname match
     pub require_sni: bool,
+    /// Optional SPKI pins (base64-encoded SHA256 of SubjectPublicKeyInfo)
     pub spki_pins: Vec<String>,
 }
 ```
 
+**Egress Proxy (NORMATIVE for strict/moderate sandboxes):**
+
+In Strict and Moderate sandbox profiles, connectors MUST NOT be granted raw socket syscalls.
+Network capabilities are implemented by a MeshNode-owned **egress proxy** enforcing NetworkConstraints:
+
+- Connectors talk to the proxy over capability-gated IPC (`network.egress` capability)
+- Proxy enforces `host_allow`, `port_allow`, `cidr_deny`, SNI, and SPKI pins
+- No SSRF into localhost/tailnet/RFC1918 unless explicitly allowed
+- DNS resolution goes through proxy with policy checks
+
 Network/TLS constraints are NORMATIVE for sensitive connectors and include host/port
-allow-lists, SNI enforcement, and optional SPKI pins.
+allow-lists, SNI enforcement, CIDR deny-lists, and optional SPKI pins.
 
 ### 6.4 Placement Policy
 
@@ -502,26 +767,45 @@ pub struct PlacementPolicy {
 ```rust
 /// Capability Token for operation invocation (NORMATIVE)
 pub struct CapabilityToken {
+    /// Unique token identifier
     pub jti: Uuid,
+    /// Principal identifier
     pub sub: PrincipalId,
+    /// Issuing zone
     pub iss_zone: ZoneId,
+    /// Issuing node (signer) - the node that minted this token
     pub iss_node: TailscaleNodeId,
+    /// Issuer key id (for rotation)
     pub kid: [u8; 8],
+    /// Intended audience (connector)
     pub aud: ConnectorId,
+    /// Optional connector instance binding
     pub instance: Option<InstanceId>,
+    /// Issued at (Unix timestamp)
     pub iat: u64,
+    /// Expires at (Unix timestamp)
     pub exp: u64,
+    /// Granted capabilities
     pub caps: Vec<CapabilityGrant>,
+    /// Constraints
     pub constraints: CapabilityConstraints,
+    /// The only node allowed to present this token (sender-constrained)
     pub holder_node: TailscaleNodeId,
+    /// Revocation head the issuer considered (NORMATIVE)
+    /// Verifiers MUST have revocation state >= this head or fetch before acceptance.
     pub rev_head: ObjectId,
+    /// Monotonic revocation sequence at rev_head (NORMATIVE)
+    /// Enables O(1) freshness checks: verifier compares rev_seq, not chain traversal.
+    pub rev_seq: u64,
+    /// Ed25519 signature (by iss_node's issuance key)
     pub sig: [u8; 64],
 }
 ```
 
 Token verification MUST use the node issuance public key (not the node signing key). Issuance keys are
-separately revocable. Verifiers MUST have revocation state >= `rev_head` (or fetch revocations) before
-accepting a token.
+separately revocable. Verifiers compare `rev_seq` for O(1) freshness checks; full chain traversal is
+only needed on seq mismatch. Verifiers MUST have revocation state >= `rev_head` (or fetch revocations)
+before accepting a token.
 
 ---
 
@@ -530,20 +814,41 @@ accepting a token.
 ### 7.1 Invoke Request/Response
 
 ```rust
+/// Invoke request (NORMATIVE)
 pub struct InvokeRequest {
     pub id: String,
     pub operation: OperationId,
     pub input: Value,
     pub capability_token: CapabilityToken,
     pub provenance: Provenance,
-    pub elevation_token: Option<ElevationToken>,
-    pub declassification_token: Option<DeclassificationToken>,
+    /// Unified approval tokens for elevation and/or declassification
+    pub approval_tokens: Vec<ApprovalToken>,
     pub idempotency_key: Option<String>,
 
-    /// Holder proof (NORMATIVE): binds request to holder_node in CapabilityToken
+    /// Holder proof (NORMATIVE): binds presentation to holder_node in CapabilityToken
+    /// Prevents token replay by anyone other than the designated holder.
     pub holder_proof: Signature,
 }
 
+impl InvokeRequest {
+    /// Verify holder proof (NORMATIVE)
+    pub fn verify_holder_proof(&self, trust_anchors: &TrustAnchors) -> Result<(), VerifyError> {
+        let holder = &self.capability_token.holder_node;
+        let holder_pubkey = trust_anchors.get_node_sig_pubkey(holder)?;
+        holder_pubkey.verify(&self.holder_signable_bytes(), &self.holder_proof)
+    }
+
+    fn holder_signable_bytes(&self) -> Vec<u8> {
+        // Include request id, operation, and token jti to bind holder proof to specific request
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(self.id.as_bytes());
+        bytes.extend_from_slice(self.operation.as_bytes());
+        bytes.extend_from_slice(self.capability_token.jti.as_bytes());
+        bytes
+    }
+}
+
+/// Invoke response (NORMATIVE)
 pub struct InvokeResponse {
     pub id: String,
     pub result: Value,
@@ -557,8 +862,11 @@ pub struct InvokeResponse {
 The holder proof prevents token replay by anyone other than the designated holder. The signable bytes
 bind the request to the specific `id`, `operation`, and token `jti`.
 
-Confidentiality downgrades are enforced before execution: if an operation writes outputs into a zone
-with lower confidentiality than the data label, a valid `DeclassificationToken` is required.
+**Enforcement before execution:**
+- If `effective_taint() != NONE` and operation requires elevation, the `approval_tokens` MUST contain
+  an `ApprovalToken` with `ApprovalScope::Elevation`.
+- If an operation writes outputs into a zone with lower confidentiality than the data label,
+  `approval_tokens` MUST contain an `ApprovalToken` with `ApprovalScope::Declassification`.
 
 ### 7.2 Operation Receipt
 
@@ -856,7 +1164,65 @@ pub struct ConnectorTransparencyLogEntry {
 }
 ```
 
-### 14.3 Verification Chain
+### 14.3 Supply Chain Attestations (RECOMMENDED)
+
+First-class provenance attestations make supply chain verification machine-checkable, not just "signature valid".
+
+```rust
+/// Supply chain attestation (NORMATIVE when present)
+pub struct SupplyChainAttestation {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub version: Version,
+    pub attestation_type: AttestationType,
+    /// Canonical attestation payload (e.g., in-toto Statement JSON)
+    pub payload: Vec<u8>,
+    pub signature: Signature,
+}
+
+pub enum AttestationType {
+    /// in-toto statement with SLSA provenance predicate
+    InToto,
+    /// Reproducible build attestation
+    ReproducibleBuild,
+    /// Code review attestation
+    CodeReview,
+    /// Custom attestation type
+    Custom(String),
+}
+
+/// Owner policy for supply chain verification (NORMATIVE)
+pub struct SupplyChainPolicy {
+    /// Require transparency log entry
+    pub require_transparency_log: bool,
+    /// Required attestation types (all must be present)
+    pub require_attestation_types: Vec<AttestationType>,
+    /// Minimum SLSA level (0-4)
+    pub min_slsa_level: u8,
+    /// Trusted builder identities
+    pub trusted_builders: Vec<String>,
+    /// Trusted publisher key fingerprints
+    pub trusted_publishers: Vec<[u8; 32]>,
+}
+```
+
+Manifest declares attestations:
+
+```toml
+[supply_chain]
+attestations = [
+  { type = "in-toto", object_id = "objectid:..." },
+  { type = "reproducible-build", object_id = "objectid:..." },
+]
+
+[policy]
+require_transparency_log = true
+require_attestation_types = ["in-toto"]
+min_slsa_level = 2
+trusted_builders = ["github-actions", "internal-ci"]
+```
+
+### 14.4 Verification Chain
 
 Before execution, verify:
 
@@ -866,6 +1232,8 @@ Before execution, verify:
 4. Platform/arch match
 5. Requested capabilities are within zone ceilings
 6. Optional: release present in transparency log (if enabled)
+7. **Supply chain attestations** (if policy requires): verify all required attestation types present,
+   SLSA level >= min_slsa_level, builder identity in trusted_builders list
 
 ---
 
@@ -1091,12 +1459,32 @@ Implementation notes:
 
 Connector MUST:
 
+**Protocol:**
 - Implement `--manifest` flag.
 - Implement standard methods: `handshake`, `describe`, `introspect`, `capabilities`, `configure`, `invoke`, `health`, `shutdown`.
 - Support event cursors and replay when streaming.
+- Support session authentication for high-throughput data plane.
+
+**Capability & Security:**
 - Declare required/optional/forbidden capabilities in the manifest.
-- Validate inputs.
+- Use `network.egress` capability through MeshNode proxy (not raw sockets) in strict/moderate sandboxes.
+- Validate inputs against manifest schemas.
 - Never log secrets.
+
+**State & Provenance:**
+- Include `ObjectHeader` with provenance when producing mesh objects.
+- Use `effective_taint()` for taint checks (respecting `taint_reductions`).
+- Externalize state to `ConnectorStateObject` (authoritative state lives in mesh, not local cache).
+- Use `singleton_writer = true` in manifest if connector requires single-writer semantics.
+
+**Approval & Authorization:**
+- Use unified `ApprovalToken` with `ApprovalScope::Elevation` or `ApprovalScope::Declassification`.
+- Support `approval_tokens: Vec<ApprovalToken>` in `InvokeRequest`.
+- Verify `rev_seq` for O(1) freshness checks on capability tokens.
+
+**Supply Chain (RECOMMENDED):**
+- Include supply chain attestations in manifest (`[supply_chain]` section).
+- Support transparency log entries.
 - Include AI hints for operations.
 
 ---
@@ -1105,3 +1493,4 @@ Connector MUST:
 
 - This document intentionally avoids FCP1-only constructs except where marked as compatibility.
 - For mesh, symbol, audit, and trust-anchor details, refer to `FCP_Specification_V2.md`.
+- All normative structures in this document are aligned with FCP Specification V2.
