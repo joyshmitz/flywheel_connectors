@@ -468,6 +468,9 @@ pub struct NetworkConstraints {
 }
 ```
 
+When `network.outbound` capabilities are used, connectors MUST declare appropriate network constraints.
+For sensitive connectors, SNI enforcement and SPKI pinning are normative.
+
 ### 6.4 Placement Policy
 
 ```rust
@@ -502,7 +505,8 @@ pub struct CapabilityToken {
 ```
 
 Token verification MUST use the node issuance public key (not the node signing key). Issuance keys are
-separately revocable.
+separately revocable. Verifiers MUST have revocation state >= `rev_head` (or fetch revocations) before
+accepting a token.
 
 ---
 
@@ -576,7 +580,7 @@ pub struct EventEnvelope {
 Event streaming requirements:
 
 - Event envelopes include `topic`, `seq`, `cursor`, and `requires_ack` fields.
-- If `requires_ack` is true, the consumer MUST ack; connectors SHOULD track delivery state.
+- If `requires_ack` is true, consumers are expected to ack; connectors SHOULD track delivery state.
 - When `event_caps.replay = true`, connectors MUST support replay from a cursor.
 - `event_caps.min_buffer_events` sets the minimum replay buffer size.
 
