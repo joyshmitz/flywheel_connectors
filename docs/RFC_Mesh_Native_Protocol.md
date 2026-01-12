@@ -2,10 +2,13 @@
 
 ## Abstract
 
-This RFC proposes a fundamental reconceptualization of FCP based on two axiomatic assumptions:
+This RFC proposes a fundamental reconceptualization of FCP based on three axiomatic assumptions:
 
 1. **Universal Fungibility**: All data exists as RaptorQ-encoded symbols
-2. **Trusted Mesh**: All nodes are connected via Tailscale in a mutually-authenticated, encrypted mesh
+2. **Authenticated Mesh**: All nodes are connected via Tailscale with cryptographic device authentication
+3. **Explicit Authority**: Reconstruction alone is never authority—cryptographic signatures and policy enforcement are required
+
+**Critical distinction:** "Authenticated mesh" means Tailscale provides authenticated transport and device identity, NOT that devices are blindly trusted. Devices can be compromised. Authority flows from explicit cryptographic signatures, not from mesh membership.
 
 Together, these create something unprecedented: a **Sovereign Compute Fabric** where your devices form a single coherent system. There is no "Hub" in the traditional sense—the mesh IS the Hub. There are no "connectors on machines"—there are capabilities that execute wherever optimal. There is no "storage on devices"—there is symbol distribution across the fabric.
 
@@ -43,13 +46,24 @@ Mesh-native architecture:
 
 The mesh IS the system. Your devices ARE the cloud. Symbols flow everywhere.
 
-### The Two Axioms
+### The Three Axioms
 
 **Axiom 1: Universal Fungibility**
 All data exists as RaptorQ symbols. Any K' symbols from anywhere can reconstruct. There is no "primary" or "replica"—just symbols.
 
-**Axiom 2: Trusted Mesh**
+**Axiom 2: Authenticated Mesh**
 All devices are connected via Tailscale. Every node is cryptographically authenticated. All traffic is encrypted. NAT is solved. Discovery is automatic.
+
+**Critical:** Tailscale authenticates the *device*, not the device's integrity. A compromised device still has valid Tailscale credentials. This is why Axiom 3 exists.
+
+**Axiom 3: Explicit Authority**
+Reconstruction ≠ authority. An object reconstructed from symbols is only *valid* if:
+- It carries a valid signature from an authorized issuer
+- The issuer is trusted per current PolicyObject
+- No RevocationObject invalidates it
+- TTL has not expired
+
+This decouples data availability from authority. The mesh makes data available; cryptographic policy makes it authoritative.
 
 ### What This Enables
 
@@ -1150,6 +1164,476 @@ impl SignedSymbolEnvelope {
     }
 }
 ```
+
+### 3.9 Control Plane vs Data Plane
+
+Everything being a symbol is elegant but risky for governance. The protocol separates control and data planes with different authority requirements.
+
+#### 3.9.1 Control Objects (Require Explicit Authority)
+
+Control objects govern the mesh. They MUST be signed by authorized issuers and cannot be valid through reconstruction alone.
+
+```rust
+/// Control object types (require signature verification)
+pub enum ControlObject {
+    /// Root policy (signed by Owner Root Key only)
+    Policy(PolicyObject),
+
+    /// Zone key epochs (signed by Owner Root Key)
+    ZoneKeyEpoch(ZoneKeyEpoch),
+
+    /// Issuer set (who may sign capabilities)
+    IssuerSet(IssuerSet),
+
+    /// Capability definitions (signed by IssuerSet member)
+    Capability(CapabilityObject),
+
+    /// Principal claims (principal-device binding)
+    PrincipalClaim(PrincipalClaim),
+
+    /// Revocations (invalidate earlier objects)
+    Revocation(RevocationObject),
+
+    /// Audit chain heads (quorum-signed)
+    AuditHead(AuditHeadObject),
+}
+
+impl ControlObject {
+    /// Control objects are ONLY valid with verified signature
+    pub fn validate(&self, trust_anchors: &TrustAnchors) -> Result<()> {
+        // 1. Verify signature against authorized issuer
+        self.verify_signature(trust_anchors)?;
+
+        // 2. Check issuer is authorized for this object type
+        self.verify_issuer_authorization(trust_anchors)?;
+
+        // 3. Check not revoked
+        self.check_revocation(trust_anchors)?;
+
+        // 4. Check TTL
+        self.check_expiry()?;
+
+        Ok(())
+    }
+}
+```
+
+#### 3.9.2 Data Objects (Authorized by Control Objects)
+
+Data objects are the payload. They are valid if the authorizing control objects are valid.
+
+```rust
+/// Data object types (authorized by control objects)
+pub enum DataObject {
+    /// Capability invocation
+    Invoke(InvokeObject),
+
+    /// Invocation response
+    Response(ResponseObject),
+
+    /// Event epochs
+    EventEpoch(EventEpochObject),
+
+    /// Health snapshots
+    Health(HealthObject),
+}
+
+impl DataObject {
+    /// Data objects valid if control chain is valid
+    pub fn validate(&self, trust_anchors: &TrustAnchors) -> Result<()> {
+        match self {
+            Self::Invoke(invoke) => {
+                // Valid if capability is valid
+                let capability = reconstruct(invoke.capability_object_id)?;
+                capability.validate(trust_anchors)?;
+
+                // And principal is authorized
+                invoke.verify_principal_authorization(&capability)?;
+            }
+            // ... etc
+        }
+        Ok(())
+    }
+}
+```
+
+#### 3.9.3 The Critical Rule
+
+**Reconstruction ≠ Authority.** A control object reconstructed from symbols is merely *available*, not *valid*. Validity requires:
+
+1. Signature verification against trusted issuer
+2. Issuer authorization per PolicyObject
+3. No superseding RevocationObject
+4. TTL not expired
+
+This prevents "any symbol blob becomes authority."
+
+### 3.10 Concrete Object Schemas
+
+All objects share a common header for identification and authority verification.
+
+#### 3.10.1 ObjectHeader (All Objects)
+
+```rust
+/// Common header for all mesh objects (NORMATIVE)
+pub struct ObjectHeader {
+    /// Schema identifier (e.g., "fcp.obj.capability.v2")
+    pub schema_id: String,
+
+    /// Hash of schema definition (for forward compat)
+    pub schema_hash: [u8; 32],
+
+    /// Content-addressed object ID
+    /// = hash(canonical_serialize(body) || zone_id || schema_id)
+    pub object_id: ObjectId,
+
+    /// Cryptographic zone namespace
+    pub zone_id: ZoneId,
+
+    /// Temporal bucket
+    pub epoch_id: EpochId,
+
+    /// Creation timestamp (advisory)
+    pub created_at_ms: u64,
+
+    /// Who signed this object
+    pub issuer: IssuerId,
+
+    /// Signature over canonical body
+    pub signature: Signature,
+}
+```
+
+#### 3.10.2 PolicyObject (Root Authority)
+
+```rust
+/// Root policy object (NORMATIVE)
+/// Authority: signed by Owner Root Key ONLY
+pub struct PolicyObject {
+    pub header: ObjectHeader,
+
+    /// Stable policy identifier
+    pub policy_id: String,
+
+    /// Zone policies
+    pub zones: Vec<ZonePolicy>,
+
+    /// Who may issue capabilities
+    pub issuers: Vec<IssuerPolicy>,
+
+    /// Principal authorization rules
+    pub principal_rules: Vec<PrincipalRule>,
+
+    /// Revocation policy
+    pub revocation_policy: RevocationPolicy,
+
+    /// When this policy takes effect
+    pub effective_from_epoch: EpochId,
+
+    /// Optional expiry
+    pub expires_at_epoch: Option<EpochId>,
+}
+
+pub struct ZonePolicy {
+    pub zone_id: ZoneId,
+    pub trust_level: TrustLevel,
+    pub capability_allow: Vec<GlobPattern>,
+    pub capability_deny: Vec<GlobPattern>,
+    pub flow_rules: Vec<FlowRule>,
+}
+
+pub struct IssuerPolicy {
+    pub issuer_id: IssuerId,
+    pub allowed_capabilities: Vec<GlobPattern>,
+    pub min_quorum: u8,  // Optional quorum requirement
+}
+
+pub struct PrincipalRule {
+    pub principal_id: PrincipalId,
+    pub allowed_zones: Vec<ZoneId>,
+    pub trust_level: TrustLevel,
+}
+
+pub struct RevocationPolicy {
+    pub max_ttl_epochs: u64,
+    pub require_revocation_objects: bool,
+}
+```
+
+#### 3.10.3 ZoneKeyEpoch (Zone Encryption Lifecycle)
+
+```rust
+/// Zone encryption key epoch (NORMATIVE)
+/// Authority: signed by Owner Root Key
+pub struct ZoneKeyEpoch {
+    pub header: ObjectHeader,
+
+    /// Which zone
+    pub zone_id: ZoneId,
+
+    /// Epoch range for this key
+    pub epoch_start: EpochId,
+    pub epoch_end: EpochId,
+
+    /// Key identifier
+    pub key_id: String,
+
+    /// Key material (encrypted to authorized devices)
+    pub key_material_encrypted: Vec<u8>,
+
+    /// Why rotated (if applicable)
+    pub rotation_reason: Option<String>,
+}
+```
+
+#### 3.10.4 IssuerSet (Capability Issuer Authority)
+
+```rust
+/// Issuer set definition (NORMATIVE)
+/// Authority: signed by Owner Root Key
+pub struct IssuerSet {
+    pub header: ObjectHeader,
+
+    /// Stable issuer set ID
+    pub issuer_set_id: String,
+
+    /// Device or service keys allowed to issue
+    pub allowed_issuers: Vec<IssuerId>,
+
+    /// Quorum requirement (optional)
+    pub threshold: u8,
+
+    /// Validity range
+    pub effective_from_epoch: EpochId,
+    pub expires_at_epoch: Option<EpochId>,
+}
+```
+
+#### 3.10.5 CapabilityObject (with PlacementPolicy)
+
+```rust
+/// Capability definition (NORMATIVE)
+/// Authority: signed by member of authorized IssuerSet
+pub struct CapabilityObject {
+    pub header: ObjectHeader,
+
+    /// Capability identity
+    pub capability_id: CapabilityId,
+
+    /// Operations this capability allows
+    pub operations: Vec<OperationSpec>,
+
+    /// Authorization constraints
+    pub constraints: CapabilityConstraints,
+
+    /// WHERE this capability may execute
+    pub placement: PlacementPolicy,
+
+    /// Short-lived by default
+    pub ttl_epochs: u64,
+
+    /// Which issuer set authorized this
+    pub issuer_set_id: String,
+}
+
+/// Placement policy for capability execution (NORMATIVE)
+pub struct PlacementPolicy {
+    /// Required Tailscale tags
+    pub required_tags: Vec<String>,
+
+    /// Required hardware capabilities
+    pub required_hardware: Vec<HardwareRequirement>,
+
+    /// Allowed zones for execution
+    pub allowed_zones: Vec<ZoneId>,
+
+    /// Excluded devices (blocklist)
+    pub excluded_devices: Vec<TailscaleNodeId>,
+
+    /// Require user presence?
+    pub requires_user_presence: bool,
+
+    /// Require plugged-in power?
+    pub requires_power: bool,
+}
+
+pub enum HardwareRequirement {
+    Gpu,
+    Browser,
+    Display,
+    TrustedEnclave,
+    MinMemoryGb(u32),
+    MinCpuCores(u32),
+}
+
+pub struct OperationSpec {
+    pub operation_id: OperationId,
+    pub risk_level: RiskLevel,
+    pub safety_tier: SafetyTier,
+    pub idempotency: IdempotencyClass,
+    pub input_schema: SchemaRef,
+    pub output_schema: SchemaRef,
+}
+```
+
+#### 3.10.6 AuditHeadObject (Quorum-Anchored)
+
+```rust
+/// Audit chain head (NORMATIVE)
+/// Authority: signed by quorum of owner/admin devices
+pub struct AuditHeadObject {
+    pub header: ObjectHeader,
+
+    /// Which epoch this head covers
+    pub epoch_id: EpochId,
+
+    /// Merkle root of audit entries
+    pub merkle_root: [u8; 32],
+
+    /// Previous audit head
+    pub prev_audit_head_id: ObjectId,
+
+    /// Quorum signatures (multiple devices)
+    pub quorum_signatures: Vec<QuorumSignature>,
+}
+
+pub struct QuorumSignature {
+    pub signer_id: IssuerId,
+    pub signature: Signature,
+    pub signed_at: u64,
+}
+
+impl AuditHeadObject {
+    /// Verify quorum requirement met
+    pub fn verify_quorum(&self, trust_anchors: &TrustAnchors) -> Result<()> {
+        let policy = trust_anchors.current_policy();
+        let required_quorum = policy.audit_quorum;
+
+        let valid_sigs = self.quorum_signatures.iter()
+            .filter(|sig| self.verify_signer(sig, trust_anchors).is_ok())
+            .count();
+
+        if valid_sigs < required_quorum as usize {
+            return Err(Error::InsufficientQuorum {
+                required: required_quorum,
+                actual: valid_sigs as u8,
+            });
+        }
+
+        Ok(())
+    }
+}
+```
+
+### 3.11 Tailscale-Specific Hardening
+
+Tailscale provides defense-in-depth but is NOT the sole authority mechanism.
+
+#### 3.11.1 Defense-in-Depth Model
+
+```
+Layer 1: Tailscale ACLs     → Network-level isolation (can't even send packets)
+Layer 2: Zone Encryption    → Cryptographic isolation (can't decrypt symbols)
+Layer 3: Policy Objects     → Authority isolation (can't forge valid objects)
+Layer 4: Capability Signing → Operation isolation (can't execute unauthorized ops)
+```
+
+Each layer adds protection. Compromise of one layer doesn't compromise all.
+
+#### 3.11.2 Device Loss Response
+
+```rust
+/// Device loss protocol (NORMATIVE)
+pub async fn handle_device_loss(
+    lost_device: TailscaleNodeId,
+    mesh: &mut MeshNode,
+) -> Result<()> {
+    // 1. Immediately issue RevocationObject for device's keys
+    let revocation = RevocationObject {
+        target: RevocationTarget::Device(lost_device.clone()),
+        effective_after_epoch: current_epoch(),
+        reason: "Device loss reported".into(),
+        // Signed by owner
+    };
+    mesh.distribute_control_object(revocation).await?;
+
+    // 2. Rotate zone keys if device had access
+    for zone in mesh.zones_with_access(&lost_device) {
+        mesh.rotate_zone_key(zone, "Device loss").await?;
+    }
+
+    // 3. Revoke any capabilities issued TO the device
+    for cap in mesh.capabilities_for_device(&lost_device) {
+        mesh.revoke_capability(cap.capability_id).await?;
+    }
+
+    // 4. Alert remaining devices
+    mesh.broadcast_security_alert(SecurityAlert::DeviceLoss {
+        device: lost_device,
+        action_taken: vec!["revoked", "key_rotated"],
+    }).await?;
+
+    Ok(())
+}
+```
+
+#### 3.11.3 Funnel Restrictions
+
+```rust
+/// Funnel access restrictions (NORMATIVE)
+pub struct FunnelPolicy {
+    /// Funnel ONLY allowed for these zones
+    pub allowed_zones: Vec<ZoneId>,  // Typically only z:public, z:community
+
+    /// NEVER allow these zones via Funnel
+    pub blocked_zones: Vec<ZoneId>,  // z:owner, z:private
+
+    /// Maximum request rate via Funnel
+    pub rate_limit_per_minute: u32,
+
+    /// Require additional auth for Funnel requests?
+    pub require_auth_token: bool,
+}
+```
+
+### 3.12 Logical Sessions (Clarification)
+
+"No connections" does NOT mean "no sessions." You still have logical sessions for:
+
+```rust
+/// Logical session (NORMATIVE)
+/// No fixed endpoints, but session state exists
+pub struct LogicalSession {
+    /// Session identity
+    pub session_id: SessionId,
+
+    /// Associated principal
+    pub principal_id: PrincipalId,
+
+    /// Rate limit accounting
+    pub rate_limit_state: TokenBucket,
+
+    /// Idempotency window (recently processed request IDs)
+    pub idempotency_window: LruCache<RequestId, ResponseId>,
+
+    /// In-flight request tracking
+    pub in_flight: HashMap<RequestId, InFlightState>,
+
+    /// Session expiry
+    pub expires_at: EpochId,
+}
+
+impl LogicalSession {
+    /// Sessions are reconstructed from symbols, not maintained via TCP
+    pub fn reconstruct(session_id: SessionId) -> Result<Self> {
+        // Session state is an object like everything else
+        let state = reconstruct_object(session_id.to_object_id())?;
+        Ok(state)
+    }
+}
+```
+
+**Key insight:** The transport layer has no connections. The application layer still has sessions—they're just symbol-reconstructable objects rather than TCP state.
 
 ---
 
@@ -2368,13 +2852,146 @@ Cross-implementation interop tests:
 
 ---
 
-## Part 10: Summary
+## Part 10: Implementation Path
+
+### Minimal Viable Protocol (MVP)
+
+To avoid "everything all at once," implementation is phased:
+
+#### Phase 1: Core Mesh (MVP)
+
+**Goal:** Basic mesh operation with capability invocation.
+
+```rust
+/// Phase 1 components
+pub mod phase1 {
+    // Core structures
+    pub use MeshNode;
+    pub use SymbolRequest;
+    pub use SymbolDelivery;
+
+    // Authority (simplified)
+    pub use CapabilityObject;
+    pub use InvokeObject;
+    pub use ResponseObject;
+
+    // Owner-signed capabilities only (no IssuerSet delegation)
+}
+```
+
+**Capabilities:**
+- MeshNode with Tailscale discovery
+- Symbol request/delivery protocol
+- CapabilityObject signed by owner key directly
+- InvokeObject and ResponseObject
+- RaptorQ encoding for objects > 1KB only
+- Basic zone isolation
+
+**NOT in Phase 1:**
+- Epoch streaming
+- Threshold secrets
+- Source diversity enforcement
+- IssuerSet delegation
+- PlacementPolicy enforcement
+
+#### Phase 2: Events and Lifecycle
+
+**Goal:** Add streaming and lifecycle management.
+
+```rust
+/// Phase 2 additions
+pub mod phase2 {
+    // Streaming
+    pub use EventEpochObject;
+    pub use Subscribe;
+    pub use EpochSeal;
+
+    // Lifecycle
+    pub use RevocationObject;
+    pub use TombstoneObject;
+    pub use GcPolicy;
+
+    // Audit
+    pub use AuditEpochObject;
+}
+```
+
+**Capabilities:**
+- Epoch-based event streaming
+- Subscription management
+- Revocation objects (key, capability, device)
+- Tombstone objects for intentional deletion
+- Garbage collection per zone policy
+- Basic audit chain (single-node signed)
+
+**NOT in Phase 2:**
+- Quorum-signed audit heads
+- Full source diversity
+- Threshold secrets
+
+#### Phase 3: Full Security Model
+
+**Goal:** Complete authority model with distributed trust.
+
+```rust
+/// Phase 3 additions
+pub mod phase3 {
+    // Distributed authority
+    pub use PolicyObject;
+    pub use IssuerSet;
+    pub use PrincipalClaim;
+    pub use AuditHeadObject;  // Quorum-signed
+
+    // Distributed secrets
+    pub use ThresholdSecret;
+
+    // Full verification
+    pub use SourceDiversityRequirement;
+    pub use PlacementPolicy;
+}
+```
+
+**Capabilities:**
+- Full PolicyObject with zone/issuer/principal rules
+- IssuerSet with quorum delegation
+- PrincipalClaim for principal-device binding
+- Quorum-signed audit heads
+- Threshold secrets (k-of-n distribution)
+- Source diversity enforcement
+- PlacementPolicy enforcement
+- Device loss response protocol
+
+### Migration from FCP1
+
+For existing FCP1 deployments:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FCP1 → MESH-NATIVE MIGRATION                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Step 1: Add Tailscale to all nodes                                        │
+│  Step 2: Deploy MeshNode alongside existing Hub                            │
+│  Step 3: Enable hybrid mode (FCP1 <-> symbol translation)                  │
+│  Step 4: Migrate capabilities one by one                                   │
+│  Step 5: Enable zone encryption for migrated capabilities                  │
+│  Step 6: Disable FCP1 endpoints                                            │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+The HybridTranslator (section 9.3.2) enables gradual migration without big-bang cutover.
+
+---
+
+## Part 11: Summary
 
 ### The Mesh-Native Protocol
 
 By assuming:
 1. **Universal fungibility** (all data as RaptorQ symbols)
-2. **Trusted mesh** (all devices connected via Tailscale)
+2. **Authenticated mesh** (all devices connected via Tailscale)
+3. **Explicit authority** (reconstruction ≠ authority, signatures required)
 
 We get a fundamentally different protocol:
 
