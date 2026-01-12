@@ -36,12 +36,13 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 |---------|--------------|
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
-| **Zone Isolation** | Cryptographic namespaces with Tailscale ACL enforcement |
-| **Capability Tokens** | Cryptographically-scoped authorization for every operation |
-| **Threshold Secrets** | Secrets distributed as k-of-n across devices—never complete anywhere |
+| **Zone Isolation** | Cryptographic namespaces with HKDF-derived keys and Tailscale ACL enforcement |
+| **Capability Tokens** | Cryptographically-scoped authorization signed by attested node keys |
+| **Threshold Secrets** | Shamir secret sharing with k-of-n across devices—never complete anywhere |
 | **Computation Migration** | Operations execute on the optimal device automatically |
 | **Offline Access** | Reduced probability, not binary unavailability |
-| **Agent-Native Design** | Every operation is introspectable, typed, and has recovery hints |
+| **Tamper-Evident Audit** | Hash-linked audit chain with quorum-signed checkpoints |
+| **Revocation** | First-class revocation objects for tokens, keys, and devices |
 
 ### Quick Example
 
@@ -71,6 +72,11 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 │   │ z:private?  │     │ gmail.read? │     │   Gmail     │               │
 │   │ (crypto+ACL)│     │ (signed)    │     │ (sandboxed) │               │
 │   └─────────────┘     └─────────────┘     └─────────────┘               │
+│         │                   │                   │                        │
+│         ▼                   ▼                   ▼                        │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │  Revocation Check → Receipt Generation → Audit Event Logged     │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
 │                                                  │                       │
 │                                                  ▼                       │
 │                                           Gmail API                      │
@@ -89,27 +95,11 @@ This project emerged from the Agent Flywheel ecosystem, where AI coding agents c
 3. **Centralized Architecture**: Single points of failure, cloud dependency, vendor lock-in
 4. **Binary Offline**: No connectivity = no access
 
-FCP V2 addresses these through:
+FCP addresses these through:
 - **Zones as cryptographic universes**—if the Gmail-read capability doesn't exist in a zone, it cannot be invoked, regardless of what an agent says
 - **Mesh-native architecture**—your devices collectively ARE the system
 - **Symbol-first protocol**—data availability is probabilistic, not binary
-
----
-
-## FCP V1 vs V2
-
-| Aspect | V1 (Hub-Spoke) | V2 (Mesh-Native) |
-|--------|----------------|-------------------|
-| Architecture | Central Hub process | Mesh IS the Hub |
-| Connectors | On specific machines | Capabilities anywhere |
-| Sessions | Per-node | Mesh-wide contexts |
-| Storage | Device-local | Symbol distribution |
-| Offline | No access | Reduced probability |
-| Identity | Per-service principals | Tailscale identity |
-| Zones | Policy enforcement | Tailscale tags + crypto |
-| Secrets | On devices | Threshold secrets (k-of-n) |
-| Execution | Fixed location | Optimal device selection |
-| Protocol | Connection-oriented | Symbol-oriented |
+- **Revocation as first-class primitive**—compromised devices can be removed and keys rotated
 
 ---
 
@@ -120,16 +110,26 @@ FCP V2 addresses these through:
 | Term | Definition |
 |------|------------|
 | **Symbol** | A RaptorQ-encoded fragment; any K' symbols reconstruct the original |
-| **Object** | Content-addressed data identified by ObjectId |
-| **Zone** | A cryptographic namespace with its own encryption key |
+| **Object** | Content-addressed data with ObjectHeader (refs, retention, provenance) |
+| **Zone** | A cryptographic namespace with HKDF-derived encryption key |
 | **Epoch** | A logical time unit; no ordering within, ordering between |
 | **MeshNode** | A device participating in the FCP mesh |
 | **Capability** | An authorized operation with cryptographic proof |
 | **Connector** | A sandboxed binary that bridges external services to FCP |
-| **Manifest** | Embedded metadata describing connector properties |
-| **FCT (Flywheel Capability Token)** | Cryptographically-scoped authorization for operations |
-| **Principal** | An identity (user, agent, or service) making requests |
-| **Hub** | Legacy term; in FCP V2, the mesh collectively IS the Hub |
+| **Receipt** | Signed proof of operation execution for idempotency |
+| **Revocation** | First-class object that invalidates tokens, keys, or devices |
+
+### Key Architecture
+
+FCP uses three distinct cryptographic key roles:
+
+| Key Type | Algorithm | Purpose |
+|----------|-----------|---------|
+| **Owner Key** | Ed25519 | Root trust anchor; signs attestations and revocations |
+| **Node Signing Key** | Ed25519 | Per-device; signs symbols, gossip, receipts, tokens |
+| **Zone Encryption Key** | ChaCha20-Poly1305 | HKDF-derived from owner secret; encrypts zone data |
+
+Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailscale node ID to its signing key.
 
 ### Security Invariants
 
@@ -138,16 +138,16 @@ These are **hard requirements** that FCP enforces mechanically:
 1. **Single-Zone Binding**: A connector instance MUST bind to exactly one zone for its lifetime
 2. **Default Deny**: If a capability is not explicitly granted to a zone, it MUST be impossible to invoke
 3. **No Cross-Connector Calling**: Connectors MUST NOT call other connectors directly; all composition happens through the mesh
-4. **No Credential Custody by Mesh**: The mesh MUST NOT store raw OAuth tokens or API keys; connectors manage their own credentials
-5. **Threshold Secret Distribution**: Secrets MUST be distributed as k-of-n symbols—never complete on any single device
-6. **Auditable Everything**: Every operation invocation MUST produce auditable records with correlation IDs
+4. **Threshold Secret Distribution**: Secrets use Shamir sharing—never complete on any single device
+5. **Revocation Enforcement**: Tokens, keys, and operations MUST check revocation before use
+6. **Auditable Everything**: Every operation produces a signed receipt and audit event
 7. **Cryptographic Authority Chain**: All authority flows from owner key through verifiable signature chains
 
 ---
 
 ## Zone Architecture
 
-Zones are **cryptographic boundaries**, not labels. Each zone has its own encryption key derived from the owner key.
+Zones are **cryptographic boundaries**, not labels. Each zone has its own encryption key derived from the owner's secret key using HKDF with domain separation.
 
 ### Zone Hierarchy with Tailscale Mapping
 
@@ -175,102 +175,17 @@ INVARIANT: Data can flow DOWN (higher → lower trust) freely.
 
 ```
 Layer 1: Tailscale ACLs     → Network-level isolation
-Layer 2: Zone Encryption    → Cryptographic isolation
+Layer 2: Zone Encryption    → Cryptographic isolation (HKDF-derived keys)
 Layer 3: Policy Objects     → Authority isolation
-Layer 4: Capability Signing → Operation isolation
+Layer 4: Capability Signing → Operation isolation (node-signed tokens)
+Layer 5: Revocation Check   → Continuous validity enforcement
 ```
-
-### Zone Rules
-
-| Rule | Enforcement |
-|------|-------------|
-| Single-zone binding | Connector receives zone at startup; cannot change |
-| Capability ceiling | Mesh rejects capability grants exceeding zone ceiling |
-| Data flow | Cross-zone data blocked unless explicitly allowed |
-| Principal filtering | Zone defines which principals can access it |
-| Tailscale ACL sync | Zone policies generate Tailscale ACL rules |
-
----
-
-## Connector Archetypes
-
-FCP defines 10 fundamental data flow patterns. Each connector implements one or more archetypes.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        FCP CONNECTOR ARCHETYPES                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │ REQUEST-RESPONSE│  │    STREAMING    │  │  BIDIRECTIONAL  │              │
-│  │                 │  │                 │  │                 │              │
-│  │   Agent ──────► │  │   Agent ◄───── │  │   Agent ◄─────► │              │
-│  │          ◄───── │  │         Server  │  │          Server │              │
-│  │         Service │  │                 │  │                 │              │
-│  │                 │  │                 │  │                 │              │
-│  │ Examples:       │  │ Examples:       │  │ Examples:       │              │
-│  │ • REST APIs     │  │ • WebSocket     │  │ • Chat protocols│              │
-│  │ • GraphQL       │  │ • SSE           │  │ • Collaborative │              │
-│  │ • gRPC unary    │  │ • Log tailing   │  │ • Game state    │              │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
-│                                                                              │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │     POLLING     │  │     WEBHOOK     │  │   QUEUE/PUBSUB  │              │
-│  │                 │  │                 │  │                 │              │
-│  │   Agent ──────► │  │   Agent ◄───── │  │   Agent ◄─────► │              │
-│  │   (periodic)    │  │    (push)       │  │          Broker │              │
-│  │         Service │  │         Service │  │                 │              │
-│  │                 │  │                 │  │                 │              │
-│  │ Examples:       │  │ Examples:       │  │ Examples:       │              │
-│  │ • Email (IMAP)  │  │ • GitHub hooks  │  │ • Redis Pub/Sub │              │
-│  │ • RSS feeds     │  │ • Stripe events │  │ • NATS          │              │
-│  │ • Status checks │  │ • Slack events  │  │ • Kafka         │              │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
-│                                                                              │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
-│  │   FILE/BLOB     │  │ DATABASE/QUERY  │  │  CLI/PROCESS    │              │
-│  │                 │  │                 │  │                 │              │
-│  │   Agent ──────► │  │   Agent ──────► │  │   Agent ──────► │              │
-│  │   (upload/dl)   │  │   (query)       │  │   (spawn)       │              │
-│  │         Storage │  │         DB      │  │         Process │              │
-│  │                 │  │                 │  │                 │              │
-│  │ Examples:       │  │ Examples:       │  │ Examples:       │              │
-│  │ • S3            │  │ • PostgreSQL    │  │ • git           │              │
-│  │ • GCS           │  │ • Vector DBs    │  │ • kubectl       │              │
-│  │ • Local FS      │  │ • Elasticsearch │  │ • terraform     │              │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
-│                                                                              │
-│  ┌─────────────────┐                                                         │
-│  │    BROWSER      │  ← Combines multiple patterns                           │
-│  │   AUTOMATION    │                                                         │
-│  │                 │                                                         │
-│  │   Agent ──────► │                                                         │
-│  │   (CDP)         │                                                         │
-│  │         Browser │                                                         │
-│  └─────────────────┘                                                         │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Archetype Selection Guide
-
-| Use Case | Primary Archetype | Secondary |
-|----------|-------------------|-----------|
-| REST API integration | Request-Response | — |
-| Real-time chat (Telegram, Discord) | Bidirectional | Webhook |
-| Email inbox monitoring | Polling | Request-Response |
-| GitHub/Stripe webhooks | Webhook | — |
-| S3/GCS file operations | File/Blob | — |
-| Database queries | Database | — |
-| Running git/kubectl | CLI/Process | — |
-| Message queue processing | Queue/Pub-Sub | — |
-| Web scraping | Browser | Request-Response |
 
 ---
 
 ## Symbol Layer
 
-All data in FCP V2 flows as RaptorQ fountain-coded symbols.
+All data in FCP flows as RaptorQ fountain-coded symbols.
 
 ### Why Symbols?
 
@@ -296,6 +211,7 @@ Symbol Approach:
 | **Resumable** | No bookkeeping; just collect more symbols |
 | **DoS Resistant** | Attackers can't target "important" symbols |
 | **Offline Resilient** | Partial availability = partial reconstruction |
+| **Key Rotation Safe** | zone_key_id in each symbol enables seamless rotation |
 
 ### Frame Format (FCPS)
 
@@ -310,9 +226,11 @@ Symbol Approach:
 │  Bytes 8-11:   Symbol Count (u32 LE)                                        │
 │  Bytes 12-15:  Total Payload Length (u32 LE)                                │
 │  Bytes 16-47:  Object ID (32 bytes)                                         │
-│  Bytes 48-63:  Zone ID hash (16 bytes)                                      │
-│  Bytes 64-71:  Epoch ID (u64 LE)                                            │
-│  Bytes 72+:    Symbol payloads (encrypted, concatenated)                    │
+│  Bytes 48-49:  Symbol Size (u16 LE, default 1024)                           │
+│  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
+│  Bytes 58-73:  Zone ID hash (16 bytes)                                      │
+│  Bytes 74-81:  Epoch ID (u64 LE)                                            │
+│  Bytes 82+:    Symbol payloads (encrypted, concatenated)                    │
 │  Final 8:      Checksum (XXH3-64)                                           │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -324,7 +242,7 @@ Symbol Approach:
 
 Every device is a MeshNode—collectively, they ARE the Hub.
 
-### MeshNode Capabilities
+### MeshNode Components
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -334,29 +252,37 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Tailscale Identity                                                  │    │
 │  │  • Stable node ID (unforgeable WireGuard keys)                      │    │
-│  │  • Automatic peer discovery                                          │    │
+│  │  • Node signing key (Ed25519) with owner-signed attestation         │    │
 │  │  • ACL tags for zone mapping                                         │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Symbol Store                                                        │    │
-│  │  • Local symbol storage                                              │    │
-│  │  • Gossip layer for discovery                                        │    │
-│  │  • Bloom filters for efficient queries                               │    │
+│  │  • Local symbol storage with retention classes                       │    │
+│  │  • XOR filters + IBLT for efficient gossip reconciliation           │    │
+│  │  • Reachability-based garbage collection                             │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Capability Registry                                                 │    │
-│  │  • Zone keys for encryption/decryption                               │    │
-│  │  • Trust anchors (owner key, known keys)                             │    │
-│  │  • Capability verification                                           │    │
+│  │  Capability & Revocation Registry                                    │    │
+│  │  • Zone keys (HKDF-derived) for encryption/decryption               │    │
+│  │  • Trust anchors (owner key, attested node keys)                    │    │
+│  │  • Revocation checking before every operation                        │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Execution Planner                                                   │    │
 │  │  • Device profiles (CPU, GPU, memory, battery)                       │    │
-│  │  • Placement policies                                                │    │
-│  │  • Computation migration                                             │    │
+│  │  • Connector availability and version requirements                   │    │
+│  │  • Secret reconstruction cost estimation                             │    │
+│  │  • Symbol locality scoring                                           │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Audit Chain                                                         │    │
+│  │  • Hash-linked audit events per zone                                 │    │
+│  │  • Quorum-signed audit heads for tamper evidence                    │    │
+│  │  • Operation receipts for idempotency                                │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -370,6 +296,18 @@ Priority 2: Tailscale Mesh (NAT traversal)  - 10-100ms, z:owner OK
 Priority 3: Tailscale DERP Relay            - 50-200ms, z:private and below
 Priority 4: Tailscale Funnel (public)       - Variable, z:community/public only
 ```
+
+### Device Enrollment
+
+New devices join the mesh through owner-signed enrollment:
+
+1. Device joins Tailscale tailnet
+2. Owner issues `DeviceEnrollment` object (signed)
+3. Owner issues `NodeKeyAttestation` binding node to signing key
+4. Device receives enrollment via mesh gossip
+5. Other nodes accept the new device as peer
+
+Device removal triggers revocation + zone key rotation + secret resharing.
 
 ---
 
@@ -388,13 +326,12 @@ Every FCP connector is a single executable with embedded metadata:
 │  │  │  - Name         │  │  - Required     │                │  │
 │  │  │  - Version      │  │  - Optional     │                │  │
 │  │  │  - Author       │  │  - Forbidden    │                │  │
-│  │  │  - License      │  │                 │                │  │
 │  │  └─────────────────┘  └─────────────────┘                │  │
 │  │  ┌─────────────────┐  ┌─────────────────┐                │  │
-│  │  │  Zone Policy    │  │  Config Schema  │                │  │
-│  │  │  - Home zone    │  │  - JSON Schema  │                │  │
-│  │  │  - Allowed      │  │  - Defaults     │                │  │
-│  │  │  - Tailscale tag│  │  - Secrets ref  │                │  │
+│  │  │  Zone Policy    │  │  Sandbox Config │                │  │
+│  │  │  - Home zone    │  │  - Memory limit │                │  │
+│  │  │  - Allowed      │  │  - CPU limit    │                │  │
+│  │  │  - Tailscale tag│  │  - FS access    │                │  │
 │  │  └─────────────────┘  └─────────────────┘                │  │
 │  │  ┌─────────────────┐                                      │  │
 │  │  │  AI Hints       │  ← Agent-readable operation docs     │  │
@@ -419,6 +356,20 @@ Every FCP connector is a single executable with embedded metadata:
 └────────────────────────────────────────────────────────────────┘
 ```
 
+### Sandbox Enforcement
+
+Connectors run in OS-level sandboxes (seccomp/seatbelt/AppContainer):
+
+| Constraint | Purpose |
+|------------|---------|
+| Memory limit | Prevent resource exhaustion |
+| CPU limit | Prevent runaway computation |
+| Wall clock timeout | Bound operation duration |
+| FS readonly paths | Limit filesystem access |
+| FS writable paths | Explicit state directory |
+| deny_exec | Prevent child process spawning |
+| deny_ptrace | Prevent debugging/tracing |
+
 ---
 
 ## Security Model
@@ -429,63 +380,87 @@ FCP defends against:
 
 | Threat | Mitigation |
 |--------|------------|
-| Compromised device | Threshold secrets, source diversity, Byzantine model (f < n/3) |
-| Malicious connector binary | Ed25519 signature verification, sandboxing |
+| Compromised device | Threshold secrets (Shamir), revocation, zone key rotation |
+| Malicious connector binary | Ed25519 signature verification, OS sandboxing |
 | Compromised external service | Zone isolation, capability limits |
 | Prompt injection via messages | Protocol-level filtering, taint tracking, no code execution |
 | Privilege escalation | Static capability allocation, no runtime grants |
-| Side-channel leaks | Memory isolation, timing-safe operations |
-| Supply chain attacks | Reproducible builds, provenance attestation |
-| Replay attacks | Epoch binding, nonce verification |
-
-### Taint Tracking
-
-Every piece of data carries its origin (provenance):
-
-```
-TaintLevel::Untainted    → Owner-generated, can do anything
-TaintLevel::Tainted      → Trusted external, policy-based restrictions
-TaintLevel::HighlyTainted → Public/anonymous, dangerous operations blocked
-
-Rule: Tainted data invoking risky operations in higher-trust zones
-      requires explicit elevation token from approver.
-```
+| Replay attacks | Epoch binding, nonce verification, receipts |
+| Key compromise | Revocation objects, key rotation with zone_key_id |
+| Supply chain attacks | Reproducible builds, provenance attestation, mesh mirroring |
 
 ### Threshold Secrets
 
-Secrets are distributed as k-of-n symbols across devices:
+Secrets use **Shamir's Secret Sharing** (not RaptorQ symbols—those can leak structure):
 
 ```
 Secret: API_KEY
-Distribution: 3-of-5 across [Desktop, Laptop, Phone, Tablet, Server]
+Scheme: Shamir over GF(2^8), k=3, n=5
 
-Desktop: [symbol_1, symbol_3]
-Laptop:  [symbol_2, symbol_4]
-Phone:   [symbol_5]
+Distribution:
+  Desktop: share_1 (wrapped for Desktop's public key)
+  Laptop:  share_2 (wrapped for Laptop's public key)
+  Phone:   share_3 (wrapped for Phone's public key)
+  Tablet:  share_4 (wrapped for Tablet's public key)
+  Server:  share_5 (wrapped for Server's public key)
 
-To use secret: Collect any 3 symbols → reconstruct → use → zeroize
+To use secret:
+  1. Obtain SecretAccessToken (signed by approver)
+  2. Collect any 3 wrapped shares
+  3. Unwrap and reconstruct using Shamir
+  4. Use in memory only
+  5. Zeroize immediately after use
+  6. Log audit event
+
 No single device ever has the complete secret.
+A node cannot decrypt other nodes' shares.
 ```
 
-### Secret Lifecycle
+### Operation Receipts
+
+Operations with side effects produce signed receipts:
 
 ```
-1. PROVISIONING
-   User → Mesh (seal) → Distribute as k-of-n symbols
-
-2. RECONSTRUCTION
-   Collect k symbols → Reconstruct in secure memory
-
-3. USAGE
-   - Secrets exist only in memory
-   - Never logged, never serialized
-   - Zeroized after use
-
-4. ROTATION
-   - Automatic per schedule
-   - Re-distribute new symbols
-   - Revoke old symbols
+OperationReceipt {
+  request_object_id    → What was requested
+  idempotency_key      → For deduplication
+  outcome_object_ids   → What was produced
+  executed_at          → When
+  executed_by          → Which node
+  signature            → Node's signing key
+}
 ```
+
+On retry with same idempotency key, mesh returns prior receipt instead of re-executing.
+
+### Revocation
+
+First-class revocation objects can invalidate:
+
+| Scope | Effect |
+|-------|--------|
+| Capability | Token becomes invalid |
+| IssuerKey | Node can no longer mint tokens |
+| NodeAttestation | Device removed from mesh |
+| ZoneKey | Forces key rotation |
+| ConnectorBinary | Supply chain incident response |
+
+Revocations are owner-signed and enforced before every operation.
+
+### Audit Chain
+
+Every zone maintains a hash-linked audit chain:
+
+```
+AuditEvent_1 → AuditEvent_2 → AuditEvent_3 → ... → AuditHead
+     ↑              ↑              ↑                   ↑
+  signed         signed         signed         quorum-signed
+```
+
+- Events are hash-linked (tamper-evident)
+- AuditHead checkpoints are quorum-signed (n-f nodes)
+- Fork detection triggers alerts
+- Required events: secret access, risky operations, elevations, zone transitions
 
 ---
 
@@ -527,15 +502,31 @@ These unlock entire categories of autonomous agent work.
 
 ---
 
+## Registry Architecture
+
+Registries are **sources, not dependencies**:
+
+| Type | Description |
+|------|-------------|
+| **Remote Registry** | Public (registry.flywheel.dev) or private HTTP registry |
+| **Self-Hosted Registry** | Enterprise internal registry |
+| **Mesh Mirror** | Connectors as pinned objects in z:owner (recommended) |
+
+Connector binaries are content-addressed objects distributed via the symbol layer.
+Your mesh can install/update connectors fully offline from mirrored objects.
+
+---
+
 ## Performance Targets
 
 | Metric | Target | Enforcement |
 |--------|--------|-------------|
 | Cold start | < 50ms | Binary preloading |
 | Message latency | < 1ms | Zero-copy IPC |
-| Memory overhead | < 10MB per connector | Static allocation |
+| Memory overhead | < 10MB per connector | Sandbox limits |
 | CPU overhead | < 1% idle | Event-driven architecture |
 | Symbol reconstruction | < 10ms for 1MB object | Optimized RaptorQ |
+| Secret reconstruction | < 100ms | Parallel share collection |
 
 ---
 
@@ -560,7 +551,10 @@ flywheel_connectors/
 │   ├── fcp-mesh/          # Mesh implementation: MeshNode, gossip, routing
 │   ├── fcp-raptorq/       # RaptorQ integration: encoding, decoding, distribution
 │   ├── fcp-tailscale/     # Tailscale integration: identity, ACLs, routing
+│   ├── fcp-secrets/       # Shamir secret sharing, SecretAccessToken
+│   ├── fcp-audit/         # Audit chain, receipts, quorum signing
 │   ├── fcp-manifest/      # Manifest parsing and validation
+│   ├── fcp-sandbox/       # OS sandbox integration (seccomp, seatbelt, AppContainer)
 │   ├── fcp-sdk/           # SDK for building connectors
 │   └── fcp-cli/           # CLI tools (fcp install, fcp doctor, etc.)
 │
@@ -623,36 +617,10 @@ cargo clippy --all-targets -- -D warnings
 1. Create connector crate: `cargo new connectors/myservice --lib`
 2. Add FCP SDK dependency
 3. Implement `FcpConnector` trait
-4. Define manifest with capabilities and zone policy
+4. Define manifest with capabilities, zone policy, and sandbox config
 5. Add archetype-specific traits
 6. Write tests with mocked external service
 7. Document AI hints for each operation
-
----
-
-## Implementation Phases
-
-### Phase 1: Core Mesh (MVP)
-
-- MeshNode with Tailscale discovery
-- Symbol request/delivery
-- Basic zone isolation
-- RaptorQ for objects > 1KB
-
-### Phase 2: Events and Lifecycle
-
-- Epoch-based event streaming
-- Revocation objects
-- Garbage collection
-- Basic audit chain
-
-### Phase 3: Full Security Model
-
-- Full policy objects
-- Quorum-signed audit heads
-- Threshold secrets
-- Source diversity enforcement
-- Device loss response
 
 ---
 
