@@ -19,7 +19,9 @@
 3. Control-Plane Protocol (FCP2-SYM)
    - 3.5 Session Authentication (NORMATIVE)
    - 3.6 Control Plane Retention Classes (NORMATIVE)
+   - 3.7 Admission Control (NORMATIVE)
 4. Canonical Types and Serialization
+   - 4.4 ZoneKeyManifest and ObjectIdKey Distribution
 5. Zones, Approval Tokens, Provenance, and Taint
    - 5.2 Unified Approval Token
    - 5.3 Provenance and Taint (with taint_reductions)
@@ -205,11 +207,16 @@ pub struct ConnectorStateSnapshot {
 }
 ```
 
-**Compaction Rule (NORMATIVE):** Once a snapshot for `covers_seq = S` is written, state objects with
-`seq < S` MAY be garbage-collected (they're no longer reachable from ConnectorStateRoot).
+**Compaction Rule (NORMATIVE):**
+- MeshNode SHOULD create a snapshot every N updates or M bytes (configurable).
+- After the snapshot is replicated to placement targets, MeshNode MAY GC older state objects
+  strictly before `covers_head`, unless required by audit/policy pins.
 
-**Fork Detection (NORMATIVE for singleton_writer):** If two snapshots cover different heads at the
-same seq, nodes MUST refuse to advance and alert the owner.
+**Fork Detection (NORMATIVE for singleton_writer):** If two different `ConnectorStateObject` share the
+same `prev` (competing seq), nodes MUST treat this as a safety incident:
+1. Pause connector execution
+2. Require manual resolution OR automated "choose-by-lease" recovery
+3. Log the fork event for audit
 
 ---
 
@@ -258,6 +265,37 @@ Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic counter)
 Bytes 90+:    Symbol payloads (concatenated)
 Final 8:      Checksum (XXH3-64)
 ```
+
+**Symbol Envelope (NORMATIVE):**
+
+```rust
+/// Full symbol envelope with encryption (NORMATIVE)
+pub struct SymbolEnvelope {
+    /// Content address of complete object
+    pub object_id: ObjectId,
+    /// Encoding Symbol ID
+    pub esi: u32,
+    /// Source symbols needed (K)
+    pub k: u16,
+    /// Symbol payload (encrypted)
+    pub data: Vec<u8>,
+    /// Zone for key derivation
+    pub zone_id: ZoneId,
+    /// Zone key ID (for key rotation - enables deterministic decryption)
+    pub zone_key_id: [u8; 8],
+    /// Epoch for replay protection
+    pub epoch_id: EpochId,
+    /// Sender node id (NORMATIVE for per-sender subkeys)
+    pub source_id: TailscaleNodeId,
+    /// Per-sender monotonic frame sequence (NORMATIVE)
+    pub frame_seq: u64,
+    /// AEAD authentication tag
+    pub auth_tag: [u8; 16],
+}
+```
+
+NORMATIVE: per-symbol nonce is `frame_seq_le || esi_le`. Encrypt/decrypt uses a per-sender subkey
+derived from the zone key and `source_id`.
 
 **Per-Sender Subkeys and Deterministic Nonces (NORMATIVE):**
 
@@ -481,8 +519,9 @@ impl MeshNode {
 }
 ```
 
-**Anti-Amplification Rule (NORMATIVE):** Until a peer is authenticated (via session establishment),
-response size MUST NOT exceed N × request size (default N=8).
+**Anti-Amplification Rule (NORMATIVE):** MeshNodes MUST NOT send more than N symbols in response
+unless the requester is authenticated (session MAC or node signature) AND the request includes a
+bounded missing-hint (e.g., `DecodeStatus.missing_hint`) or comparable proof-of-need.
 
 ---
 
@@ -525,6 +564,9 @@ Security objects MUST use `ObjectId::new(content, zone, schema, key)`:
 - AuditEvent, AuditHead, SecretObject, ZoneKeyManifest
 - DeviceEnrollment, NodeKeyAttestation
 - Any object used as an authority anchor or enforcement input
+
+`ObjectIdKey` is distributed to zone members via `ZoneKeyManifest` and remains stable across
+routine zone_key rotations.
 
 ### 4.2 Canonical CBOR Serialization
 
@@ -589,6 +631,43 @@ pub struct ObjectPlacementPolicy {
 Retention is node-local storage metadata and is not part of the content-addressed header.
 Mesh nodes periodically evaluate symbol coverage against `ObjectPlacementPolicy` and perform
 background repair to maintain target coverage.
+
+### 4.4 ZoneKeyManifest and ObjectIdKey Distribution
+
+ZoneKey manifests distribute both the active zone key and the zone's ObjectIdKey.
+
+```rust
+/// Zone key manifest (NORMATIVE)
+pub struct ZoneKeyManifest {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+    pub algorithm: ZoneKeyAlgorithm,
+    pub valid_from: u64,
+    pub valid_until: Option<u64>,
+    pub prev_zone_key_id: Option<[u8; 8]>,
+    /// ObjectIdKey material for this zone (NORMATIVE)
+    pub object_id_key_id: [u8; 8],
+    pub wrapped_object_id_keys: Vec<WrappedObjectIdKey>,
+    /// Optional epoch ratchet policy (NORMATIVE when present)
+    pub ratchet: Option<ZoneRatchetPolicy>,
+    pub wrapped_keys: Vec<WrappedZoneKey>,
+    pub signature: Signature,
+}
+
+pub struct WrappedObjectIdKey {
+    pub node_id: TailscaleNodeId,
+    pub node_enc_kid: [u8; 8],
+    pub sealed_key: Vec<u8>,
+}
+
+/// Epoch ratchet policy for past secrecy (NORMATIVE when present)
+pub struct ZoneRatchetPolicy {
+    pub enabled: bool,
+    pub overlap_secs: u64,
+    pub retain_epochs: u32,
+}
+```
 
 ---
 
