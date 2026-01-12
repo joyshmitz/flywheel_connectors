@@ -119,9 +119,9 @@ The key insight: **Tailscale provides the trusted identity mesh. RaptorQ provide
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Zone-to-Tag Mapping
+### Zone-to-Tag Mapping (Defense-in-Depth)
 
-FCP zones map directly to Tailscale tags:
+FCP zones map directly to Tailscale tags, providing network-level enforcement that layers on top of FCP's mechanical zone checks:
 
 ```
 FCP Zone          Tailscale Tag         Trust Level
@@ -133,6 +133,12 @@ z:project:*  →    tag:fcp-proj-*        Variable
 z:community  →    tag:fcp-community     Low (40)
 z:public     →    (via Funnel)          Lowest (0)
 ```
+
+**CRITICAL:** Tailscale ACLs provide defense-in-depth but do NOT replace FCP zone checks. The security model is layered:
+
+1. **Network layer (Tailscale)**: ACLs prevent unauthorized network access between zones
+2. **Protocol layer (FCP)**: Zone enforcement, capability verification, and provenance tracking
+3. **Both layers are required**: A request must pass both Tailscale ACLs AND FCP zone checks
 
 ### Tailscale ACL Policy (Auto-Generated)
 
@@ -992,14 +998,16 @@ async fn main() -> Result<()> {
 
 ---
 
-## Migration Path
+## Implementation Phases
 
-1. **Phase 1**: `fcp-tailscale` crate - basic Tailscale integration
+1. **Phase 1**: `fcp-tailscale` crate - Tailscale local API integration
 2. **Phase 2**: Peer discovery and transport prioritization
-3. **Phase 3**: Zone-to-ACL mapping and enforcement
-4. **Phase 4**: `fcp-mesh` integration with `fcp-raptorq`
+3. **Phase 3**: Zone-to-ACL mapping with defense-in-depth enforcement
+4. **Phase 4**: `fcp-mesh` integration with `fcp-raptorq` (symbol routing over tailnet)
 5. **Phase 5**: Distributed hub implementation
-6. **Phase 6**: Secret distribution with k-of-n recovery
+6. **Phase 6**: Sovereign secret distribution with k-of-n recovery
+
+See FCP Specification Section 9.2 (Transport Options) for Tailscale integration in the core protocol.
 
 ---
 

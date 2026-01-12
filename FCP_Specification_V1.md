@@ -1050,6 +1050,7 @@ Every connector MUST implement at least one transport and MUST support stdio (LS
 The Hub MAY support:
 - **TCP with mTLS**: For remote connectors
 - **HTTP/2 or gRPC**: For heavy streaming use cases
+- **Tailscale mesh**: Zero-config mesh networking for distributed deployments via WireGuard. FCP zones MAY map to Tailscale ACL tags for defense-in-depth layering, but Tailscale ACLs do NOT replace FCP zone checks—mechanical enforcement remains the primary security layer. See RFC_Sovereign_Mesh.md for implementation details.
 
 Connectors MUST NOT expose unauthenticated network listeners by default.
 
@@ -1097,6 +1098,7 @@ bitflags! {
         const HAS_CAP_TOKEN = 0b1000_0000;  // Contains capability token
         const ZONE_CROSSING = 0b0001_0000_0000;  // Result of a zone transition
         const PRIORITY      = 0b0010_0000_0000;  // High-priority frame (skip queue)
+        const RAPTORQ       = 0b0100_0000_0000;  // RaptorQ fountain-coded payload (RFC 6330)
     }
 }
 ```
@@ -1121,6 +1123,8 @@ bitflags! {
 | `shutdown` | Hub → Connector | Graceful shutdown |
 | `shutdown_ack` | Connector → Hub | Shutdown accepted / drained |
 | `error` | Either | Error with recovery hints |
+
+**Terminology Note:** In the wire protocol, the connector's response to a `handshake` message is called `handshake_ack`. In Rust implementations, this corresponds to the `HandshakeResponse` type. Both terms refer to the same message.
 
 ### 9.6 Standard Methods (Required Set)
 
@@ -1234,6 +1238,20 @@ Event topics MUST be connector-defined but namespaced to avoid collisions. Recom
 - Critical events MUST NOT be silently dropped; if loss is unavoidable, emit a drop audit event or `connector.stream.reset`
 - If `requires_ack` is true, the Hub MUST send `ack` before `ack_deadline_ms` or the connector MAY retry or drop according to policy
 - Recommended: retry up to 3 times with exponential backoff; if still unacked, emit an audit event (delivery failure) and mark the stream as degraded until recovery
+
+**RaptorQ Fountain Coding (Fundamental):**
+
+FCP fundamentally operates on RFC 6330 fountain codes. All data flows as fungible symbols - this is not optional but core to the protocol's design. The `RAPTORQ` frame flag is set on all data frames:
+
+- **Universal fungibility**: Any K' symbols (K' ≈ K × 1.002) can reconstruct the original data
+- **Epoch-based buffers**: Events are grouped into fixed epochs; replay operates at epoch granularity
+- **Symbol-based audit**: Audit logs are stored as RaptorQ symbols with merkle root verification
+- **Lossy transport tolerance**: Receivers reconstruct from any sufficient subset of symbols
+- **Multipath aggregation**: All transport paths contribute symbols; first K' arrivals win
+
+Standard replay buffer guarantees (10,000 events / 10 minutes) apply per-epoch. The `since` cursor in subscribe requests refers to epoch boundaries. Stream reset is emitted if epoch reconstruction fails.
+
+See RFC_RaptorQ_Integration.md for epoch sizing recommendations and implementation details.
 
 Example subscribe request/response:
 

@@ -704,28 +704,28 @@ impl Default for RaptorQConfig {
 
 ## Protocol Extensions
 
-### Handshake Extension
+### Handshake Configuration
 
-Add RaptorQ capability negotiation to handshake:
+RaptorQ is fundamental to FCP - all data flows as fungible symbols. Handshake includes symbol configuration:
 
 ```json
 {
-  "protocol_version": "1.0",
+  "protocol_version": "1.0.0",
   "transport_caps": {
     "compression": ["zstd"],
     "max_frame_size": 65536,
     "raptorq": {
-      "supported": true,
       "symbol_sizes": [512, 1024, 2048],
+      "preferred_symbol_size": 1024,
       "max_object_size": 67108864
     }
   }
 }
 ```
 
-### Subscribe Extension
+### Subscribe Configuration
 
-Add RaptorQ mode for event subscriptions:
+Event subscriptions include epoch configuration for symbol buffering:
 
 ```json
 {
@@ -733,20 +733,21 @@ Add RaptorQ mode for event subscriptions:
   "id": "sub_123",
   "topics": ["connector.events"],
   "raptorq": {
-    "enabled": true,
     "epoch_duration_ms": 1000,
     "symbol_size": 1024
   }
 }
 ```
 
-### New Frame Flag
+### Frame Flag
+
+The `RAPTORQ` frame flag is set on all data frames:
 
 ```rust
 bitflags! {
     pub struct FrameFlags: u16 {
         // ... existing ...
-        const RAPTORQ = 0b0100_0000_0000;  // Contains RaptorQ symbols
+        const RAPTORQ = 0b0100_0000_0000;  // RaptorQ symbols (always set for data frames)
     }
 }
 ```
@@ -791,25 +792,26 @@ For a 1MB object over 10% loss network:
 
 ---
 
-## Migration Path
+## Implementation Phases
 
 1. **Phase 1**: Add `fcp-raptorq` crate with core types
-2. **Phase 2**: Implement RaptorQ frame mode (opt-in)
-3. **Phase 3**: Add epoch-based event buffer option
+2. **Phase 2**: Implement RaptorQ frame mode in wire protocol
+3. **Phase 3**: Add epoch-based event buffer infrastructure
 4. **Phase 4**: Implement connector update protocol
 5. **Phase 5**: Add multipath transport support
 
-Existing deployments continue working; RaptorQ is negotiated in handshake.
+RaptorQ capabilities are declared during handshake via `transport_caps.raptorq`. See FCP Specification Section 9.4 (Frame Flags) and Section 9.9 (Streaming, Replay, and Backpressure) for protocol integration.
 
 ---
 
 ## Conclusion
 
-RaptorQ integration transforms FCP from a message-passing protocol to a **fungible symbol flow** protocol. The key insight is that data fungibility enables:
+RaptorQ is not an optional feature but the foundational primitive of FCP. The protocol operates on **fungible symbol flows**, not discrete messages. This fundamental design choice enables:
 
 - **Fault tolerance without coordination** (any k-of-n symbols work)
 - **Multipath without complexity** (all paths contribute equally)
 - **Distribution without assignment** (no need to track who has what)
 - **Efficiency without waste** (~0.2% overhead)
+- **Universal resilience** (every data flow is inherently erasure-coded)
 
-This aligns perfectly with FCP's goals of resilient, high-performance connector communication.
+By making RaptorQ fundamental rather than optional, FCP achieves true data fungibility everywhere - enabling the sovereign mesh architecture where any subset of devices can reconstruct any data.
