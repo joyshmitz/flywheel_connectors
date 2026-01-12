@@ -55,15 +55,117 @@ Everything in FCP is an **Object** with a content-derived **ObjectId**:
 pub struct ObjectId([u8; 32]);
 
 impl ObjectId {
-    /// Derive ObjectId from canonical serialization
+    /// Derive ObjectId from content with zone and schema binding (NORMATIVE)
+    ///
+    /// This is a hybrid model that enables:
+    /// - Zone binding: Same plaintext in different zones has different ObjectIds
+    /// - Schema versioning: Enables canonical serialization migration
+    /// - Plaintext-based: Enables deduplication within a zone
+    /// - Domain separation: Prevents hash collision attacks
+    pub fn derive(
+        plaintext: &[u8],
+        zone_id: &ZoneId,
+        schema_version: u32,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+
+        // Domain separation
+        hasher.update(b"FCP-OBJECT-ID-V1\x00");
+
+        // Zone binding (prevents cross-zone correlation without zone key)
+        hasher.update(zone_id.as_bytes());
+
+        // Schema version (enables migration)
+        hasher.update(&schema_version.to_le_bytes());
+
+        // Content
+        hasher.update(plaintext);
+
+        Self(hasher.finalize().into())
+    }
+
+    /// Simple derivation for zone-local objects
     pub fn from_bytes(data: &[u8]) -> Self {
         Self(sha256(data))
     }
 
-    /// Everything is an object
+    /// Derive from any serializable value
     pub fn from<T: Serialize>(value: &T) -> Self {
         Self::from_bytes(&canonical_serialize(value))
     }
+}
+```
+
+**Critical invariant:** The same plaintext in z:owner and z:work has DIFFERENT ObjectIds and DIFFERENT encryption keys. Cross-zone correlation requires explicit bridging with provenance tracking.
+
+#### 2.1.1 Symbol Encryption Model
+
+ObjectId is derived from plaintext (for deduplication), but symbols are encrypted (for confidentiality). A node without the zone key cannot decrypt symbols but CAN verify ObjectId if it obtains the plaintext through legitimate means.
+
+```rust
+/// Encrypted symbol (NORMATIVE)
+pub struct EncryptedSymbol {
+    /// Object identity (derived from plaintext + zone + version)
+    pub object_id: ObjectId,
+
+    /// Encoding Symbol ID
+    pub esi: u32,
+
+    /// Nonce (unique per symbol)
+    pub nonce: [u8; 12],
+
+    /// Encrypted symbol data (ChaCha20-Poly1305)
+    pub ciphertext: Vec<u8>,
+
+    /// Authentication tag (from AEAD)
+    pub auth_tag: [u8; 16],
+}
+
+impl EncryptedSymbol {
+    /// Encrypt a symbol with zone key
+    pub fn encrypt(
+        symbol_data: &[u8],
+        object_id: ObjectId,
+        esi: u32,
+        zone_key: &ZoneKey,
+    ) -> Self {
+        let nonce = generate_unique_nonce(object_id, esi);
+
+        // Additional authenticated data (AAD) binds symbol to object
+        let aad = concat!(object_id.as_bytes(), &esi.to_le_bytes());
+
+        let (ciphertext, auth_tag) = zone_key.encrypt(&nonce, symbol_data, &aad);
+
+        Self { object_id, esi, nonce, ciphertext, auth_tag }
+    }
+}
+```
+
+#### 2.1.2 Cross-Zone Re-encryption
+
+When data crosses zones, it MUST be re-encrypted:
+
+```rust
+/// Cross-zone re-encryption (NORMATIVE)
+pub fn bridge_to_zone(
+    plaintext: &[u8],
+    source_zone: &ZoneId,
+    target_zone: &ZoneId,
+    target_key: &ZoneKey,
+    schema_version: u32,
+) -> (ObjectId, Vec<EncryptedSymbol>) {
+    // New ObjectId for target zone (different due to zone binding)
+    let new_object_id = ObjectId::derive(plaintext, target_zone, schema_version);
+
+    // Encode as symbols
+    let symbols = encode(plaintext);
+
+    // Encrypt with target zone key
+    let encrypted: Vec<_> = symbols.iter()
+        .map(|s| EncryptedSymbol::encrypt(&s.data, new_object_id, s.esi, target_key))
+        .collect();
+
+    (new_object_id, encrypted)
 }
 ```
 
@@ -198,6 +300,113 @@ pub struct DistributionPolicy {
 ```
 
 Zone isolation is **cryptographic**, not topological. z:owner symbols are encrypted with z:owner's zone key. Even if a z:public node somehow receives z:owner symbols, it cannot decrypt them.
+
+### 2.5 Canonical Serialization: The Foundation of Content-Addressing
+
+For content-addressing to work, serialization MUST be deterministic. FCP uses **deterministic CBOR** (RFC 8949 Core Deterministic Encoding).
+
+```rust
+/// Canonical serialization (NORMATIVE)
+pub struct CanonicalSerializer;
+
+impl CanonicalSerializer {
+    /// Serialize to canonical bytes
+    pub fn serialize<T: Serialize>(value: &T, schema_id: &SchemaId) -> Vec<u8> {
+        let mut output = Vec::new();
+
+        // Header: magic + version + schema
+        output.extend_from_slice(b"FCP\x00");  // Magic
+        output.extend_from_slice(&1u16.to_le_bytes());  // Version
+        output.extend_from_slice(schema_id.as_bytes());  // Schema ID (32 bytes)
+
+        // Body: Deterministic CBOR
+        ciborium::ser::into_writer_canonical(value, &mut output)
+            .expect("serialization must succeed");
+
+        output
+    }
+
+    /// Deserialize with schema validation
+    pub fn deserialize<T: DeserializeOwned>(
+        bytes: &[u8],
+        expected_schema: &SchemaId,
+    ) -> Result<T, SerializationError> {
+        // Validate header
+        if &bytes[0..4] != b"FCP\x00" {
+            return Err(SerializationError::InvalidMagic);
+        }
+
+        let version = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+        if version != 1 {
+            return Err(SerializationError::UnsupportedVersion(version));
+        }
+
+        let schema_id = SchemaId::from_bytes(&bytes[6..38]);
+        if schema_id != *expected_schema {
+            return Err(SerializationError::SchemaMismatch {
+                expected: expected_schema.clone(),
+                actual: schema_id,
+            });
+        }
+
+        // Deserialize body
+        ciborium::de::from_reader(&bytes[38..])
+            .map_err(SerializationError::Cbor)
+    }
+}
+```
+
+#### 2.5.1 Schema Registry
+
+Every object type has a schema ID derived from its definition:
+
+```rust
+/// Schema identification (NORMATIVE)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SchemaId([u8; 32]);
+
+impl SchemaId {
+    /// Derive schema ID from schema definition
+    pub fn derive(schema_name: &str, version: u32, fields: &[FieldDef]) -> Self {
+        let mut hasher = Sha256::new();
+
+        hasher.update(b"FCP-SCHEMA-V1\x00");
+        hasher.update(schema_name.as_bytes());
+        hasher.update(&version.to_le_bytes());
+
+        for field in fields {
+            hasher.update(field.name.as_bytes());
+            hasher.update(&[field.field_type as u8]);
+            hasher.update(&[if field.optional { 1 } else { 0 }]);
+        }
+
+        Self(hasher.finalize().into())
+    }
+}
+
+/// Standard schema IDs (NORMATIVE)
+pub mod schemas {
+    pub const HANDSHAKE_OBJECT: SchemaId = /* derived */;
+    pub const INVOKE_OBJECT: SchemaId = /* derived */;
+    pub const CAPABILITY_OBJECT: SchemaId = /* derived */;
+    pub const RESPONSE_OBJECT: SchemaId = /* derived */;
+    pub const EVENT_EPOCH_OBJECT: SchemaId = /* derived */;
+    // ... etc
+}
+```
+
+#### 2.5.2 Deterministic CBOR Rules
+
+Following RFC 8949 Section 4.2:
+
+1. **Integer encoding:** Smallest possible encoding
+2. **Map key ordering:** Lexicographic by encoded key bytes
+3. **Floating point:** Prefer smallest accurate representation
+4. **No indefinite-length:** All arrays/maps/strings have explicit length
+5. **No duplicate keys:** Maps MUST NOT contain duplicate keys
+6. **UTF-8 strings:** All text strings MUST be valid UTF-8
+
+**Test vectors MUST be provided** for every object type to ensure cross-implementation compatibility.
 
 ---
 
@@ -744,6 +953,511 @@ impl DiversityRequirement {
 ```
 
 This provides **distributed trust**: Even if one node is compromised, it can't forge data that requires symbols from multiple honest sources.
+
+### 5.3 Trust Model and Byzantine Assumptions
+
+FCP operates under a well-defined threat model:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              THREAT MODEL                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  TRUSTED:                                                                   │
+│  - Tailscale identity (WireGuard keys are unforgeable)                     │
+│  - Cryptographic primitives (ChaCha20, Ed25519, SHA256)                    │
+│  - Owner's root key (assumed not compromised)                              │
+│                                                                             │
+│  ASSUMED POSSIBLE (must defend against):                                   │
+│  - Compromised device (attacker has full device access)                    │
+│  - Malicious peer (valid Tailscale identity, malicious behavior)           │
+│  - Symbol injection (attacker injects malformed symbols)                   │
+│  - Replay attacks (attacker replays old valid symbols)                     │
+│  - Denial of service (attacker floods with symbols)                        │
+│  - Offline attacks (attacker captures encrypted symbols)                   │
+│                                                                             │
+│  OUT OF SCOPE:                                                              │
+│  - Tailscale control plane compromise                                       │
+│  - Quantum cryptanalysis                                                    │
+│  - Physical device extraction (side channels)                               │
+│  - Owner key compromise                                                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 5.3.1 Byzantine Fault Tolerance
+
+**Core assumption:** Up to f of n devices may be compromised, where f < n/3 for critical operations.
+
+```rust
+/// Byzantine fault tolerance model (NORMATIVE)
+pub struct ByzantineModel {
+    /// Total devices in mesh
+    pub n: u8,
+
+    /// Maximum compromised devices
+    pub f: u8,
+}
+
+impl ByzantineModel {
+    /// Invariant: f < n/3 for safety
+    pub fn is_safe(&self) -> bool {
+        3 * self.f < self.n
+    }
+}
+
+/// Operation classification by required quorum
+pub enum OperationClass {
+    /// Read-only, single device sufficient
+    ReadOnly,
+
+    /// Normal write, majority sufficient
+    /// Quorum: (n + f + 1) / 2
+    NormalWrite,
+
+    /// Critical operation, supermajority required
+    /// Example: capability issuance, revocation
+    /// Quorum: n - f
+    CriticalWrite,
+
+    /// Unanimous, all devices must agree
+    /// Example: owner key rotation
+    Unanimous,
+}
+
+impl OperationClass {
+    pub fn required_quorum(&self, n: u8, f: u8) -> u8 {
+        match self {
+            Self::ReadOnly => 1,
+            Self::NormalWrite => (n + f + 1) / 2,
+            Self::CriticalWrite => n - f,
+            Self::Unanimous => n,
+        }
+    }
+}
+```
+
+#### 5.3.2 Trust Boundaries
+
+```rust
+/// Trust boundary definitions (NORMATIVE)
+pub enum TrustBoundary {
+    /// Same device, same process
+    Local,
+
+    /// Same device, different process (IPC)
+    Process,
+
+    /// Same zone, different device (Tailscale mesh)
+    Zone,
+
+    /// Different zone, requires bridging
+    CrossZone,
+
+    /// External (Funnel, public internet)
+    External,
+}
+
+impl TrustBoundary {
+    /// Required verification at each boundary
+    pub fn required_verification(&self) -> VerificationLevel {
+        match self {
+            Self::Local => VerificationLevel::None,
+            Self::Process => VerificationLevel::ProcessIsolation,
+            Self::Zone => VerificationLevel::TailscaleIdentity,
+            Self::CrossZone => VerificationLevel::ZonePolicyAndCapability,
+            Self::External => VerificationLevel::Full,
+        }
+    }
+}
+```
+
+### 5.4 Ordering and Consistency
+
+#### 5.4.1 Epoch Model Refinement
+
+**Decision: Epochs are logical, not wall-clock.**
+
+```rust
+/// Epoch definition (NORMATIVE)
+pub struct Epoch {
+    /// Epoch ID (monotonically increasing)
+    pub id: EpochId,
+
+    /// Epoch proposer (device that finalized this epoch)
+    pub proposer: TailscaleNodeId,
+
+    /// Epoch seal (signature from proposer)
+    pub seal: EpochSeal,
+
+    /// Wall-clock hint (advisory, not authoritative)
+    pub timestamp_hint: u64,
+}
+
+impl EpochAssigner {
+    /// Assign event to epoch
+    /// Events received during epoch N go into epoch N
+    /// Epoch boundaries are defined by epoch seals, not wall clock
+    pub fn assign(&self, event: &Event) -> EpochId {
+        self.current_epoch
+    }
+
+    /// Seal current epoch and start new one
+    /// This creates an ordering point
+    pub async fn seal_epoch(&mut self) -> Result<Epoch> {
+        let epoch = Epoch {
+            id: self.current_epoch,
+            proposer: self.my_node_id,
+            seal: self.sign_epoch_seal(),
+            timestamp_hint: now(),
+        };
+
+        // Distribute epoch seal
+        self.distribute_epoch_seal(&epoch).await?;
+
+        // Start new epoch
+        self.current_epoch = EpochId(self.current_epoch.0 + 1);
+
+        Ok(epoch)
+    }
+}
+```
+
+#### 5.4.2 Ordering-Sensitive Operations
+
+For operations that require strict ordering, use a SequenceObject:
+
+```rust
+/// Sequence object for strict ordering (NORMATIVE)
+pub struct SequenceObject {
+    /// Sequence identity
+    pub sequence_id: SequenceId,
+
+    /// What zone owns this sequence
+    pub zone_id: ZoneId,
+
+    /// Current sequence number
+    pub current_seq: u64,
+
+    /// Previous sequence object (forms chain)
+    pub previous: ObjectId,
+}
+
+/// Sequenced operation wrapper
+pub struct SequencedOperation<T> {
+    /// The operation
+    pub operation: T,
+
+    /// Sequence number (MUST be exactly previous + 1)
+    pub seq: u64,
+
+    /// Reference to previous operation
+    pub previous_op: ObjectId,
+}
+
+impl<T> SequencedOperation<T> {
+    /// Verify sequence integrity
+    pub fn verify_sequence(&self, previous: &SequencedOperation<T>) -> Result<()> {
+        if self.seq != previous.seq + 1 {
+            return Err(SequenceError::Gap {
+                expected: previous.seq + 1,
+                actual: self.seq,
+            });
+        }
+
+        if self.previous_op != previous.object_id() {
+            return Err(SequenceError::BrokenChain);
+        }
+
+        Ok(())
+    }
+}
+```
+
+#### 5.4.3 Consistency Levels
+
+```rust
+/// Consistency level for operations (NORMATIVE)
+pub enum ConsistencyLevel {
+    /// Eventual: operation succeeds locally, propagates eventually
+    /// Use for: non-critical writes, caching, telemetry
+    Eventual,
+
+    /// Epoch: operation included in current epoch, ordered between epochs
+    /// Use for: most operations
+    Epoch,
+
+    /// Sequenced: operation has strict order within a sequence
+    /// Use for: financial transactions, ordered edits
+    Sequenced,
+
+    /// Linearizable: operation appears to execute atomically at one point
+    /// Use for: distributed locks, leader election
+    /// Requires quorum acknowledgment
+    Linearizable,
+}
+```
+
+### 5.5 Revocation, Expiry, and Garbage Collection
+
+#### 5.5.1 Revocation Model
+
+**Key insight:** In a symbol-native world, you cannot "delete" data—symbols may exist on offline devices. Revocation is a protocol mechanism, not a storage mechanism.
+
+```rust
+/// Revocation object (NORMATIVE)
+pub struct RevocationObject {
+    /// What is being revoked (ObjectId, CapabilityId, KeyId)
+    pub target: RevocationTarget,
+
+    /// Cutoff epoch (revocation effective after this epoch)
+    pub cutoff_epoch: EpochId,
+
+    /// Reason (for audit)
+    pub reason: RevocationReason,
+
+    /// Signed by authority (Owner or Admin)
+    pub signature: Signature,
+    pub signer: KeyId,
+}
+
+pub enum RevocationTarget {
+    /// Revoke a specific object
+    Object(ObjectId),
+
+    /// Revoke a capability
+    Capability(CapabilityId),
+
+    /// Revoke a key (admin key, device key)
+    Key(KeyId),
+
+    /// Revoke all capabilities for a principal
+    Principal(PrincipalId),
+}
+
+/// Revocation checking (NORMATIVE)
+impl RevocationChecker {
+    /// Check if target is revoked
+    pub fn is_revoked(&self, target: &RevocationTarget, at_epoch: EpochId) -> bool {
+        for revocation in &self.revocations {
+            if revocation.target == *target && at_epoch >= revocation.cutoff_epoch {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// MUST check revocation before any of:
+    /// - Using a capability
+    /// - Accepting a symbol from a source
+    /// - Trusting an admin delegation
+    pub fn guard<T>(&self, target: &RevocationTarget, action: impl FnOnce() -> T) -> Result<T> {
+        if self.is_revoked(target, current_epoch()) {
+            return Err(Error::Revoked);
+        }
+        Ok(action())
+    }
+}
+```
+
+#### 5.5.2 Expiry Model
+
+Everything has a TTL:
+
+```rust
+/// Expiry requirements (NORMATIVE)
+pub struct ExpiryPolicy {
+    /// Capabilities MUST have TTL
+    pub capability_max_ttl: Duration,  // Default: 90 days
+
+    /// Admin delegations MUST have TTL
+    pub delegation_max_ttl: Duration,  // Default: 90 days
+
+    /// Symbols MUST have retention period
+    pub symbol_retention: Duration,  // Default: 30 days
+
+    /// Audit data has separate retention
+    pub audit_retention: Duration,  // Default: 7 years
+}
+
+/// Every object SHOULD include expiry
+pub trait Expirable {
+    fn expires_at(&self) -> Option<u64>;
+
+    fn is_expired(&self) -> bool {
+        self.expires_at()
+            .map(|exp| exp < now())
+            .unwrap_or(false)
+    }
+}
+```
+
+#### 5.5.3 Garbage Collection
+
+```rust
+/// Garbage collection protocol (NORMATIVE)
+pub struct GarbageCollector {
+    /// Zone policy defines retention
+    pub policy: GcPolicy,
+
+    /// Tombstones for intentionally deleted objects
+    pub tombstones: HashMap<ObjectId, Tombstone>,
+}
+
+pub struct GcPolicy {
+    /// Minimum retention for all symbols
+    pub min_retention: Duration,
+
+    /// Maximum storage per zone
+    pub max_storage_bytes: u64,
+
+    /// GC priority (what to delete first when over quota)
+    pub priority: GcPriority,
+}
+
+pub enum GcPriority {
+    /// Delete oldest first (FIFO)
+    Oldest,
+
+    /// Delete least accessed first (LRU)
+    LeastRecentlyUsed,
+
+    /// Delete lowest priority objects first
+    ByObjectPriority,
+}
+
+/// Tombstone (marks intentional deletion)
+pub struct Tombstone {
+    pub object_id: ObjectId,
+    pub deleted_at: EpochId,
+    pub deleted_by: PrincipalId,
+    pub reason: Option<String>,
+    pub signature: Signature,
+}
+
+impl GarbageCollector {
+    fn should_delete(&self, symbol: &StoredSymbol) -> bool {
+        // Expired?
+        if symbol.age() > self.policy.min_retention {
+            return true;
+        }
+
+        // Tombstoned?
+        if self.tombstones.contains_key(&symbol.object_id) {
+            return true;
+        }
+
+        // Revoked?
+        if self.is_revoked(&symbol.object_id) {
+            return true;
+        }
+
+        false
+    }
+}
+```
+
+### 5.6 Backpressure and DoS Protection
+
+#### 5.6.1 Rate Limiting Model
+
+```rust
+/// Rate limiting (NORMATIVE)
+pub struct RateLimiter {
+    /// Limits by source
+    pub source_limits: HashMap<SourceId, TokenBucket>,
+
+    /// Limits by zone
+    pub zone_limits: HashMap<ZoneId, TokenBucket>,
+
+    /// Limits by object type
+    pub type_limits: HashMap<SchemaId, TokenBucket>,
+
+    /// Global limit
+    pub global_limit: TokenBucket,
+}
+
+pub struct TokenBucket {
+    /// Maximum tokens
+    pub capacity: u64,
+
+    /// Current tokens
+    pub tokens: AtomicU64,
+
+    /// Refill rate (tokens per second)
+    pub refill_rate: u64,
+}
+
+impl RateLimiter {
+    /// Check if symbol should be accepted
+    pub fn check(&self, symbol: &SignedSymbolEnvelope) -> RateLimitResult {
+        let source_ok = self.source_limits
+            .get(&symbol.source)
+            .map(|b| b.try_consume(1))
+            .unwrap_or(true);
+
+        let zone_ok = self.zone_limits
+            .get(&symbol.symbol.zone_id)
+            .map(|b| b.try_consume(1))
+            .unwrap_or(true);
+
+        let global_ok = self.global_limit.try_consume(1);
+
+        if !global_ok {
+            RateLimitResult::Rejected(RateLimitReason::Global)
+        } else if !zone_ok {
+            RateLimitResult::Rejected(RateLimitReason::Zone)
+        } else if !source_ok {
+            RateLimitResult::Rejected(RateLimitReason::Source)
+        } else {
+            RateLimitResult::Accepted
+        }
+    }
+}
+```
+
+#### 5.6.2 Drop Policies
+
+```rust
+/// Drop policy (NORMATIVE)
+pub enum DropPolicy {
+    /// Drop and log (silent)
+    DropSilent,
+
+    /// Drop and emit audit event
+    DropWithAudit,
+
+    /// Drop and notify sender
+    DropWithNack,
+
+    /// Never drop (queue, may OOM)
+    NeverDrop,
+}
+
+/// Object priority for overload shedding
+pub enum ObjectPriority {
+    /// Control plane objects (highest)
+    ControlPlane,
+
+    /// Audit objects
+    Audit,
+
+    /// Capability objects
+    Capability,
+
+    /// Response objects
+    Response,
+
+    /// Request objects
+    Request,
+
+    /// Event objects
+    Event,
+
+    /// Other (lowest)
+    Other,
+}
+```
 
 ---
 

@@ -813,6 +813,344 @@ impl ThresholdSecret {
 
 **Key insight**: Your API keys, OAuth tokens, private keys—NONE of them exist complete on any device. A stolen laptop is useless. You need k devices to reconstruct.
 
+### 3.6 Authority Flow and Capability Signing
+
+There is no hub, but there IS authority. The authority model is hierarchical:
+
+```
+Owner Root Key
+      │
+      ├──► Zone Policy Objects (signed by Owner)
+      │
+      ├──► Admin Keys (delegated by Owner)
+      │         │
+      │         └──► Capability Objects (signed by Admin or Owner)
+      │
+      └──► Device Keys (Tailscale identity, approved by Owner)
+```
+
+#### 3.6.1 Owner Root Key
+
+```rust
+/// Owner root key (NORMATIVE)
+/// This is the ultimate authority. MUST be protected.
+pub struct OwnerRootKey {
+    /// Ed25519 signing key
+    keypair: Ed25519Keypair,
+
+    /// Key ID (hash of public key)
+    pub key_id: KeyId,
+
+    /// Creation timestamp
+    pub created_at: u64,
+}
+
+impl OwnerRootKey {
+    /// Sign a policy object
+    pub fn sign_policy(&self, policy: &PolicyObject) -> SignedPolicy {
+        let canonical = CanonicalSerializer::serialize(policy, &schemas::POLICY_OBJECT);
+        let signature = self.keypair.sign(&canonical);
+
+        SignedPolicy {
+            policy: policy.clone(),
+            signature,
+            signer: self.key_id,
+        }
+    }
+
+    /// Delegate to admin key
+    pub fn delegate_admin(
+        &self,
+        admin_pubkey: &Ed25519PublicKey,
+        scope: AdminScope,
+    ) -> SignedDelegation {
+        let delegation = AdminDelegation {
+            admin_key: admin_pubkey.clone(),
+            scope,
+            delegated_at: now(),
+            expires_at: now() + Duration::days(90),
+            delegated_by: self.key_id,
+        };
+
+        let canonical = CanonicalSerializer::serialize(&delegation, &schemas::ADMIN_DELEGATION);
+        let signature = self.keypair.sign(&canonical);
+
+        SignedDelegation { delegation, signature }
+    }
+}
+```
+
+#### 3.6.2 Capability Signing
+
+**Invariant:** Every CapabilityObject MUST be signed by Owner or delegated Admin.
+
+```rust
+/// Signed capability (NORMATIVE)
+pub struct SignedCapability {
+    /// The capability definition
+    pub capability: CapabilityObject,
+
+    /// Signature (Ed25519)
+    pub signature: Signature,
+
+    /// Who signed (Owner key ID or Admin key ID)
+    pub signer: KeyId,
+
+    /// If signed by Admin, include delegation chain
+    pub delegation_chain: Option<Vec<SignedDelegation>>,
+}
+
+impl SignedCapability {
+    /// Verify capability authenticity
+    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), VerificationError> {
+        // 1. Check expiry
+        if self.capability.expires_at < now() {
+            return Err(VerificationError::Expired);
+        }
+
+        // 2. Get signer's public key
+        let signer_key = if self.signer == trust_anchors.owner_key_id {
+            // Signed by owner
+            trust_anchors.owner_public_key.clone()
+        } else if let Some(chain) = &self.delegation_chain {
+            // Signed by admin—verify delegation chain
+            self.verify_delegation_chain(chain, trust_anchors)?
+        } else {
+            return Err(VerificationError::UnknownSigner);
+        };
+
+        // 3. Verify signature
+        let canonical = CanonicalSerializer::serialize(
+            &self.capability,
+            &schemas::CAPABILITY_OBJECT,
+        );
+
+        if !signer_key.verify(&canonical, &self.signature) {
+            return Err(VerificationError::InvalidSignature);
+        }
+
+        Ok(())
+    }
+}
+```
+
+#### 3.6.3 Trust Anchors Distribution
+
+```rust
+/// Trust anchors (distributed to all devices)
+pub struct TrustAnchors {
+    /// Owner's public key
+    pub owner_public_key: Ed25519PublicKey,
+
+    /// Owner key ID
+    pub owner_key_id: KeyId,
+
+    /// Current admin delegations (signed by owner)
+    pub admin_delegations: Vec<SignedDelegation>,
+
+    /// Current zone policies (signed by owner)
+    pub zone_policies: Vec<SignedPolicy>,
+
+    /// Revoked keys/capabilities (signed by owner)
+    pub revocations: Vec<SignedRevocation>,
+
+    /// Last update epoch
+    pub epoch: EpochId,
+}
+```
+
+### 3.7 Principal vs Device Identity
+
+**Key insight:** Tailscale authenticates DEVICES. FCP still needs PRINCIPAL identity (user, agent, service).
+
+```rust
+/// Principal identity (NORMATIVE)
+pub struct PrincipalId(pub String);  // e.g., "user:alice@example.com"
+
+/// Device identity (from Tailscale)
+pub struct DeviceId(pub TailscaleNodeId);
+
+/// Principal-Device binding
+pub struct PrincipalDeviceBinding {
+    /// The principal
+    pub principal: PrincipalId,
+
+    /// Devices this principal can use
+    pub devices: Vec<DeviceId>,
+
+    /// Binding constraints
+    pub constraints: BindingConstraints,
+
+    /// Signed by authority
+    pub signature: Signature,
+    pub signer: KeyId,
+}
+
+pub struct BindingConstraints {
+    /// Valid time range
+    pub valid_from: u64,
+    pub valid_until: u64,
+
+    /// Zone restrictions
+    pub allowed_zones: Vec<ZoneId>,
+
+    /// Capability restrictions
+    pub allowed_capabilities: Option<Vec<CapabilityId>>,
+}
+```
+
+#### 3.7.1 Request Attribution
+
+Every request has both device AND principal:
+
+```rust
+/// Request context (NORMATIVE)
+pub struct RequestContext {
+    /// Which device made the request
+    pub device: DeviceId,
+
+    /// Which principal is acting
+    pub principal: PrincipalId,
+
+    /// Principal-device binding proof
+    pub binding_proof: PrincipalDeviceBinding,
+
+    /// Capability token
+    pub capability_token: SignedCapability,
+
+    /// Zone context
+    pub zone: ZoneId,
+}
+
+impl RequestContext {
+    /// Verify request authorization
+    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<()> {
+        // 1. Verify principal-device binding
+        self.binding_proof.verify(trust_anchors)?;
+
+        // 2. Check device is in binding
+        if !self.binding_proof.devices.contains(&self.device) {
+            return Err(Error::DeviceNotBound);
+        }
+
+        // 3. Verify capability
+        self.capability_token.verify(trust_anchors)?;
+
+        // 4. Check capability grants operation to principal
+        if !self.capability_token.capability.allows(&self.principal) {
+            return Err(Error::PrincipalNotAuthorized);
+        }
+
+        // 5. Check zone policy
+        if !self.binding_proof.constraints.allowed_zones.contains(&self.zone) {
+            return Err(Error::ZoneNotAllowed);
+        }
+
+        Ok(())
+    }
+}
+```
+
+### 3.8 Source Identity and Symbol Signing
+
+Every symbol MUST be signed by its source:
+
+```rust
+/// Source identity (NORMATIVE)
+pub struct SourceId {
+    /// Tailscale node ID (stable identity)
+    pub tailscale_node_id: TailscaleNodeId,
+
+    /// Ephemeral signing key (rotated frequently)
+    pub ephemeral_key: Ed25519PublicKey,
+
+    /// Ephemeral key attestation (signed by Tailscale node key)
+    pub attestation: EphemeralKeyAttestation,
+}
+
+pub struct EphemeralKeyAttestation {
+    /// The ephemeral public key
+    pub ephemeral_key: Ed25519PublicKey,
+
+    /// When this key becomes valid
+    pub valid_from: u64,
+
+    /// When this key expires
+    pub valid_until: u64,
+
+    /// Signed by the device's long-term key
+    pub signature: Signature,
+}
+
+impl SourceId {
+    /// Verify source identity
+    pub fn verify(&self, tailscale_public_key: &WireGuardPublicKey) -> Result<()> {
+        // 1. Verify ephemeral key is attested by Tailscale identity
+        let attestation_bytes = canonical_serialize(&self.attestation);
+
+        if !verify_tailscale_signature(
+            tailscale_public_key,
+            &attestation_bytes,
+            &self.attestation.signature,
+        ) {
+            return Err(Error::InvalidAttestation);
+        }
+
+        // 2. Check ephemeral key validity window
+        let now = current_time();
+        if now < self.attestation.valid_from || now > self.attestation.valid_until {
+            return Err(Error::EphemeralKeyExpired);
+        }
+
+        Ok(())
+    }
+}
+
+/// Signed symbol envelope (NORMATIVE)
+pub struct SignedSymbolEnvelope {
+    /// The symbol
+    pub symbol: SymbolEnvelope,
+
+    /// Source identity
+    pub source: SourceId,
+
+    /// Signature over (symbol || source)
+    pub signature: Signature,
+}
+
+impl SignedSymbolEnvelope {
+    /// Create signed symbol
+    pub fn sign(symbol: SymbolEnvelope, source: &SourceId, key: &Ed25519Keypair) -> Self {
+        let to_sign = concat!(
+            canonical_serialize(&symbol),
+            canonical_serialize(source),
+        );
+
+        let signature = key.sign(&to_sign);
+
+        Self { symbol, source: source.clone(), signature }
+    }
+
+    /// Verify symbol authenticity
+    pub fn verify(&self) -> Result<()> {
+        // 1. Verify source identity
+        self.source.verify(&get_tailscale_key(&self.source.tailscale_node_id)?)?;
+
+        // 2. Verify symbol signature
+        let to_verify = concat!(
+            canonical_serialize(&self.symbol),
+            canonical_serialize(&self.source),
+        );
+
+        if !self.source.ephemeral_key.verify(&to_verify, &self.signature) {
+            return Err(Error::InvalidSymbolSignature);
+        }
+
+        Ok(())
+    }
+}
+```
+
 ---
 
 ## Part 4: Computation and Execution
@@ -1860,6 +2198,173 @@ pub struct SymbolDelivery {
     pub symbols: Vec<SymbolEnvelope>,
 }
 ```
+
+### 9.3 Protocol Negotiation
+
+Nodes negotiate protocol capabilities during mesh join:
+
+```rust
+/// Transport capabilities (NORMATIVE)
+pub struct TransportCaps {
+    /// Protocol versions supported
+    pub protocol_versions: Vec<ProtocolVersion>,
+
+    /// Symbol mode support
+    pub symbol_native: bool,
+
+    /// RaptorQ support (MUST be true in mesh-native)
+    pub raptorq: bool,
+
+    /// Compression algorithms
+    pub compression: Vec<CompressionAlgorithm>,
+
+    /// Maximum frame size
+    pub max_frame_size: u32,
+
+    /// Maximum symbols per frame
+    pub max_symbols_per_frame: u16,
+}
+
+pub enum ProtocolVersion {
+    /// Original FCP (JSON-RPC frames)
+    Fcp1,
+
+    /// Symbol-native FCP (mesh-native)
+    Fcp2Sym,
+}
+```
+
+#### 9.3.1 Negotiation Protocol
+
+```rust
+/// Protocol negotiation (NORMATIVE)
+pub struct Negotiation {
+    /// My capabilities
+    pub my_caps: TransportCaps,
+
+    /// Peer's capabilities
+    pub peer_caps: Option<TransportCaps>,
+
+    /// Negotiated protocol
+    pub negotiated: Option<NegotiatedProtocol>,
+}
+
+pub struct NegotiatedProtocol {
+    /// Which version
+    pub version: ProtocolVersion,
+
+    /// Symbol mode
+    pub symbol_native: bool,
+
+    /// Compression
+    pub compression: Option<CompressionAlgorithm>,
+
+    /// Frame size
+    pub max_frame_size: u32,
+}
+
+impl Negotiation {
+    /// Negotiate protocol with peer
+    pub fn negotiate(&mut self, peer_caps: TransportCaps) -> NegotiatedProtocol {
+        self.peer_caps = Some(peer_caps.clone());
+
+        // Prefer highest common version (symbol-native)
+        let version = if self.my_caps.protocol_versions.contains(&ProtocolVersion::Fcp2Sym)
+            && peer_caps.protocol_versions.contains(&ProtocolVersion::Fcp2Sym)
+        {
+            ProtocolVersion::Fcp2Sym
+        } else {
+            ProtocolVersion::Fcp1
+        };
+
+        // Symbol mode requires both sides
+        let symbol_native = self.my_caps.symbol_native && peer_caps.symbol_native;
+
+        // Common compression
+        let compression = self.my_caps.compression.iter()
+            .find(|c| peer_caps.compression.contains(c))
+            .cloned();
+
+        // Minimum frame size
+        let max_frame_size = self.my_caps.max_frame_size.min(peer_caps.max_frame_size);
+
+        let negotiated = NegotiatedProtocol {
+            version,
+            symbol_native,
+            compression,
+            max_frame_size,
+        };
+
+        self.negotiated = Some(negotiated.clone());
+        negotiated
+    }
+}
+```
+
+#### 9.3.2 Hybrid Mode (Migration Support)
+
+For backward compatibility during migration from FCP1 to mesh-native:
+
+```rust
+/// Hybrid mode translator (FCP1 <-> FCP2-SYM)
+pub struct HybridTranslator {
+    /// Negotiated protocol with peer
+    pub peer_protocol: ProtocolVersion,
+
+    /// Local preference
+    pub local_protocol: ProtocolVersion,
+}
+
+impl HybridTranslator {
+    /// Translate outgoing message
+    pub fn translate_outgoing(&self, msg: MeshObject) -> OutgoingFrame {
+        match self.peer_protocol {
+            ProtocolVersion::Fcp1 => {
+                // Convert symbol object to JSON-RPC frame
+                self.to_json_rpc(msg)
+            }
+            ProtocolVersion::Fcp2Sym => {
+                // Send as symbol batch
+                self.to_symbol_frame(msg)
+            }
+        }
+    }
+
+    /// Translate incoming frame
+    pub fn translate_incoming(&self, frame: IncomingFrame) -> MeshObject {
+        match frame {
+            IncomingFrame::JsonRpc(json) => {
+                // Parse JSON-RPC, convert to object
+                self.from_json_rpc(json)
+            }
+            IncomingFrame::SymbolBatch(symbols) => {
+                // Reconstruct object from symbols
+                self.from_symbols(symbols)
+            }
+        }
+    }
+}
+```
+
+### 9.4 Conformance Requirements
+
+Every mesh-native implementation MUST pass these test vectors:
+
+1. **Canonical serialization**: Given input, produce exact byte output
+2. **ObjectId derivation**: Given content + zone + version, produce exact ObjectId
+3. **Symbol encoding**: Given content, produce valid RaptorQ symbols
+4. **Symbol reconstruction**: Given K' symbols, reconstruct original
+5. **Signature verification**: Given signed object, verify correctly
+6. **Revocation checking**: Given revocation list, correctly reject revoked items
+7. **Source diversity**: Verify diversity requirements are enforced
+
+Cross-implementation interop tests:
+
+1. Handshake negotiation
+2. Symbol exchange
+3. Object reconstruction
+4. Capability verification
+5. Cross-zone bridging
 
 ---
 
