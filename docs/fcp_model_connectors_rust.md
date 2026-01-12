@@ -22,16 +22,17 @@
 7. Invoke, Receipts, and Event Envelopes
 8. Streaming, Replay, and Acks
 9. Error Taxonomy
-10. Connector Manifest (TOML) and Embedding
-11. Sandbox Profiles and Enforcement
-12. Automation Recipes and Provisioning Interface
-13. Registry and Supply Chain
-14. Lifecycle Management and Revocation
-15. Device-Aware Execution and Execution Leases
-16. Observability and Audit
-17. Connector Archetypes (V2) and Patterns
-18. Rust Connector Skeleton (SDK-aligned)
-19. Conformance Checklist (Connector)
+10. Agent Integration (Introspection + MCP)
+11. Connector Manifest (TOML) and Embedding
+12. Sandbox Profiles and Enforcement
+13. Automation Recipes and Provisioning Interface
+14. Registry and Supply Chain
+15. Lifecycle Management and Revocation
+16. Device-Aware Execution and Execution Leases
+17. Observability and Audit
+18. Connector Archetypes (V2) and Patterns
+19. Rust Connector Skeleton (SDK-aligned)
+20. Conformance Checklist (Connector)
 
 ---
 
@@ -355,9 +356,14 @@ pub struct ZoneCrossing {
 }
 ```
 
-Taint decisions are enforced before invocation. Public-tainted input cannot directly drive Dangerous operations;
-Risky operations with tainted inputs require elevation; cross-zone movement updates `current_zone` and records
-zone crossings.
+Taint decisions are enforced before invocation:
+
+- Public-tainted input cannot directly drive Dangerous operations.
+- If `taint != NONE` and `operation.safety_tier >= Risky` and `target_zone.integrity_level > origin_integrity`,
+  an ElevationToken is required.
+- Otherwise, the operation is allowed.
+
+Cross-zone movement updates `current_zone` and records zone crossings.
 
 ### 5.4 Elevation Token
 
@@ -468,8 +474,8 @@ pub struct NetworkConstraints {
 }
 ```
 
-When `network.outbound` capabilities are used, connectors MUST declare appropriate network constraints.
-For sensitive connectors, SNI enforcement and SPKI pinning are normative.
+Network/TLS constraints are NORMATIVE for sensitive connectors. For sensitive targets,
+SNI enforcement and SPKI pinning are required.
 
 ### 6.4 Placement Policy
 
@@ -539,7 +545,11 @@ pub struct InvokeResponse {
 }
 ```
 
-The holder proof prevents token replay by anyone other than the designated holder.
+The holder proof prevents token replay by anyone other than the designated holder. The signable bytes
+bind the request to the specific `id`, `operation`, and token `jti`.
+
+Confidentiality downgrades are enforced before execution: if an operation writes outputs into a zone
+with lower confidentiality than the data label, a valid `DeclassificationToken` is required.
 
 ### 7.2 Operation Receipt
 
@@ -614,9 +624,27 @@ FCP-9000..9999  Internal errors
 
 ---
 
-## 10. Connector Manifest (TOML) and Embedding
+## 10. Agent Integration (Introspection + MCP)
 
-### 10.1 Manifest Structure (NORMATIVE)
+Agents MUST be able to query:
+
+- Operations (schemas, risk levels)
+- Approval requirements
+- Rate limits
+- Recovery hints
+
+MCP integration MUST map connector operations to MCP-compatible tools with:
+
+- Schemas
+- Risk annotations
+- Examples
+- Rate limits
+
+---
+
+## 11. Connector Manifest (TOML) and Embedding
+
+### 11.1 Manifest Structure (NORMATIVE)
 
 ```toml
 [manifest]
@@ -690,7 +718,7 @@ registry_signature = { kid = "registry1", sig = "base64:..." }
 transparency_log_entry = "objectid:..."
 ```
 
-### 10.2 Manifest Embedding (NORMATIVE)
+### 11.2 Manifest Embedding (NORMATIVE)
 
 Manifests MUST be extractable without execution:
 
@@ -702,7 +730,7 @@ Connectors MUST implement `--manifest` to print the embedded manifest.
 
 ---
 
-## 11. Sandbox Profiles and Enforcement
+## 12. Sandbox Profiles and Enforcement
 
 ```rust
 /// Sandbox configuration from manifest (NORMATIVE)
@@ -738,9 +766,9 @@ Enforcement:
 
 ---
 
-## 12. Automation Recipes and Provisioning Interface
+## 13. Automation Recipes and Provisioning Interface
 
-### 12.1 Recipe Model
+### 13.1 Recipe Model
 
 Recipes are deterministic step lists for connector setup:
 
@@ -772,7 +800,7 @@ value_from = "bot_token"
 scope = "connector:fcp.telegram"
 ```
 
-### 12.2 Provisioning Interface
+### 13.2 Provisioning Interface
 
 | Operation | Purpose |
 |-----------|---------|
@@ -783,9 +811,9 @@ scope = "connector:fcp.telegram"
 
 ---
 
-## 13. Registry and Supply Chain
+## 14. Registry and Supply Chain
 
-### 13.1 Registry Sources (NORMATIVE)
+### 14.1 Registry Sources (NORMATIVE)
 
 Registries are sources, not dependencies. Implementations MUST support at least one of:
 
@@ -804,7 +832,7 @@ pub enum RegistrySource {
 }
 ```
 
-### 13.2 Transparency Log (Optional, NORMATIVE if enabled)
+### 14.2 Transparency Log (Optional, NORMATIVE if enabled)
 
 ```rust
 pub struct ConnectorTransparencyLogEntry {
@@ -819,7 +847,7 @@ pub struct ConnectorTransparencyLogEntry {
 }
 ```
 
-### 13.3 Verification Chain
+### 14.3 Verification Chain
 
 Before execution, verify:
 
@@ -832,9 +860,9 @@ Before execution, verify:
 
 ---
 
-## 14. Lifecycle Management and Revocation
+## 15. Lifecycle Management and Revocation
 
-### 14.1 Activation Requirements
+### 15.1 Activation Requirements
 
 On activation:
 
@@ -844,13 +872,13 @@ On activation:
 4. Issue capability tokens
 5. Start health checks
 
-### 14.2 Updates and Rollback
+### 15.2 Updates and Rollback
 
 - Staged updates
 - Automatic rollback on crash loops
 - Explicit pinning to known-good versions
 
-### 14.3 Revocation (NORMATIVE)
+### 15.3 Revocation (NORMATIVE)
 
 Revocations are mesh objects and MUST be enforced before use.
 
@@ -885,7 +913,7 @@ pub enum RevocationScope {
 
 ---
 
-## 15. Device-Aware Execution and Execution Leases
+## 16. Device-Aware Execution and Execution Leases
 
 Execution leases prevent duplicate side effects and stabilize migration:
 
@@ -909,7 +937,7 @@ Lease semantics:
 
 ---
 
-## 16. Observability and Audit
+## 17. Observability and Audit
 
 Metrics (NORMATIVE):
 
@@ -938,9 +966,9 @@ advance an audit head without quorum unless explicitly in degraded mode.
 
 ---
 
-## 17. Connector Archetypes (V2) and Patterns
+## 18. Connector Archetypes (V2) and Patterns
 
-### 17.1 V2 Archetypes (Manifest `archetypes`)
+### 18.1 V2 Archetypes (Manifest `archetypes`)
 
 - Bidirectional: send and receive messages
 - Streaming: emit events (read-only)
@@ -950,7 +978,7 @@ advance an audit head without quorum unless explicitly in degraded mode.
 
 Only these values are valid in `connector.archetypes`.
 
-### 17.2 Interaction Pattern Mapping (Non-archetype)
+### 18.2 Interaction Pattern Mapping (Non-archetype)
 
 These patterns MUST map to V2 archetypes in the manifest:
 
@@ -959,7 +987,7 @@ These patterns MUST map to V2 archetypes in the manifest:
 - Webhook -> Streaming (and/or Operational for acknowledgments)
 - Queue/Pub-Sub -> Bidirectional or Streaming depending on API
 
-### 17.3 Reference Connector Patterns (Appendix C)
+### 18.3 Reference Connector Patterns (Appendix C)
 
 | Pattern | Description | Examples |
 |---------|-------------|----------|
@@ -970,15 +998,15 @@ These patterns MUST map to V2 archetypes in the manifest:
 
 ---
 
-## 18. Rust Connector Skeleton (SDK-aligned)
+## 19. Rust Connector Skeleton (SDK-aligned)
 
-### 18.1 Toolchain Requirements
+### 19.1 Toolchain Requirements
 
 - Rust edition: 2024 (nightly required)
 - Cargo only
 - `#![forbid(unsafe_code)]`
 
-### 18.2 Minimal Skeleton (Control-Plane Object Dispatch)
+### 19.2 Minimal Skeleton (Control-Plane Object Dispatch)
 
 ```rust
 #![forbid(unsafe_code)]
@@ -1022,7 +1050,7 @@ Implementation notes:
 
 ---
 
-## 19. Conformance Checklist (Connector)
+## 20. Conformance Checklist (Connector)
 
 Connector MUST:
 
