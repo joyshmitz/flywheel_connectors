@@ -114,8 +114,6 @@ DISCOVERED -> VERIFIED -> INSTALLED -> CONFIGURED -> ACTIVE
                                           -> STOPPED
 ```
 
-Connectors MUST NOT call other connectors directly; all composition happens through the mesh.
-
 ---
 
 ## 3. Control-Plane Protocol (FCP2-SYM)
@@ -161,7 +159,7 @@ Connectors MUST implement:
 | `health` | Report readiness |
 | `shutdown` | Graceful termination |
 
-Connectors that emit events MUST also support `subscribe` and `event` control-plane objects.
+Connectors that emit events are expected to support `subscribe` and `event` control-plane objects.
 
 ### 3.4 Control-Plane as Objects (NORMATIVE)
 
@@ -382,8 +380,8 @@ pub struct ElevationToken {
 
 Connector implications:
 
-- All outputs and events MUST preserve provenance and taint.
-- Connectors MUST NOT drop or reset taint flags.
+- Objects stored in the mesh MUST include an `ObjectHeader`, which includes provenance.
+- When a connector creates objects, it must supply provenance as part of the header.
 
 ---
 
@@ -474,8 +472,8 @@ pub struct NetworkConstraints {
 }
 ```
 
-Network/TLS constraints are NORMATIVE for sensitive connectors. For sensitive targets,
-SNI enforcement and SPKI pinning are required.
+Network/TLS constraints are NORMATIVE for sensitive connectors and include host/port
+allow-lists, SNI enforcement, and optional SPKI pins.
 
 ### 6.4 Placement Policy
 
@@ -590,7 +588,7 @@ pub struct EventEnvelope {
 Event streaming requirements:
 
 - Event envelopes include `topic`, `seq`, `cursor`, and `requires_ack` fields.
-- If `requires_ack` is true, consumers are expected to ack; connectors SHOULD track delivery state.
+- If `requires_ack` is true, consumers are expected to ack; connectors can track delivery state.
 - When `event_caps.replay = true`, connectors MUST support replay from a cursor.
 - `event_caps.min_buffer_events` sets the minimum replay buffer size.
 
@@ -633,7 +631,7 @@ Agents MUST be able to query:
 - Rate limits
 - Recovery hints
 
-MCP integration MUST map connector operations to MCP-compatible tools with:
+Map connector operations to MCP-compatible tools with:
 
 - Schemas
 - Risk annotations
@@ -937,6 +935,29 @@ Lease semantics:
 
 ---
 
+### 16.2 Device Profiles and Execution Planner
+
+Device-aware execution uses profiles and placement policies to choose the best node:
+
+```rust
+pub struct DeviceProfile {
+    pub node_id: TailscaleNodeId,
+    pub hostname: String,
+    pub device_class: DeviceClass,
+    pub capabilities: DeviceCapabilities,
+    pub current_state: DeviceState,
+}
+
+pub struct ExecutionPlanner {
+    pub devices: Vec<DeviceProfile>,
+}
+```
+
+The planner filters devices by `PlacementPolicy.requires` and scores them by `prefers`,
+including latency, resources, data locality, secret reconstruction cost, and DERP penalties.
+
+---
+
 ## 17. Observability and Audit
 
 Metrics (NORMATIVE):
@@ -951,7 +972,6 @@ Structured logs MUST:
 - Be JSON
 - Redact secrets
 - Include `correlation_id`, `zone_id`, and `connector_id`
-- Include `operation_id` when applicable
 
 Audit events MUST be recorded for:
 
@@ -963,6 +983,9 @@ Audit events MUST be recorded for:
 
 Audit chain (per zone) is append-only and hash-linked. Audit heads are quorum-signed; nodes MUST refuse to
 advance an audit head without quorum unless explicitly in degraded mode.
+
+Fork detection (NORMATIVE): if multiple heads are discovered for the same epoch, nodes MUST log the fork,
+refuse to advance, and alert the owner for manual resolution.
 
 ---
 
@@ -980,7 +1003,7 @@ Only these values are valid in `connector.archetypes`.
 
 ### 18.2 Interaction Pattern Mapping (Non-archetype)
 
-These patterns MUST map to V2 archetypes in the manifest:
+These patterns map to V2 archetypes in the manifest:
 
 - Request/Response -> Operational
 - Polling -> Operational (often paired with Streaming events)
@@ -1046,7 +1069,7 @@ Implementation notes:
 - Dispatch on SchemaId, not JSON method strings.
 - Validate inputs against the manifest schemas.
 - Enforce Strict idempotency when required; return prior receipts on duplicate idempotency_key.
-- Preserve provenance on outputs and events.
+- When producing mesh objects, include `ObjectHeader` with provenance.
 
 ---
 
