@@ -314,9 +314,9 @@ pub struct ObjectId([u8; 32]);
 
 /// Secret per-zone object-id key (NORMATIVE)
 ///
-/// This key is distributed to zone members (e.g. via ZoneKeyManifest or a ZoneSecrets object)
-/// and is intended to remain stable across routine zone_key rotations.
-/// It provides privacy against dictionary attacks on low-entropy objects.
+/// This key is distributed to zone members via ZoneKeyManifest (NORMATIVE).
+/// It remains stable across routine zone_key rotations.
+/// Provides privacy against dictionary attacks on low-entropy objects.
 pub struct ObjectIdKey(pub [u8; 32]);
 
 impl ObjectId {
@@ -597,10 +597,14 @@ Nodes MUST implement reachability-based GC per zone (NORMATIVE):
 impl SymbolStore {
     pub fn garbage_collect(&mut self, zone_id: &ZoneId) -> GcResult {
         // 1. Compute root set
+        // NORMATIVE: ZoneFrontier is the canonical zone root pointer.
+        // Nodes MUST keep the latest ZoneFrontier pinned for each active zone.
         let mut roots = HashSet::new();
-        roots.insert(self.get_zone_root_set(zone_id));
-        roots.insert(self.get_latest_audit_head(zone_id));
-        roots.insert(self.get_capability_registry_head(zone_id));
+        if let Some(frontier) = self.get_latest_zone_frontier(zone_id) {
+            roots.insert(frontier);
+        }
+        // Include any locally pinned objects (explicit pins are always GC roots).
+        roots.extend(self.get_locally_pinned_roots(zone_id));
 
         // 2. Mark phase: traverse refs from roots
         let mut live = HashSet::new();
@@ -635,7 +639,41 @@ impl SymbolStore {
 - Never evict `Pinned` objects without explicit unpin request
 - Respect `Lease` expiry times
 - Enforce per-zone quotas
-- Root set always includes: ZoneRootSet, latest AuditHead, CapabilityRegistryHead
+- Root set always includes: latest ZoneFrontier (pinned) + all explicitly pinned objects
+
+### 3.8 ZoneFrontier as the Root Pointer (NORMATIVE)
+
+ZoneFrontier is the compact, signed pointer to the current "heads" that define a zone's live object graph.
+It is used for:
+- **Fast sync:** Compare frontiers to determine staleness without traversal
+- **GC root definition:** Frontier is the canonical root; everything reachable from it is live
+- **Offline repair targets:** Frontier indicates which heads must remain reconstructable
+
+```rust
+/// Frontier checkpoint for fast sync (NORMATIVE)
+///
+/// Compact checkpoint of zone state for efficient synchronization.
+/// Nodes can compare frontiers to quickly determine staleness.
+pub struct ZoneFrontier {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    /// Latest revocation head
+    pub rev_head: ObjectId,
+    pub rev_seq: u64,
+    /// Latest audit head
+    pub audit_head: ObjectId,
+    pub audit_seq: u64,
+    /// Current epoch
+    pub as_of_epoch: EpochId,
+    /// Signature by executing node
+    pub signature: Signature,
+}
+```
+
+**Implementation Requirements (NORMATIVE):**
+1. Store ZoneFrontier objects as normal mesh objects (content-addressed)
+2. Pin the latest frontier per zone
+3. Refuse to accept tokens/approvals referencing revocation state newer than the latest known frontier (must fetch first)
 
 ---
 
@@ -669,21 +707,28 @@ pub struct SymbolEnvelope {
     /// Epoch for replay protection
     pub epoch_id: EpochId,
 
+    /// Source node that produced this ciphertext (NORMATIVE)
+    /// Needed because symbol encryption uses a per-sender subkey (see below).
+    pub source_id: TailscaleNodeId,
+
+    /// Monotonic frame sequence chosen by source for this zone_key_id (NORMATIVE)
+    pub frame_seq: u64,
+
     /// AEAD authentication tag
     pub auth_tag: [u8; 16],
 
     // NOTE: Nonce is NOT stored per-symbol.
-    // Nonce is derived as: nonce = frame_nonce_base || esi_le (NORMATIVE; see FCPS header)
-    // This eliminates per-symbol RNG overhead and saves 12 bytes/symbol bandwidth.
+    // NORMATIVE: nonce = frame_seq_le || esi_le
+    // frame_seq is per-sender monotonic for a given (zone_id, zone_key_id).
 }
 
-/// Derive per-symbol nonce from frame_nonce_base and ESI (NORMATIVE)
+/// Derive per-symbol nonce from frame_seq and ESI (NORMATIVE)
 ///
-/// nonce = frame_nonce_base[0..8] || esi_le[0..4]
-/// This eliminates per-symbol RNG overhead and is collision-resistant within a frame.
-fn derive_nonce(frame_nonce_base: &[u8; 8], esi: u32) -> [u8; 12] {
+/// nonce = frame_seq_le[0..8] || esi_le[0..4]
+/// Combined with per-sender subkeys, this eliminates nonce-collision risk across senders.
+fn derive_nonce(frame_seq: u64, esi: u32) -> [u8; 12] {
     let mut nonce = [0u8; 12];
-    nonce[0..8].copy_from_slice(frame_nonce_base);
+    nonce[0..8].copy_from_slice(&frame_seq.to_le_bytes());
     nonce[8..12].copy_from_slice(&esi.to_le_bytes());
     nonce
 }
@@ -697,15 +742,19 @@ impl SymbolEnvelope {
         plaintext: &[u8],
         zone_key: &ZoneKey,
         epoch: EpochId,
-        frame_nonce_base: &[u8; 8],
+        source_id: TailscaleNodeId,
+        frame_seq: u64,
     ) -> Self {
-        // NORMATIVE: derive per-symbol nonce from frame_nonce_base || esi_le
-        let nonce = derive_nonce(frame_nonce_base, esi);
+        // NORMATIVE: derive nonce from frame_seq || esi_le
+        let nonce = derive_nonce(frame_seq, esi);
 
         // Associated data binds symbol to context INCLUDING key_id for rotation safety
         let aad = Self::build_aad(&object_id, esi, k, &zone_key.zone_id, zone_key.key_id, epoch);
 
-        let (ciphertext, auth_tag) = zone_key.encrypt(plaintext, &nonce, &aad);
+        // NORMATIVE: encrypt under a per-sender subkey derived from the zone key.
+        // This prevents nonce collision across different senders.
+        let sender_key = zone_key.derive_sender_subkey(&source_id);
+        let (ciphertext, auth_tag) = zone_key.encrypt_with_subkey(&sender_key, plaintext, &nonce, &aad);
 
         Self {
             object_id,
@@ -715,12 +764,14 @@ impl SymbolEnvelope {
             zone_id: zone_key.zone_id.clone(),
             zone_key_id: zone_key.key_id,
             epoch_id: epoch,
+            source_id,
+            frame_seq,
             auth_tag,
         }
     }
 
     /// Decrypt and verify symbol (NORMATIVE)
-    pub fn decrypt(&self, zone_key: &ZoneKey, frame_nonce_base: &[u8; 8]) -> Result<Vec<u8>, CryptoError> {
+    pub fn decrypt(&self, zone_key: &ZoneKey) -> Result<Vec<u8>, CryptoError> {
         // Verify key_id matches to catch rotation mismatches early
         if zone_key.key_id != self.zone_key_id {
             return Err(CryptoError::KeyIdMismatch {
@@ -729,8 +780,8 @@ impl SymbolEnvelope {
             });
         }
 
-        // NORMATIVE: derive nonce from frame_nonce_base || esi_le
-        let nonce = derive_nonce(frame_nonce_base, self.esi);
+        // NORMATIVE: derive nonce from frame_seq || esi_le
+        let nonce = derive_nonce(self.frame_seq, self.esi);
 
         let aad = Self::build_aad(
             &self.object_id,
@@ -741,7 +792,9 @@ impl SymbolEnvelope {
             self.epoch_id
         );
 
-        zone_key.decrypt(&self.data, &nonce, &self.auth_tag, &aad)
+        // NORMATIVE: decrypt using per-sender subkey
+        let sender_key = zone_key.derive_sender_subkey(&self.source_id);
+        zone_key.decrypt_with_subkey(&sender_key, &self.data, &nonce, &self.auth_tag, &aad)
     }
 
     fn build_aad(
@@ -771,7 +824,11 @@ FCP therefore authenticates data-plane FCPS frames via a **session**:
 
 1. A one-time handshake authenticated by attested node signing keys
 2. Session-key derivation (X25519 ECDH + HKDF)
-3. Per-frame MAC + sequence number for anti-replay
+3. Per-frame MAC (safe under key reuse) + monotonic sequence number for anti-replay
+
+**SECURITY NOTE (NORMATIVE):** Poly1305 is a one-time authenticator; using one Poly1305 key across
+multiple frames is cryptographically insecure. FCP V2 therefore uses HMAC-SHA256 or BLAKE3-keyed
+for session MACs and reserves Poly1305 for AEAD contexts only (where nonce uniqueness is enforced).
 
 Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput delivery MUST support session MACs.
 
@@ -782,12 +839,22 @@ Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput
 - Preserves "cryptographic attribution independent of transport" goal
 
 ```rust
+/// Session crypto suite negotiation (NORMATIVE)
+pub enum SessionCryptoSuite {
+    /// X25519 + HKDF-SHA256 + HMAC-SHA256 (tag truncated to 16 bytes)
+    Suite1,
+    /// X25519 + HKDF-SHA256 + BLAKE3-keyed (tag truncated to 16 bytes)
+    Suite2,
+}
+
 /// Session handshake: initiator → responder
 pub struct MeshSessionHello {
     pub from: TailscaleNodeId,
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
     pub timestamp: u64,
+    /// Supported crypto suites (ordered by preference)
+    pub suites: Vec<SessionCryptoSuite>,
     /// Node signature over transcript
     pub signature: Signature,
 }
@@ -798,17 +865,25 @@ pub struct MeshSessionAck {
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
     pub session_id: [u8; 16],
+    /// Selected crypto suite
+    pub suite: SessionCryptoSuite,
     pub timestamp: u64,
     /// Node signature over transcript
     pub signature: Signature,
 }
 
 /// Session key derivation (NORMATIVE)
-/// session_key = HKDF-SHA256(
+///
+/// prk = HKDF-SHA256(
 ///     ikm = ECDH(initiator_eph, responder_eph),
 ///     salt = session_id,
 ///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
 /// )
+///
+/// keys = HKDF-Expand(prk, info="FCP2-SESSION-KEYS-V1", L=96) split as:
+/// - k_mac_i2r (32 bytes): MAC key for initiator → responder
+/// - k_mac_r2i (32 bytes): MAC key for responder → initiator
+/// - k_ctx     (32 bytes): reserved for future header/control-plane AEAD
 
 /// Authenticated FCPS frame (NORMATIVE)
 pub struct AuthenticatedFcpsFrame {
@@ -817,8 +892,18 @@ pub struct AuthenticatedFcpsFrame {
     pub session_id: [u8; 16],
     /// Monotonic sequence for anti-replay
     pub seq: u64,
-    /// Poly1305(session_key, session_id || seq || frame_bytes)
+    /// MAC over: session_id || direction || seq || frame_bytes
+    /// - Suite1: HMAC-SHA256(k_mac_dir, ...) truncated to 16 bytes
+    /// - Suite2: BLAKE3(keyed=k_mac_dir, ...) truncated to 16 bytes
     pub mac: [u8; 16],
+}
+
+/// Replay protection policy (NORMATIVE defaults)
+pub struct SessionReplayPolicy {
+    /// Allow limited reordering; MUST be bounded
+    pub max_reorder_window: u64,   // default: 128
+    /// Rekey periodically for operational hygiene and suite agility
+    pub rekey_after_frames: u64,   // default: 1_000_000_000
 }
 
 /// Legacy signed frame (for bootstrap/degraded mode)
@@ -862,16 +947,40 @@ Symbol-native frame format:
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
 │  Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)                    │
 │  Bytes 74-81:  Epoch ID (u64 LE)                                            │
-│  Bytes 82-89:  Nonce Base (8 bytes, for per-symbol nonce derivation)        │
+│  Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic)                     │
 │  Bytes 90+:    Symbol payloads (concatenated)                               │
 │  Final 8:      Checksum (XXH3-64)                                           │
 │                                                                             │
 │  Fixed header: 90 bytes                                                     │
 │  Each symbol: 4 (ESI) + 2 (K) + N (data) + 16 (auth_tag)                    │
-│               (nonce derived from nonce_base || esi_le, NOT stored)         │
+│               (nonce derived from frame_seq_le || esi_le, NOT stored)       │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Per-Sender Subkeys and Deterministic Nonces (NORMATIVE):**
+
+Each sender MUST maintain a monotonic `frame_seq` per (zone_id, zone_key_id) and MUST NOT reuse it.
+Combined with per-sender subkeys derived from the zone key, this eliminates nonce-collision risk:
+
+```rust
+impl ZoneKey {
+    /// Derive per-sender subkey (NORMATIVE)
+    ///
+    /// sender_key = HKDF-SHA256(
+    ///     ikm = zone_symmetric_key,
+    ///     salt = zone_key_id,
+    ///     info = "FCP2-SENDER-KEY-V1" || sender_node_id
+    /// )
+    pub fn derive_sender_subkey(&self, sender: &TailscaleNodeId) -> [u8; 32];
+}
+```
+
+**Why per-sender subkeys + deterministic nonces:**
+- 64-bit random nonces have birthday collision risk over long-running systems with many senders
+- Per-sender subkeys eliminate cross-sender nonce collision (keys differ per sender)
+- Deterministic `frame_seq` avoids RNG dependence and is testable
+- No per-frame random generation overhead
 
 **Key Rotation Benefits:**
 - Including `zone_key_id` in frame header enables deterministic key selection
@@ -1067,6 +1176,12 @@ pub struct Zone {
 
     /// Access policy
     pub policy: ZonePolicy,
+
+    /// UDP/TCP port for symbol frames in this zone (NORMATIVE for port-gating)
+    pub symbol_port: u16,
+
+    /// UDP/TCP port for gossip/control-plane objects in this zone (NORMATIVE for port-gating)
+    pub control_port: u16,
 }
 
 /// Unified approval token (NORMATIVE)
@@ -1188,6 +1303,15 @@ pub struct ZoneKeyManifest {
     pub valid_until: Option<u64>,
     /// Optional overlap with previous key_id for rotation windows
     pub prev_zone_key_id: Option<[u8; 8]>,
+
+    /// ObjectIdKey material for this zone (NORMATIVE)
+    /// Stable across routine zone_key rotations. Distributed via manifest.
+    pub object_id_key_id: [u8; 8],
+    pub wrapped_object_id_keys: Vec<WrappedObjectIdKey>,
+
+    /// Optional ratchet policy for epoch keys (past secrecy)
+    pub ratchet: Option<ZoneRatchetPolicy>,
+
     /// Sealed key material per node
     pub wrapped_keys: Vec<WrappedZoneKey>,
     pub signature: Signature,
@@ -1204,6 +1328,29 @@ pub struct WrappedZoneKey {
     pub node_enc_kid: [u8; 8],
     /// Sealed box containing the 32-byte zone symmetric key
     pub sealed_key: Vec<u8>,
+}
+
+/// Wrapped ObjectIdKey for distribution (NORMATIVE)
+pub struct WrappedObjectIdKey {
+    pub node_id: TailscaleNodeId,
+    pub node_enc_kid: [u8; 8],
+    /// Sealed box containing the 32-byte ObjectIdKey
+    pub sealed_key: Vec<u8>,
+}
+
+/// Epoch ratchet policy for past secrecy (NORMATIVE when present)
+///
+/// If enabled, nodes MUST derive an epoch key, use it, then delete it after the
+/// epoch window. Past epochs become undecryptable after deletion (past secrecy).
+/// This is not full post-compromise security (for that you'd need MLS/TreeKEM),
+/// but it's a significant improvement with modest complexity.
+pub struct ZoneRatchetPolicy {
+    /// If true, nodes MUST derive and delete epoch keys per policy
+    pub enabled: bool,
+    /// Number of seconds of overlap to tolerate clock skew and delayed frames
+    pub overlap_secs: u64,
+    /// Max epochs to retain for delayed/offline peers (bounded memory)
+    pub retain_epochs: u32,
 }
 
 /// Local keyring for zone keys (NORMATIVE)
@@ -1307,20 +1454,26 @@ impl AclGenerator {
             );
         }
 
-        // ACL rules: defense-in-depth for BOTH axes
-        // A node must not be able to network-reach a zone "above" it on either axis.
+        // ACL rules: defense-in-depth via zone membership port-gating.
+        //
+        // DESIGN RATIONALE:
+        // - Tailscale tags are per-node, not per-connector-process.
+        // - A node participating in multiple zones breaks any simple "src/dst lattice = data flow" assumption.
+        // - Integrity/confidentiality lattice is enforced cryptographically + by capability checks.
+        // - ACLs should reduce attack surface by ensuring only zone members can send zone traffic at all.
+        //
+        // NORMATIVE: MeshNode MUST expose per-zone ports for symbol/gossip/control traffic.
         for zone in &self.zones {
-            for target in &self.zones {
-                if zone.integrity_level >= target.integrity_level
-                    && zone.confidentiality_level >= target.confidentiality_level
-                {
-                    acl.acls.push(AclRule {
-                        action: "accept".into(),
-                        src: vec![zone.tailscale_tag.clone()],
-                        dst: vec![format!("{}:*", target.tailscale_tag)],
-                    });
-                }
-            }
+            let sym = zone.symbol_port;
+            let ctl = zone.control_port;
+            acl.acls.push(AclRule {
+                action: "accept".into(),
+                src: vec![zone.tailscale_tag.clone()],
+                dst: vec![
+                    format!("{}:{}", zone.tailscale_tag, sym),
+                    format!("{}:{}", zone.tailscale_tag, ctl),
+                ],
+            });
         }
 
         // Deny rules for explicit blocks
@@ -1338,6 +1491,19 @@ impl AclGenerator {
     }
 }
 ```
+
+**Port-Gating Rationale (NORMATIVE):**
+
+The previous lattice-based ACL approach attempted to encode both integrity and confidentiality axes
+in network reachability. This had several problems:
+- It contradicted the invariants (confidentiality allows "up" flow, but ACL logic blocked it)
+- Tailscale tags are per-node, not per-process; a node in multiple zones breaks the lattice assumption
+
+Port-gating provides defense-in-depth without overreaching:
+- Each zone gets reserved mesh ports (symbol + gossip/control)
+- ACL allows traffic **only** between nodes tagged for that zone on those ports
+- Funnel/public ingress is restricted to low-trust zones' ports only
+- The real security (integrity, confidentiality, taint, authority) is enforced cryptographically
 
 ---
 
@@ -1874,6 +2040,10 @@ pub struct CapabilityToken {
     /// Intended audience (connector)
     pub aud: ConnectorId,
 
+    /// Bind token to a specific connector binary or manifest (NORMATIVE for Risky/Dangerous)
+    /// Prevents replay across upgrades or swapped binaries with the same ConnectorId.
+    pub aud_binary: Option<ObjectId>,
+
     /// Optional connector instance binding
     pub instance: Option<InstanceId>,
 
@@ -1883,11 +2053,16 @@ pub struct CapabilityToken {
     /// Expires at (Unix timestamp)
     pub exp: u64,
 
-    /// Granted capabilities
+    /// CapabilityObjects that authorize this token (NORMATIVE)
+    /// Verifiers MUST fetch/verify these objects and ensure token grants ⊆ object grants.
+    /// This makes authority mechanically verifiable, not "trust the issuer".
+    pub grant_object_ids: Vec<ObjectId>,
+
+    /// Granted capabilities (MUST be subset of union of grant_object_ids)
     pub caps: Vec<CapabilityGrant>,
 
-    /// Constraints
-    pub constraints: CapabilityConstraints,
+    /// Optional attenuation applied by the issuer (MUST ONLY RESTRICT, never expand)
+    pub attenuation: Option<CapabilityConstraints>,
 
     /// The only node allowed to present this token (sender-constrained)
     pub holder_node: TailscaleNodeId,
@@ -1930,10 +2105,27 @@ impl CapabilityToken {
         // Enforce that issuing node is authorized to mint tokens for this zone
         trust_anchors.enforce_token_issuer_policy(&self.iss_zone, &self.iss_node)?;
 
+        // NORMATIVE: Verify presented CapabilityObjects
+        // - Fetch each grant_object_id
+        // - Verify signature chain (owner → CapabilityObject)
+        // - Verify validity windows cover (iat..exp)
+        // - Verify not revoked
+        // - Ensure union(grant caps/constraints) authorizes `caps` and `attenuation`
+        trust_anchors.verify_token_grants(self)?;
+
         Ok(())
     }
 }
 ```
+
+**Provable Authority (NORMATIVE):**
+
+Authority MUST be derivable from stored objects. Any verifier should be able to say
+"this operation was permitted because of these object IDs," not "because I trust the issuer node."
+
+If a node's issuance key is compromised, it can only mint tokens that reference
+existing CapabilityObjects—it cannot create authority out of thin air. This is the
+core of "explicit authority" and makes the system auditable.
 
 ---
 
@@ -2156,6 +2348,55 @@ impl DistributedState {
 }
 ```
 
+### 8.4 Admission Control and DoS Resistance (NORMATIVE)
+
+Without explicit admission control, the mesh layer becomes the largest attack surface:
+symbol floods, garbage ObjectIds, expensive decode attempts, gossip reconciliation abuse,
+reflection/amplification via symbol_request.
+
+MeshNodes MUST implement admission control for:
+- Per-peer inbound bytes/symbols
+- Failed decrypt/MAC counters
+- Bounded concurrent decodes
+- Bounded gossip reconciliation work
+
+```rust
+/// Per-peer resource budget (NORMATIVE)
+pub struct PeerBudget {
+    pub max_bytes_per_min: u64,         // default: 64MB/min
+    pub max_symbols_per_min: u32,       // default: 200_000/min
+    pub max_failed_auth_per_min: u32,   // default: 100/min
+    pub max_inflight_decodes: u32,      // default: 32
+    pub max_decode_cpu_ms_per_min: u64, // default: 5_000ms/min
+}
+
+/// Admission policy (NORMATIVE)
+pub struct AdmissionPolicy {
+    pub per_peer: PeerBudget,
+    /// If true, unauthenticated SymbolRequest is rejected
+    /// (default: true except z:public ingress)
+    pub require_authenticated_requests: bool,
+}
+
+impl MeshNode {
+    /// Check peer budget before processing (NORMATIVE)
+    fn check_admission(&self, peer: &TailscaleNodeId, bytes: u64) -> Result<(), AdmissionError> {
+        let budget = self.peer_budgets.get_or_default(peer);
+        budget.check_bytes(bytes)?;
+        budget.check_rate_limits()?;
+        Ok(())
+    }
+}
+```
+
+**Anti-Amplification Rule (NORMATIVE):**
+
+MeshNodes MUST NOT send more than `N` symbols in response to a request unless the requester:
+1. Is authenticated (session MAC or node signature), AND
+2. The request includes a bounded missing-hint (e.g., `DecodeStatus.missing_hint`) or comparable proof-of-need
+
+This prevents reflection/amplification attacks where an attacker spoofs requests to flood victims.
+
 ---
 
 ## 9. Wire Protocol
@@ -2234,6 +2475,16 @@ When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
 ### 9.4 Invoke Request/Response
 
 ```rust
+/// Distributed trace context for end-to-end observability (NORMATIVE when present)
+pub struct TraceContext {
+    /// 16-byte trace id (unique per logical request)
+    pub trace_id: [u8; 16],
+    /// 8-byte span id (unique per span within trace)
+    pub span_id: [u8; 8],
+    /// Sampling/flags (W3C Trace Context compatible)
+    pub flags: u8,
+}
+
 /// Invoke request (NORMATIVE)
 pub struct InvokeRequest {
     pub id: String,
@@ -2244,6 +2495,10 @@ pub struct InvokeRequest {
     /// Unified approval tokens for elevation and/or declassification
     pub approval_tokens: Vec<ApprovalToken>,
     pub idempotency_key: Option<String>,
+
+    /// Distributed trace context (NORMATIVE when present)
+    /// Enables end-to-end correlation across MeshNodes, connectors, receipts, and audit.
+    pub trace_context: Option<TraceContext>,
 
     /// Holder proof (NORMATIVE): binds presentation to holder_node in CapabilityToken
     /// Prevents token replay by anyone other than the designated holder.
@@ -2307,12 +2562,34 @@ impl OperationReceipt {
         node_pubkey.verify(&self.signable_bytes(), &self.signature)
     }
 }
+
+/// Operation intent - pre-commit for exactly-once semantics (NORMATIVE for Strict + Risky/Dangerous)
+///
+/// Closes the crash window between "side effect happened" and "receipt stored".
+/// Written BEFORE executing an external side effect.
+pub struct OperationIntent {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub capability_token_jti: Uuid,
+    pub idempotency_key: Option<String>,
+    pub planned_at: u64,
+    pub planned_by: TailscaleNodeId,
+    /// Optional upstream idempotency handle (e.g., Stripe idempotency key)
+    pub upstream_idempotency: Option<String>,
+    pub signature: Signature,
+}
 ```
+
+**Execution Rule for Strict/Risky/Dangerous Operations (NORMATIVE):**
+1. MeshNode MUST store OperationIntent (Required retention) BEFORE invoking the connector operation
+2. OperationReceipt MUST reference the OperationIntent via `ObjectHeader.refs`
+3. On crash recovery, check for intents without corresponding receipts to detect incomplete operations
 
 **Idempotency Enforcement:**
 - On retry with same `idempotency_key`, mesh returns prior receipt instead of re-executing (for Strict)
 - Receipts are stored in symbol store (RetentionClass::Lease or Pinned for critical ones)
 - Makes "best-effort vs strict idempotency" enforceable, not advisory
+- Intents + receipts form the "exactly-once" spine for dangerous operations
 
 ### 9.5 Event Streaming
 
@@ -2462,6 +2739,41 @@ This prevents:
 - Double-polling the same messages
 - Duplicate event processing
 - Cursor conflicts during migration
+
+**State Snapshots (NORMATIVE when state chains exceed thresholds):**
+
+Append-only state chains grow forever and become a performance drag for cold start, migration,
+GC traversal, and debugging. Periodic snapshots bound replay cost.
+
+```rust
+/// Periodic snapshot to bound replay cost (NORMATIVE when chains exceed thresholds)
+pub struct ConnectorStateSnapshot {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    /// Latest state object included in this snapshot
+    pub covers_head: ObjectId,
+    pub covers_seq: u64,
+    /// Full canonical state at covers_head
+    pub state_cbor: Vec<u8>,
+    pub snapshotted_at: u64,
+    pub signature: Signature,
+}
+```
+
+**Compaction Rule (NORMATIVE):**
+- MeshNode SHOULD create a snapshot every N updates or M bytes (configurable)
+- After snapshot is replicated to placement targets, MeshNode MAY GC older state objects
+  that are strictly before `covers_head`, unless required by audit/policy pins
+
+**Fork Detection (NORMATIVE for singleton_writer):**
+
+If `singleton_writer = true` and two different `ConnectorStateObject` share the same `prev`
+(i.e., competing seq), nodes MUST treat this as a safety incident:
+1. Pause connector execution
+2. Require manual resolution OR automated "choose-by-lease" recovery
+3. Log the fork event for audit
 
 | Method | Purpose |
 |--------|---------|
@@ -2997,10 +3309,47 @@ pub struct ExecutionLease {
     pub iat: u64,
     /// Lease expires at (short-lived; renewable)
     pub exp: u64,
-    /// Signature by lease issuer (owner or quorum policy)
+    /// Deterministic coordinator for this lease (NORMATIVE)
+    /// Selected via HRW/Rendezvous hashing over (zone_id, request_object_id).
+    pub coordinator: TailscaleNodeId,
+    /// Quorum signatures (NORMATIVE for Risky/Dangerous)
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
+
+/// Lease acquisition request (NORMATIVE)
+pub struct LeaseRequest {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub desired_owner: TailscaleNodeId,
+    pub requested_at: u64,
+    pub exp: u64,
+    /// Signature by requester node signing key
     pub signature: Signature,
 }
 ```
+
+**Distributed Lease Issuance (NORMATIVE):**
+
+Coordinator selection uses HRW (Rendezvous) hashing:
+```rust
+fn select_coordinator(zone_id: &ZoneId, request_id: &ObjectId, nodes: &[TailscaleNodeId]) -> TailscaleNodeId {
+    nodes.iter()
+        .max_by_key(|n| hrw_hash(zone_id, request_id, n))
+        .cloned()
+        .unwrap()
+}
+```
+
+**Quorum Rules (NORMATIVE):**
+- **Safe ops:** Single coordinator signature MAY be sufficient
+- **Risky ops:** Require f+1 signatures (prevents 1 compromised node from unilaterally leasing)
+- **Dangerous ops:** Require n-f signatures (matches CriticalWrite default)
+
+**Conflict Rule (NORMATIVE):**
+
+If two valid leases overlap for the same `request_object_id`, nodes MUST:
+1. For **Dangerous ops:** Refuse execution and alert owner for manual resolution
+2. For **Risky ops:** Pick the lease with higher `(exp, coordinator_id)` and log the fork
 
 **Lease Semantics:**
 - For Risky/Dangerous operations, execution MUST require a valid lease
@@ -3718,6 +4067,9 @@ pub struct AuditEvent {
     pub header: ObjectHeader,
     /// Correlation ID for request tracing
     pub correlation_id: [u8; 16],
+    /// Optional full trace context (NORMATIVE when present in InvokeRequest)
+    /// Enables stitching mesh routing, connector execution, receipts, and audit together.
+    pub trace_context: Option<TraceContext>,
     /// Event type (e.g., "secret.access", "capability.invoke", "elevation.granted")
     pub event_type: String,
     /// Actor who triggered the event
@@ -3915,8 +4267,52 @@ pub struct RaptorQConfig {
     pub repair_ratio: f32,       // Default: 0.05
     pub max_object_size: u32,    // Default: 64MB
     pub decode_timeout: Duration, // Default: 30s
+    /// If object size exceeds this threshold, it MUST use ChunkedObjectManifest
+    pub max_chunk_threshold: u32, // Default: 256KB
+    /// Chunk size for ChunkedObjectManifest
+    pub chunk_size: u32,          // Default: 64KB
 }
 ```
+
+### Chunked Objects (RECOMMENDED; NORMATIVE for objects above max_chunk_threshold)
+
+Large objects SHOULD be represented as a manifest that references fixed-size chunk objects.
+This enables partial retrieval, bounded memory reconstruction, and targeted repair.
+
+RaptorQ is great for "any K′ symbols reconstruct the whole object", but it forces all-or-nothing
+reconstruction and can cause memory spikes for large objects (binaries, attachments, big audit epochs).
+
+Chunking enables:
+- Partial retrieval (first chunks first)
+- Targeted repair (repair the missing chunk, not the whole object)
+- Dedupe across versions (chunk-level content addressing)
+- Smoother streaming and bounded memory
+
+```rust
+/// Chunked object manifest (NORMATIVE for objects above max_chunk_threshold)
+pub struct ChunkedObjectManifest {
+    pub header: ObjectHeader,
+    /// Total byte length of the original payload
+    pub total_len: u64,
+    /// Chunk size in bytes (except last)
+    pub chunk_size: u32,
+    /// Ordered chunk object ids (each chunk is a normal StoredObject)
+    pub chunks: Vec<ObjectId>,
+    /// BLAKE3 hash of the full payload for end-to-end verification
+    pub payload_hash: [u8; 32],
+}
+
+/// A chunk is just a normal object with a standard schema and raw bytes body.
+pub struct RawChunk {
+    pub header: ObjectHeader,
+    pub bytes: Vec<u8>,
+}
+```
+
+**Two Fast Paths Matter Most for Performance:**
+
+1. **Small control-plane requests/responses (<MTU):** Avoid RaptorQ overhead; use direct, authenticated frames.
+2. **Large objects/binaries:** Chunking + targeted repair beats "reconstruct monolith" in real systems.
 
 ---
 
