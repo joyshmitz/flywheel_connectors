@@ -36,13 +36,16 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 |---------|--------------|
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
-| **Zone Isolation** | Cryptographic namespaces with HKDF-derived keys and Tailscale ACL enforcement |
-| **Capability Tokens** | Cryptographically-scoped authorization signed by attested node keys |
+| **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
+| **Capability Tokens** | Cryptographically-scoped authorization signed by attested node issuance keys |
+| **Threshold Owner Key** | FROST signing so no single device holds the complete owner private key |
 | **Threshold Secrets** | Shamir secret sharing with k-of-n across devices—never complete anywhere |
 | **Computation Migration** | Operations execute on the optimal device automatically |
-| **Offline Access** | Reduced probability, not binary unavailability |
-| **Tamper-Evident Audit** | Hash-linked audit chain with quorum-signed checkpoints |
-| **Revocation** | First-class revocation objects for tokens, keys, and devices |
+| **Offline Access** | Measurable availability SLOs via ObjectPlacementPolicy and background repair |
+| **Tamper-Evident Audit** | Hash-linked audit chain with monotonic seq and quorum-signed checkpoints |
+| **Revocation** | First-class revocation objects with O(1) freshness checks |
+| **Egress Proxy** | Connector network access via capability-gated proxy with CIDR deny defaults |
+| **Supply Chain Attestations** | in-toto/SLSA provenance verification, transparency logging |
 
 ### Quick Example
 
@@ -121,15 +124,19 @@ FCP addresses these through:
 
 ### Key Architecture
 
-FCP uses three distinct cryptographic key roles:
+FCP uses five distinct cryptographic key roles:
 
 | Key Type | Algorithm | Purpose |
 |----------|-----------|---------|
-| **Owner Key** | Ed25519 | Root trust anchor; signs attestations and revocations |
-| **Node Signing Key** | Ed25519 | Per-device; signs symbols, gossip, receipts, tokens |
-| **Zone Encryption Key** | ChaCha20-Poly1305 | HKDF-derived from owner secret; encrypts zone data |
+| **Owner Key** | Ed25519 | Root trust anchor; signs attestations and revocations. SHOULD use threshold signing (FROST) so no single device holds the complete private key. |
+| **Node Signing Key** | Ed25519 | Per-device; signs frames, gossip, receipts |
+| **Node Encryption Key** | X25519 | Per-device; receives sealed zone keys and secret shares |
+| **Node Issuance Key** | Ed25519 | Per-device; mints capability tokens (separately revocable) |
+| **Zone Encryption Key** | ChaCha20-Poly1305 | Per-zone symmetric key; encrypts zone data via AEAD |
 
-Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailscale node ID to its signing key.
+Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailscale node ID to all three node key types. Issuance keys are separately revocable so token minting can be disabled without affecting other node functions.
+
+**Threshold Owner Key (Recommended):** The owner key produces standard Ed25519 signatures, but implementations SHOULD use FROST (k-of-n threshold signing) so no single device ever holds the complete owner private key. This provides catastrophic compromise resistance and loss tolerance.
 
 ### Security Invariants
 
@@ -167,9 +174,25 @@ z:community    [Trust: 40]   Trusted external (paired users)
 z:public       [Trust: 20]   Public/anonymous inputs
                              Tailscale tag: tag:fcp-public
 
-INVARIANT: Data can flow DOWN (higher → lower trust) freely.
-           Data flowing UP requires explicit elevation + approval.
+INVARIANTS:
+  Integrity: Data can flow DOWN (higher → lower) freely.
+             Data flowing UP requires explicit ApprovalToken (elevation).
+  Confidentiality: Data can flow UP (lower → higher) freely.
+                   Data flowing DOWN requires ApprovalToken (declassification).
 ```
+
+### Provenance and Taint
+
+Every piece of data carries provenance tracking:
+
+| Field | Purpose |
+|-------|---------|
+| `origin_zone` | Where data originated |
+| `current_zone` | Updated on every zone crossing |
+| `taint` | Compositional flags (PUBLIC_INPUT, EXTERNAL_INPUT, PROMPT_SURFACE, etc.) |
+| `taint_reductions` | Proof-carrying reductions (e.g., URL scan cleared UNVERIFIED_LINK) |
+
+**Taint Reduction**: Instead of taint only ever accumulating (which leads to "approve everything" fatigue), specific taints can be cleared when you have a verifiable attestation from a sanitizer capability (URL scanner, malware scanner, schema validator).
 
 ### Defense-in-Depth
 
@@ -230,11 +253,25 @@ Symbol Approach:
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
 │  Bytes 58-73:  Zone ID hash (16 bytes)                                      │
 │  Bytes 74-81:  Epoch ID (u64 LE)                                            │
-│  Bytes 82+:    Symbol payloads (encrypted, concatenated)                    │
+│  Bytes 82-89:  Nonce Base (8 bytes, for per-symbol nonce derivation)        │
+│  Bytes 90+:    Symbol payloads (encrypted, concatenated)                    │
 │  Final 8:      Checksum (XXH3-64)                                           │
+│                                                                             │
+│  Fixed header: 90 bytes                                                     │
+│  Per-symbol nonce: derived as nonce_base || esi_le (NOT stored per-symbol)  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Session Authentication
+
+High-throughput symbol delivery uses per-session authentication (not per-frame signatures):
+
+1. **Handshake**: One-time X25519 ECDH authenticated by attested node signing keys
+2. **Session key**: HKDF-derived from ECDH shared secret
+3. **Per-frame MAC**: Poly1305 MAC + monotonic sequence number for anti-replay
+
+This amortizes Ed25519 signature cost over many frames while preserving cryptographic attribution.
 
 ---
 
@@ -252,22 +289,31 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Tailscale Identity                                                  │    │
 │  │  • Stable node ID (unforgeable WireGuard keys)                      │    │
-│  │  • Node signing key (Ed25519) with owner-signed attestation         │    │
+│  │  • Node signing/encryption/issuance keys with owner attestation     │    │
 │  │  • ACL tags for zone mapping                                         │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Symbol Store                                                        │    │
-│  │  • Local symbol storage with retention classes                       │    │
+│  │  • Local symbol storage with node-local retention classes            │    │
 │  │  • XOR filters + IBLT for efficient gossip reconciliation           │    │
 │  │  • Reachability-based garbage collection                             │    │
+│  │  • ObjectPlacementPolicy enforcement for availability SLOs          │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Capability & Revocation Registry                                    │    │
-│  │  • Zone keys (HKDF-derived) for encryption/decryption               │    │
+│  │  • Zone keyrings for deterministic key selection by zone_key_id     │    │
 │  │  • Trust anchors (owner key, attested node keys)                    │    │
-│  │  • Revocation checking before every operation                        │    │
+│  │  • Monotonic seq numbers for O(1) freshness checks                  │    │
+│  │  • ZoneFrontier checkpoints for fast sync                           │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Connector State Manager                                             │    │
+│  │  • Externalized connector state as mesh objects                     │    │
+│  │  • Single-writer semantics via execution leases                     │    │
+│  │  • Safe failover and migration for stateful connectors              │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -275,12 +321,26 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 │  │  • Device profiles (CPU, GPU, memory, battery)                       │    │
 │  │  • Connector availability and version requirements                   │    │
 │  │  • Secret reconstruction cost estimation                             │    │
-│  │  • Symbol locality scoring                                           │    │
+│  │  • Symbol locality scoring, DERP penalty                            │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Repair Controller                                                   │    │
+│  │  • Background symbol coverage evaluation                            │    │
+│  │  • Automatic repair toward ObjectPlacementPolicy targets            │    │
+│  │  • Rebalancing after device churn or offline periods                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Egress Proxy                                                        │    │
+│  │  • Connector network access via capability-gated IPC                │    │
+│  │  • CIDR deny defaults (localhost, private, tailnet ranges)          │    │
+│  │  • SNI enforcement, SPKI pinning                                    │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Audit Chain                                                         │    │
-│  │  • Hash-linked audit events per zone                                 │    │
+│  │  • Hash-linked audit events per zone with monotonic seq             │    │
 │  │  • Quorum-signed audit heads for tamper evidence                    │    │
 │  │  • Operation receipts for idempotency                                │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
@@ -370,6 +430,33 @@ Connectors run in OS-level sandboxes (seccomp/seatbelt/AppContainer):
 | deny_exec | Prevent child process spawning |
 | deny_ptrace | Prevent debugging/tracing |
 
+### Connector State
+
+Connectors with polling/cursors/dedup caches externalize their canonical state into the mesh:
+
+```
+ConnectorStateRoot {
+  connector_id     → Which connector
+  zone_id          → Which zone
+  head             → Latest ConnectorStateObject
+}
+
+ConnectorStateObject {
+  prev             → Hash link to previous state
+  seq              → Monotonic sequence
+  state_cbor       → Canonical connector-specific state
+  signature        → Node signature
+}
+```
+
+**Local `$CONNECTOR_STATE` is a cache only**—the authoritative state lives as mesh objects. This enables:
+
+- **Safe failover**: Another node can resume from last committed state
+- **Resumable polling**: Cursors survive node restarts and migrations
+- **Deterministic migration**: State is explicit, not implicit in process memory
+
+**Single-Writer Semantics**: Connectors declaring `singleton_writer = true` use execution leases to ensure only one node writes state at a time, preventing double-polling and cursor conflicts.
+
 ---
 
 ## Security Model
@@ -380,14 +467,15 @@ FCP defends against:
 
 | Threat | Mitigation |
 |--------|------------|
-| Compromised device | Threshold secrets (Shamir), revocation, zone key rotation |
-| Malicious connector binary | Ed25519 signature verification, OS sandboxing |
+| Compromised device | Threshold owner key (FROST), threshold secrets (Shamir), revocation, zone key rotation |
+| Malicious connector binary | Ed25519 signature verification, OS sandboxing, supply chain attestations (in-toto/SLSA) |
 | Compromised external service | Zone isolation, capability limits |
-| Prompt injection via messages | Protocol-level filtering, taint tracking, no code execution |
-| Privilege escalation | Static capability allocation, no runtime grants |
-| Replay attacks | Epoch binding, nonce verification, receipts |
-| Key compromise | Revocation objects, key rotation with zone_key_id |
-| Supply chain attacks | Reproducible builds, provenance attestation, mesh mirroring |
+| SSRF / localhost attacks | Egress proxy with CIDR deny defaults (localhost, private, tailnet ranges) |
+| Prompt injection via messages | Protocol-level filtering, taint tracking with proof-carrying reductions, no code execution |
+| Privilege escalation | Static capability allocation, no runtime grants, unified ApprovalToken for elevation/declassification |
+| Replay attacks | Session MACs with monotonic seq, epoch binding, receipts |
+| Key compromise | Revocation objects with monotonic seq for O(1) freshness, key rotation with zone_key_id |
+| Supply chain attacks | in-toto attestations, SLSA provenance, reproducible builds, transparency log, mesh mirroring |
 
 ### Threshold Secrets
 
@@ -449,18 +537,25 @@ Revocations are owner-signed and enforced before every operation.
 
 ### Audit Chain
 
-Every zone maintains a hash-linked audit chain:
+Every zone maintains a hash-linked audit chain with monotonic sequence numbers:
 
 ```
 AuditEvent_1 → AuditEvent_2 → AuditEvent_3 → ... → AuditHead
+  seq=1          seq=2          seq=3              head_seq=N
      ↑              ↑              ↑                   ↑
   signed         signed         signed         quorum-signed
+
+ZoneFrontier {
+  rev_head, rev_seq      → Revocation chain state
+  audit_head, audit_seq  → Audit chain state
+}
 ```
 
-- Events are hash-linked (tamper-evident)
+- Events are hash-linked (tamper-evident) with monotonic seq for O(1) freshness checks
 - AuditHead checkpoints are quorum-signed (n-f nodes)
+- ZoneFrontier enables fast sync without chain traversal
 - Fork detection triggers alerts
-- Required events: secret access, risky operations, elevations, zone transitions
+- Required events: secret access, risky operations, approvals, zone transitions
 
 ---
 
@@ -514,6 +609,26 @@ Registries are **sources, not dependencies**:
 
 Connector binaries are content-addressed objects distributed via the symbol layer.
 Your mesh can install/update connectors fully offline from mirrored objects.
+
+### Supply Chain Verification
+
+Before execution, FCP verifies:
+
+1. Manifest signature (registry or trusted publisher quorum)
+2. Binary checksum matches manifest
+3. Binary signature matches trusted key
+4. Platform/arch match
+5. Requested capabilities ⊆ zone ceilings
+6. **If policy requires**: Transparency log entry present
+7. **If policy requires**: in-toto/SLSA attestations valid
+8. **If policy requires**: SLSA provenance meets minimum level
+9. **If policy requires**: Attestation from trusted builder
+
+Owner policy can enforce:
+- `require_transparency_log = true`
+- `require_attestation_types = ["in-toto"]`
+- `min_slsa_level = 2`
+- `trusted_builders = ["github-actions", "internal-ci"]`
 
 ---
 
