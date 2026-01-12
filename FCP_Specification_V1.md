@@ -1311,6 +1311,10 @@ Handshake response SHOULD include:
 - `auth_caps` (supported auth methods)
 - `op_catalog_hash` (integrity hash of operations list)
 
+**Type clarification:**
+- `capabilities_requested` is `Vec<CapabilityId>` — the list of capability identifiers the Hub is requesting
+- `capabilities_granted` is `Vec<CapabilityGrant>` where `CapabilityGrant = { capability: CapabilityId, operation: Option<OperationId> }` — grants may be scoped to specific operations
+
 Connector MUST reject handshake if:
 - Protocol version is incompatible
 - `host_public_key` is missing while capability verification is required
@@ -1375,7 +1379,9 @@ Health checks are Hub-initiated unless the connector advertises push health.
 }
 ```
 
-Valid status values: `starting`, `ready`, `degraded`, `error`.
+Valid status values: `starting`, `ready`, `degraded`, `error`, `stopping`.
+
+The `stopping` state indicates the connector is in the process of graceful shutdown.
 
 The Hub MUST treat missing/late responses as unhealthy according to `timeout_ms` and `unhealthy_threshold`.
 
