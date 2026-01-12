@@ -183,6 +183,34 @@ This prevents:
 - Duplicate event processing
 - Cursor conflicts during migration
 
+**State Snapshots (NORMATIVE when state chains exceed thresholds):**
+
+Append-only state chains grow forever and become a performance drag for cold start, migration,
+GC traversal, and debugging. Periodic snapshots bound replay cost.
+
+```rust
+/// Periodic snapshot to bound replay cost (NORMATIVE when chains exceed thresholds)
+pub struct ConnectorStateSnapshot {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    /// Latest state object included in this snapshot
+    pub covers_head: ObjectId,
+    pub covers_seq: u64,
+    /// Full canonical state at covers_head
+    pub state_cbor: Vec<u8>,
+    pub snapshotted_at: u64,
+    pub signature: Signature,
+}
+```
+
+**Compaction Rule (NORMATIVE):** Once a snapshot for `covers_seq = S` is written, state objects with
+`seq < S` MAY be garbage-collected (they're no longer reachable from ConnectorStateRoot).
+
+**Fork Detection (NORMATIVE for singleton_writer):** If two snapshots cover different heads at the
+same seq, nodes MUST refuse to advance and alert the owner.
+
 ---
 
 ## 3. Control-Plane Protocol (FCP2-SYM)
@@ -226,26 +254,44 @@ Bytes 48-49:  Symbol Size (u16 LE, default 1024)
 Bytes 50-57:  Zone Key ID (8 bytes, for rotation)
 Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)
 Bytes 74-81:  Epoch ID (u64 LE)
-Bytes 82-89:  Nonce Base (8 bytes, for per-symbol nonce derivation)
+Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic counter)
 Bytes 90+:    Symbol payloads (concatenated)
 Final 8:      Checksum (XXH3-64)
 ```
 
-**Nonce Derivation (NORMATIVE):**
+**Per-Sender Subkeys and Deterministic Nonces (NORMATIVE):**
 
-Per-symbol nonces are derived from frame_nonce_base and ESI, eliminating per-symbol RNG overhead
-and saving 12 bytes/symbol bandwidth:
+Each sender MUST maintain a monotonic `frame_seq` per (zone_id, zone_key_id) and MUST NOT reuse it.
+Combined with per-sender subkeys derived from the zone key, this eliminates nonce-collision risk:
 
 ```rust
-/// Derive per-symbol nonce from frame_nonce_base and ESI
-/// nonce = frame_nonce_base[0..8] || esi_le[0..4]
-fn derive_nonce(frame_nonce_base: &[u8; 8], esi: u32) -> [u8; 12] {
+/// Derive per-symbol nonce from frame_seq and ESI (NORMATIVE)
+/// nonce = frame_seq_le[0..8] || esi_le[0..4]
+/// Combined with per-sender subkeys, this eliminates nonce-collision risk across senders.
+fn derive_nonce(frame_seq: u64, esi: u32) -> [u8; 12] {
     let mut nonce = [0u8; 12];
-    nonce[0..8].copy_from_slice(frame_nonce_base);
+    nonce[0..8].copy_from_slice(&frame_seq.to_le_bytes());
     nonce[8..12].copy_from_slice(&esi.to_le_bytes());
     nonce
 }
+
+impl ZoneKey {
+    /// Derive per-sender subkey (NORMATIVE)
+    ///
+    /// sender_key = HKDF-SHA256(
+    ///     ikm = zone_symmetric_key,
+    ///     salt = zone_key_id,
+    ///     info = "FCP2-SENDER-KEY-V1" || sender_node_id
+    /// )
+    pub fn derive_sender_subkey(&self, sender: &TailscaleNodeId) -> [u8; 32];
+}
 ```
+
+**Why per-sender subkeys + deterministic nonces:**
+- 64-bit random nonces have birthday collision risk over long-running systems with many senders
+- Per-sender subkeys eliminate cross-sender nonce collision (keys differ per sender)
+- Deterministic `frame_seq` avoids RNG dependence and is testable
+- No per-frame random generation overhead
 
 ### 3.3 Standard Methods
 
@@ -303,16 +349,30 @@ Ed25519 signatures per data-plane frame are too expensive when frames are near M
 FCP authenticates data-plane FCPS frames via a **session**:
 
 1. A one-time handshake authenticated by attested node signing keys
-2. Session-key derivation (X25519 ECDH + HKDF)
-3. Per-frame MAC + sequence number for anti-replay
+2. Session-key derivation (X25519 ECDH + HKDF) producing directional MAC keys
+3. Per-frame MAC (HMAC-SHA256 or BLAKE3, negotiated) + monotonic sequence for anti-replay
+
+**SECURITY NOTE (NORMATIVE):** Poly1305 is a one-time authenticator; using one Poly1305 key across
+multiple frames is cryptographically insecure. FCP V2 therefore uses HMAC-SHA256 or BLAKE3-keyed
+for session MACs and reserves Poly1305 for AEAD contexts only (where nonce uniqueness is enforced).
 
 ```rust
+/// Session crypto suite negotiation (NORMATIVE)
+pub enum SessionCryptoSuite {
+    /// X25519 + HKDF-SHA256 + HMAC-SHA256 (tag truncated to 16 bytes)
+    Suite1,
+    /// X25519 + HKDF-SHA256 + BLAKE3-keyed (tag truncated to 16 bytes)
+    Suite2,
+}
+
 /// Session handshake: initiator → responder
 pub struct MeshSessionHello {
     pub from: TailscaleNodeId,
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
     pub timestamp: u64,
+    /// Supported crypto suites (ordered by preference)
+    pub suites: Vec<SessionCryptoSuite>,
     /// Node signature over transcript
     pub signature: Signature,
 }
@@ -323,17 +383,25 @@ pub struct MeshSessionAck {
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
     pub session_id: [u8; 16],
+    /// Selected crypto suite
+    pub suite: SessionCryptoSuite,
     pub timestamp: u64,
     /// Node signature over transcript
     pub signature: Signature,
 }
 
 /// Session key derivation (NORMATIVE)
-/// session_key = HKDF-SHA256(
+///
+/// prk = HKDF-SHA256(
 ///     ikm = ECDH(initiator_eph, responder_eph),
 ///     salt = session_id,
 ///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
 /// )
+///
+/// keys = HKDF-Expand(prk, info="FCP2-SESSION-KEYS-V1", L=96) split as:
+/// - k_mac_i2r (32 bytes): MAC key for initiator → responder
+/// - k_mac_r2i (32 bytes): MAC key for responder → initiator
+/// - k_ctx     (32 bytes): reserved for future header/control-plane AEAD
 
 /// Authenticated FCPS frame (NORMATIVE)
 pub struct AuthenticatedFcpsFrame {
@@ -342,8 +410,18 @@ pub struct AuthenticatedFcpsFrame {
     pub session_id: [u8; 16],
     /// Monotonic sequence for anti-replay
     pub seq: u64,
-    /// Poly1305(session_key, session_id || seq || frame_bytes)
+    /// MAC over: session_id || direction || seq || frame_bytes
+    /// - Suite1: HMAC-SHA256(k_mac_dir, ...) truncated to 16 bytes
+    /// - Suite2: BLAKE3(keyed=k_mac_dir, ...) truncated to 16 bytes
     pub mac: [u8; 16],
+}
+
+/// Replay protection policy (NORMATIVE defaults)
+pub struct SessionReplayPolicy {
+    /// Allow limited reordering; MUST be bounded
+    pub max_reorder_window: u64,   // default: 128
+    /// Rekey periodically for operational hygiene and suite agility
+    pub rekey_after_frames: u64,   // default: 1_000_000_000
 }
 ```
 
@@ -365,6 +443,46 @@ Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput
 | secret access | symbol_ack |
 | revocations | introspect |
 | audit events/heads | configure |
+
+### 3.7 Admission Control (NORMATIVE)
+
+MeshNodes MUST implement admission control to prevent DoS:
+- Per-peer inbound bytes/symbols
+- Failed decrypt/MAC counters
+- Bounded concurrent decodes
+- Bounded gossip reconciliation work
+
+```rust
+/// Per-peer resource budget (NORMATIVE)
+pub struct PeerBudget {
+    pub max_bytes_per_min: u64,         // default: 64MB/min
+    pub max_symbols_per_min: u32,       // default: 200_000/min
+    pub max_failed_auth_per_min: u32,   // default: 100/min
+    pub max_inflight_decodes: u32,      // default: 32
+    pub max_decode_cpu_ms_per_min: u64, // default: 5_000ms/min
+}
+
+/// Admission policy (NORMATIVE)
+pub struct AdmissionPolicy {
+    pub per_peer: PeerBudget,
+    /// If true, unauthenticated SymbolRequest is rejected
+    /// (default: true except z:public ingress)
+    pub require_authenticated_requests: bool,
+}
+
+impl MeshNode {
+    /// Check peer budget before processing (NORMATIVE)
+    fn check_admission(&self, peer: &TailscaleNodeId, bytes: u64) -> Result<(), AdmissionError> {
+        let budget = self.peer_budgets.get_or_default(peer);
+        budget.check_bytes(bytes)?;
+        budget.check_symbols(1)?;
+        Ok(())
+    }
+}
+```
+
+**Anti-Amplification Rule (NORMATIVE):** Until a peer is authenticated (via session establishment),
+response size MUST NOT exceed N × request size (default N=8).
 
 ---
 
@@ -489,8 +607,17 @@ pub struct Zone {
     pub tailscale_tag: String,
     pub parent: Option<ZoneId>,
     pub policy: ZonePolicy,
+    /// UDP/TCP port for symbol frames in this zone (NORMATIVE for port-gating)
+    pub symbol_port: u16,
+    /// UDP/TCP port for gossip/control-plane objects in this zone (NORMATIVE for port-gating)
+    pub control_port: u16,
 }
 ```
+
+**Zone Port-Gating (NORMATIVE):**
+
+MeshNode MUST expose per-zone ports for symbol and control traffic. Tailscale ACLs gate zone
+membership to those ports, providing defense-in-depth without encoding the full lattice in ACLs.
 
 ### 5.2 Unified Approval Token
 
@@ -854,16 +981,23 @@ pub struct CapabilityToken {
     pub kid: [u8; 8],
     /// Intended audience (connector)
     pub aud: ConnectorId,
+    /// Bind token to a specific connector binary or manifest (NORMATIVE for Risky/Dangerous)
+    /// Prevents replay across upgrades or swapped binaries with the same ConnectorId.
+    pub aud_binary: Option<ObjectId>,
     /// Optional connector instance binding
     pub instance: Option<InstanceId>,
     /// Issued at (Unix timestamp)
     pub iat: u64,
     /// Expires at (Unix timestamp)
     pub exp: u64,
-    /// Granted capabilities
+    /// CapabilityObjects that authorize this token (NORMATIVE)
+    /// Verifiers MUST fetch/verify these objects and ensure token grants ⊆ object grants.
+    /// This makes authority mechanically verifiable, not "trust the issuer".
+    pub grant_object_ids: Vec<ObjectId>,
+    /// Granted capabilities (MUST be subset of union of grant_object_ids)
     pub caps: Vec<CapabilityGrant>,
-    /// Constraints
-    pub constraints: CapabilityConstraints,
+    /// Optional attenuation applied by the issuer (MUST ONLY RESTRICT, never expand)
+    pub attenuation: Option<CapabilityConstraints>,
     /// The only node allowed to present this token (sender-constrained)
     pub holder_node: TailscaleNodeId,
     /// Revocation head the issuer considered (NORMATIVE)
@@ -902,10 +1036,22 @@ impl CapabilityToken {
         // Enforce that issuing node is authorized to mint tokens for this zone
         trust_anchors.enforce_token_issuer_policy(&self.iss_zone, &self.iss_node)?;
 
+        // NORMATIVE: Verify provable authority via grant_object_ids
+        trust_anchors.verify_token_grants(self)?;
+
         Ok(())
     }
 }
 ```
+
+**Provable Authority (NORMATIVE):**
+
+The `grant_object_ids` field enables mechanical verification of token authority:
+1. Verifier fetches each CapabilityObject in `grant_object_ids`
+2. Verifier confirms `caps` ⊆ union of grants from those objects
+3. Verifier confirms the issuer node was authorized to issue from those objects
+
+This eliminates "trust the issuer" ambiguity—authority is traceable to specific capability objects.
 
 Token verification MUST use the node issuance public key (not the node signing key). Issuance keys are
 separately revocable. Verifiers compare `rev_seq` for O(1) freshness checks; full chain traversal is
@@ -919,6 +1065,16 @@ before accepting a token.
 ### 7.1 Invoke Request/Response
 
 ```rust
+/// Distributed trace context for end-to-end observability (NORMATIVE when present)
+pub struct TraceContext {
+    /// 16-byte trace id (unique per logical request)
+    pub trace_id: [u8; 16],
+    /// 8-byte span id (unique per span within trace)
+    pub span_id: [u8; 8],
+    /// Sampling/flags (W3C Trace Context compatible)
+    pub flags: u8,
+}
+
 /// Invoke request (NORMATIVE)
 pub struct InvokeRequest {
     pub id: String,
@@ -929,6 +1085,10 @@ pub struct InvokeRequest {
     /// Unified approval tokens for elevation and/or declassification
     pub approval_tokens: Vec<ApprovalToken>,
     pub idempotency_key: Option<String>,
+
+    /// Distributed trace context (NORMATIVE when present)
+    /// Enables end-to-end correlation across MeshNodes, connectors, receipts, and audit.
+    pub trace_context: Option<TraceContext>,
 
     /// Holder proof (NORMATIVE): binds presentation to holder_node in CapabilityToken
     /// Prevents token replay by anyone other than the designated holder.
@@ -991,6 +1151,31 @@ pub struct OperationReceipt {
 
 Operations with `SafetyTier::Dangerous` MUST be `IdempotencyClass::Strict`.
 Operations with `SafetyTier::Risky` SHOULD be `Strict` unless there is a clear reason.
+
+**OperationIntent Pre-commit (NORMATIVE for Strict + Risky/Dangerous):**
+
+Closes the crash window between "side effect happened" and "receipt stored".
+Written BEFORE executing an external side effect.
+
+```rust
+/// Operation intent - pre-commit for exactly-once semantics (NORMATIVE for Strict + Risky/Dangerous)
+pub struct OperationIntent {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub capability_token_jti: Uuid,
+    pub idempotency_key: Option<String>,
+    pub planned_at: u64,
+    pub planned_by: TailscaleNodeId,
+    /// Optional upstream idempotency handle (e.g., Stripe idempotency key)
+    pub upstream_idempotency: Option<String>,
+    pub signature: Signature,
+}
+```
+
+**Execution Rule for Strict/Risky/Dangerous Operations (NORMATIVE):**
+1. MeshNode MUST store OperationIntent (Required retention) BEFORE invoking the connector operation
+2. OperationReceipt MUST reference the OperationIntent via `ObjectHeader.refs`
+3. On crash recovery, check for intents without corresponding receipts to detect incomplete operations
 
 ### 7.3 Event Envelope
 
@@ -1466,21 +1651,65 @@ Execution leases prevent duplicate side effects and stabilize migration:
 
 ```rust
 /// Execution lease (NORMATIVE)
+///
+/// Prevents duplicate execution and stabilizes computation migration.
+/// A short-lived, renewable lock that says "node X owns execution of request R until time T."
 pub struct ExecutionLease {
     pub header: ObjectHeader,
+    /// The request/computation being leased
     pub request_object_id: ObjectId,
+    /// Which node currently owns execution
     pub owner_node: TailscaleNodeId,
+    /// Lease issued at
     pub iat: u64,
+    /// Lease expires at (short-lived; renewable)
     pub exp: u64,
+    /// Deterministic coordinator for this lease (NORMATIVE)
+    /// Selected via HRW/Rendezvous hashing over (zone_id, request_object_id).
+    pub coordinator: TailscaleNodeId,
+    /// Quorum signatures (NORMATIVE for Risky/Dangerous)
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
+
+/// Lease acquisition request (NORMATIVE)
+pub struct LeaseRequest {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub desired_owner: TailscaleNodeId,
+    pub requested_at: u64,
+    pub exp: u64,
+    /// Signature by requester node signing key
     pub signature: Signature,
 }
 ```
 
-Lease semantics:
+**Distributed Lease Issuance (NORMATIVE):**
 
+Coordinator selection uses HRW (Rendezvous) hashing:
+```rust
+fn select_coordinator(zone_id: &ZoneId, request_id: &ObjectId, nodes: &[TailscaleNodeId]) -> TailscaleNodeId {
+    nodes.iter()
+        .max_by_key(|n| hrw_hash(zone_id, request_id, n))
+        .cloned()
+        .unwrap()
+}
+```
+
+**Quorum Rules (NORMATIVE):**
+- **Safe ops:** Single coordinator signature MAY be sufficient
+- **Risky ops:** Require f+1 signatures (prevents 1 compromised node from unilaterally leasing)
+- **Dangerous ops:** Require n-f signatures (matches CriticalWrite default)
+
+**Conflict Rule (NORMATIVE):**
+If two valid leases overlap for the same `request_object_id`, nodes MUST:
+1. For **Dangerous ops:** Refuse execution and alert owner for manual resolution
+2. For **Risky ops:** Pick the lease with higher `(exp, coordinator_id)` and log the fork
+
+**Lease Semantics:**
 - For Risky/Dangerous operations, execution MUST require a valid lease.
 - The executing node MUST present the lease to run the connector operation.
 - If the node dies, the lease expires and another node can acquire.
+- This is a mesh-native way to coordinate without a central coordinator.
 
 ---
 
@@ -1604,6 +1833,9 @@ pub struct AuditEvent {
     pub header: ObjectHeader,
     /// Correlation ID for request tracing
     pub correlation_id: [u8; 16],
+    /// Optional full trace context (NORMATIVE when present in InvokeRequest)
+    /// Enables stitching mesh routing, connector execution, receipts, and audit together.
+    pub trace_context: Option<TraceContext>,
     /// Event type (e.g., "secret.access", "capability.invoke", "elevation.granted")
     pub event_type: String,
     /// Actor who triggered the event
@@ -1789,6 +2021,23 @@ Connector MUST:
 - Include supply chain attestations in manifest (`[supply_chain]` section).
 - Support transparency log entries.
 - Include AI hints for operations.
+
+**Session and Transport (NORMATIVE):**
+- Use HMAC-SHA256 or BLAKE3 for session MACs (NOT Poly1305 across multiple frames).
+- Negotiate crypto suite via `MeshSessionHello`/`MeshSessionAck`.
+- Derive directional MAC keys (k_mac_i2r, k_mac_r2i) from session PRK.
+- Maintain per-sender monotonic `frame_seq`; encrypt via per-sender subkeys.
+
+**Provable Authority (NORMATIVE):**
+- Verify `grant_object_ids` in CapabilityToken to confirm token grants ⊆ object grants.
+- Bind tokens to specific connector binaries via `aud_binary` for Risky/Dangerous ops.
+
+**Exactly-Once Semantics (NORMATIVE for Strict + Risky/Dangerous):**
+- Store `OperationIntent` BEFORE executing external side effects.
+- Reference intent from `OperationReceipt` via `ObjectHeader.refs`.
+
+**Observability (NORMATIVE when present):**
+- Propagate `TraceContext` from `InvokeRequest` to `AuditEvent` for end-to-end tracing.
 
 ---
 
