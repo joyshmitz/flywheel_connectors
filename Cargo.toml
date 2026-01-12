@@ -8,9 +8,10 @@ members = [
     "crates/fcp-telemetry",
     "crates/fcp-testkit",
     "crates/fcp-webhook",
-    "connectors/telegram",
-    "connectors/discord",
     "connectors/anthropic",
+    "connectors/discord",
+    "connectors/openai",
+    "connectors/telegram",
 ]
 
 [workspace.package]
