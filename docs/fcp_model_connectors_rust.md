@@ -180,7 +180,7 @@ Transport options:
 2. Mesh: encoded to symbols and sent inside FCPS frames with `FrameFlags::CONTROL_PLANE`.
 
 When `FrameFlags::CONTROL_PLANE` is set, receivers MUST verify checksum, decrypt symbols, reconstruct the object,
-verify schema, and store the object (subject to retention policy).
+verify schema, and store the object (subject to node-local retention policy).
 
 ---
 
@@ -256,27 +256,37 @@ impl CanonicalSerializer {
 }
 ```
 
-### 4.3 Object Header and Retention
+### 4.3 Object Header and Placement
 
 ```rust
 /// Universal object header (NORMATIVE)
+///
+/// ObjectId is derived from the canonical encoding of (header, body).
+/// The header MUST NOT embed `object_id`.
 pub struct ObjectHeader {
-    pub object_id: ObjectId,
     pub schema: SchemaId,
     pub zone_id: ZoneId,
     pub created_at: u64,
     pub provenance: Provenance,
     pub refs: Vec<ObjectId>,
-    pub retention: RetentionClass,
     pub ttl_secs: Option<u64>,
+    /// Optional placement policy for symbol distribution (NORMATIVE when present)
+    pub placement: Option<ObjectPlacementPolicy>,
 }
 
-pub enum RetentionClass {
-    Pinned,
-    Lease { expires_at: u64 },
-    Ephemeral,
+/// Object placement policy (NORMATIVE when used)
+pub struct ObjectPlacementPolicy {
+    pub min_nodes: u8,
+    pub max_node_fraction: f64,
+    pub preferred_devices: Vec<String>,
+    pub excluded_devices: Vec<String>,
+    pub target_coverage: f64,
 }
 ```
+
+Retention is node-local storage metadata and is not part of the content-addressed header.
+Mesh nodes periodically evaluate symbol coverage against `ObjectPlacementPolicy` and perform
+background repair to maintain target coverage.
 
 ---
 
@@ -381,7 +391,8 @@ pub struct ElevationToken {
 Connector implications:
 
 - Objects stored in the mesh MUST include an `ObjectHeader`, which includes provenance.
-- When a connector creates objects, it must supply provenance as part of the header.
+- When a connector creates objects, it must supply provenance as part of the header and compute
+  `ObjectId` from the canonical encoding of `(header, body)`.
 
 ---
 
@@ -986,6 +997,9 @@ advance an audit head without quorum unless explicitly in degraded mode.
 
 Fork detection (NORMATIVE): if multiple heads are discovered for the same epoch, nodes MUST log the fork,
 refuse to advance, and alert the owner for manual resolution.
+
+Audit events carry a monotonic `seq`. Audit heads include `head_seq`. For fast synchronization,
+nodes use `ZoneFrontier` checkpoints that include `rev_head`, `rev_seq`, `audit_head`, and `audit_seq`.
 
 ---
 
