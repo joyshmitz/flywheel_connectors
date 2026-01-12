@@ -23,6 +23,45 @@
 11. [Archetype 9: CLI/Process Wrapper](#archetype-9-cliprocess-wrapper)
 12. [Archetype 10: Browser Automation](#archetype-10-browser-automation)
 13. [Composition Patterns](#composition-patterns)
+14. [JSON-RPC Methods Reference](#json-rpc-methods-reference)
+
+---
+
+## JSON-RPC Methods Reference
+
+FCP uses JSON-RPC 2.0 as its wire protocol. The following methods are defined:
+
+| Method | Request Type | Response Type | Description |
+|--------|-------------|---------------|-------------|
+| `fcp.handshake` | `HandshakeRequest` | `HandshakeResponse` | Establish session, negotiate capabilities |
+| `fcp.describe` | `DescribeRequest` | `DescribeResponse` | Get connector metadata and manifest |
+| `fcp.introspect` | `IntrospectRequest` | `Introspection` | Get operations, events, and resource types |
+| `fcp.capabilities` | `CapabilitiesRequest` | `CapabilitiesCatalog` | Get full capabilities catalog |
+| `fcp.configure` | `ConfigureRequest` | `ConfigureResponse` | Update connector configuration |
+| `fcp.invoke` | `InvokeRequest` | `InvokeResponse` | Execute an operation |
+| `fcp.subscribe` | `SubscribeRequest` | `SubscribeResponse` | Subscribe to event topics |
+| `fcp.unsubscribe` | `UnsubscribeRequest` | `UnsubscribeResponse` | Unsubscribe from event topics |
+| `fcp.health` | `HealthRequest` | `HealthSnapshot` | Get connector health status |
+| `fcp.shutdown` | `ShutdownRequest` | `ShutdownAck` | Initiate graceful shutdown |
+
+**Request envelope format:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-123",
+  "method": "fcp.invoke",
+  "params": { /* request payload */ }
+}
+```
+
+**Response envelope format:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "req-123",
+  "result": { /* response payload */ }
+}
+```
 
 ---
 
@@ -534,6 +573,8 @@ impl ZoneContext {
 // Invoke Request/Response Types
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Invoke request per FCP Specification Section 9.7.
+/// JSON-RPC method: `fcp.invoke`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeRequest {
     pub r#type: String,
@@ -552,6 +593,8 @@ pub struct InvokeContext {
     pub pagination: Option<serde_json::Value>,
 }
 
+/// Invoke response per FCP Specification Section 9.7.
+/// JSON-RPC method: `fcp.invoke` response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeResponse {
     pub r#type: String,
@@ -561,6 +604,8 @@ pub struct InvokeResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Subscribe request per FCP Specification Section 9.8.
+/// JSON-RPC method: `fcp.subscribe`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeRequest {
     /// Must be "subscribe"
@@ -583,6 +628,8 @@ pub struct SubscribeResult {
     pub buffer: Option<ReplayBufferInfo>,
 }
 
+/// Subscribe response per FCP Specification Section 9.8.
+/// JSON-RPC method: `fcp.subscribe` response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeResponse {
     /// Must be "response"
@@ -597,6 +644,8 @@ pub struct ReplayBufferInfo {
     pub overflow: String, // e.g., "stream.reset"
 }
 
+/// Unsubscribe request per FCP Specification Section 9.9.
+/// JSON-RPC method: `fcp.unsubscribe`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeRequest {
     /// Must be "unsubscribe"
@@ -620,6 +669,8 @@ pub struct HostInfo {
     pub build: Option<String>,
 }
 
+/// Handshake request per FCP Specification Section 9.2.
+/// JSON-RPC method: `fcp.handshake`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
     pub protocol_version: String,
@@ -633,10 +684,12 @@ pub struct HandshakeRequest {
     pub requested_instance_id: Option<InstanceId>,
 }
 
+/// Handshake response per FCP Specification Section 9.2.
+/// JSON-RPC method: `fcp.handshake` response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeResponse {
     pub status: String,
-    pub capabilities_granted: Vec<CapabilityId>,
+    pub capabilities_granted: Vec<CapabilityGrant>,
     pub session_id: SessionId,
     pub manifest_hash: String,
     pub nonce: [u8; 32],
@@ -645,10 +698,109 @@ pub struct HandshakeResponse {
     pub op_catalog_hash: Option<String>,
 }
 
+/// Current protocol version supported by this implementation.
+pub const PROTOCOL_VERSION: &str = "1.0";
+
+/// Handshake validation per FCP Specification Section 9.2.
+/// Connector MUST reject handshake if:
+/// - Protocol version is incompatible (major version mismatch)
+/// - `host_public_key` is all zeros when capability verification is required
+/// - Persistent-storage connector is missing a valid `zone_dir`
+pub fn validate_handshake_request(
+    req: &HandshakeRequest,
+    requires_capability_verification: bool,
+    requires_persistent_storage: bool,
+) -> FcpResult<()> {
+    // MUST reject: Protocol version is incompatible
+    let req_major = req.protocol_version.split('.').next().unwrap_or("0");
+    let our_major = PROTOCOL_VERSION.split('.').next().unwrap_or("0");
+    if req_major != our_major {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!(
+                "Protocol version mismatch: expected major version {}, got {}",
+                our_major, req_major
+            ),
+        });
+    }
+
+    // MUST reject: host_public_key is missing while capability verification is required
+    if requires_capability_verification && req.host_public_key == [0u8; 32] {
+        return Err(FcpError::InvalidRequest {
+            code: 1002,
+            message: "host_public_key required for capability verification".into(),
+        });
+    }
+
+    // MUST reject: Persistent-storage connector missing valid zone_dir
+    if requires_persistent_storage && req.zone_dir.as_ref().map_or(true, |d| d.is_empty()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "zone_dir required for persistent storage connector".into(),
+        });
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provenance Tracking (Section 7.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaintLevel {
+    Untainted,
+    Tainted,
+    HighlyTainted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceStep {
+    pub timestamp_ms: u64,
+    pub zone: ZoneId,
+    pub actor: String,
+    pub action: String,
+    pub resource: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provenance {
+    pub origin_zone: ZoneId,
+    pub chain: Vec<ProvenanceStep>,
+    pub taint: TaintLevel,
+    pub elevated: bool,
+    pub elevation_token: Option<String>,
+}
+
+/// Shutdown request per FCP Specification Section 9.12.
+/// JSON-RPC method: `fcp.shutdown`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShutdownRequest {
+    /// Message type (must be "shutdown")
+    pub r#type: String,
+    /// Maximum time to complete shutdown in milliseconds
     pub deadline_ms: u64,
+    /// Whether to flush pending events before terminating
     pub drain: bool,
+    /// Optional reason for shutdown (for logging)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Shutdown acknowledgment per FCP Specification Section 9.12.
+/// JSON-RPC method: `fcp.shutdown` response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownAck {
+    /// Message type (must be "shutdown_ack")
+    pub r#type: String,
+    /// Status of shutdown ("accepted", "draining", "complete")
+    pub status: String,
+    /// Number of events flushed (if drain was true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events_flushed: Option<u64>,
+    /// Number of in-flight requests completed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests_completed: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -720,13 +872,21 @@ pub struct JsonRpcMeta {
 // Health & Metrics
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Health state per FCP Specification Section 9.10.
+/// JSON-RPC method: `fcp.health`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthState {
+    /// Connector is initializing
     Starting,
+    /// Connector is ready to accept requests
     Ready,
+    /// Connector is operational but with reduced capacity
     Degraded { reason: String },
+    /// Connector encountered an error
     Error { reason: String },
+    /// Connector is shutting down gracefully (per spec line 1378)
+    Stopping,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -848,6 +1008,8 @@ pub enum RiskLevel {
 pub struct OperationInfo {
     pub id: OperationId,
     pub summary: String,
+    /// Detailed operation description
+    pub description: Option<String>,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     pub capability: CapabilityId,
@@ -855,6 +1017,19 @@ pub struct OperationInfo {
     pub safety_tier: SafetyTier,
     pub idempotency: IdempotencyClass,
     pub ai_hints: AgentHint,
+    /// Rate limit configuration for this operation
+    pub rate_limit: Option<RateLimit>,
+    /// Approval mode required
+    pub requires_approval: Option<ApprovalMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalMode {
+    None,
+    Policy,
+    Interactive,
+    ElevationToken,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1201,8 +1376,13 @@ impl FcpConnector for RequestResponseConnector {
     
     #[instrument(skip(self, req))]
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        // MUST validate per FCP Specification Section 9.2
+        // Request-response connectors: capability verification required, no persistent storage
+        validate_handshake_request(&req, true, false)?;
+
         let instance_id = req
             .requested_instance_id
+            .clone()
             .unwrap_or_else(|| InstanceId(format!("inst_{}", Uuid::new_v4())));
 
         self.verifier = Some(CapabilityVerifier {
@@ -1212,11 +1392,15 @@ impl FcpConnector for RequestResponseConnector {
         });
         let session_id = SessionId(Uuid::new_v4());
         self.session_id = Some(session_id.clone());
-        
+
         info!(connector = %self.id.0, session = %session_id.0, "Handshake complete");
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            // Convert Vec<CapabilityId> to Vec<CapabilityGrant>
+            capabilities_granted: req.capabilities_requested
+                .into_iter()
+                .map(|cap| CapabilityGrant { capability: cap, operation: None })
+                .collect(),
             session_id,
             manifest_hash: "sha256:placeholder".into(),
             nonce: req.nonce,
@@ -1988,7 +2172,11 @@ impl FcpConnector for StreamingConnector {
         
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            // Convert Vec<CapabilityId> to Vec<CapabilityGrant>
+            capabilities_granted: req.capabilities_requested
+                .into_iter()
+                .map(|cap| CapabilityGrant { capability: cap, operation: None })
+                .collect(),
             session_id,
             manifest_hash: "sha256:placeholder".into(),
             nonce: req.nonce,
@@ -2608,7 +2796,11 @@ impl FcpConnector for BidirectionalConnector {
         
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            // Convert Vec<CapabilityId> to Vec<CapabilityGrant>
+            capabilities_granted: req.capabilities_requested
+                .into_iter()
+                .map(|cap| CapabilityGrant { capability: cap, operation: None })
+                .collect(),
             session_id,
             manifest_hash: "sha256:placeholder".into(),
             nonce: req.nonce,
@@ -3336,7 +3528,11 @@ impl<F: PollSource, S: CursorStore> FcpConnector for PollingConnector<F, S> {
         
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            // Convert Vec<CapabilityId> to Vec<CapabilityGrant>
+            capabilities_granted: req.capabilities_requested
+                .into_iter()
+                .map(|cap| CapabilityGrant { capability: cap, operation: None })
+                .collect(),
             session_id,
             manifest_hash: "sha256:placeholder".into(),
             nonce: req.nonce,
@@ -4077,7 +4273,11 @@ impl FcpConnector for WebhookConnector {
         
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: req.capabilities_requested,
+            // Convert Vec<CapabilityId> to Vec<CapabilityGrant>
+            capabilities_granted: req.capabilities_requested
+                .into_iter()
+                .map(|cap| CapabilityGrant { capability: cap, operation: None })
+                .collect(),
             session_id,
             manifest_hash: "sha256:placeholder".into(),
             nonce: req.nonce,
