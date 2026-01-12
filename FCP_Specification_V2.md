@@ -204,14 +204,55 @@ pub struct NodeKeyAttestation {
     pub issued_at: u64,
     /// Optional expiry (None = no expiry)
     pub expires_at: Option<u64>,
-    /// Signature by owner private key
+    /// Owner signature (may be produced via threshold signing; verifiable with owner_pubkey)
     pub signature: Signature,
 }
+
+#### 2.2.1 Threshold Owner Signing (RECOMMENDED)
+
+Owner signatures are standard Ed25519 signatures verifiable with `owner_pubkey`. The mechanism used to *produce* the signature MAY be threshold.
+
+Implementations SHOULD support a threshold signing mode (e.g., FROST for Ed25519) where k-of-n devices contribute partial signatures and no device ever holds the complete owner private key.
+
+**Why this matters:**
+- **Catastrophic compromise resistance:** 1 compromised device ≠ owner compromise.
+- **Loss tolerance:** you can lose devices and still sign revocations/rotations.
+- **Incident response coherence:** "remove device → rotate shares" becomes a first-class flow.
+
+```rust
+pub struct OwnerKeyPolicy {
+    pub scheme: OwnerKeyScheme,
+    pub threshold_k: u8,
+    pub total_n: u8,
+    pub participants: Vec<TailscaleNodeId>,
+    pub max_skew_secs: u64,
+}
+
+pub enum OwnerKeyScheme {
+    /// Full owner key on a single device (NOT RECOMMENDED)
+    Single,
+    /// k-of-n threshold signing (RECOMMENDED)
+    Threshold,
+}
+
+/// Sealed owner key-share (NORMATIVE when OwnerKeyScheme::Threshold)
+pub struct OwnerKeyShare {
+    pub header: ObjectHeader,
+    pub share_id: u8,
+    pub node_id: TailscaleNodeId,
+    /// Sealed to node_enc_pubkey
+    pub sealed_share: Vec<u8>,
+    pub issued_at: u64,
+    /// Owner signature over the distribution statement
+    pub signature: Signature,
+}
+```
 ```
 
 **Key Role Separation (NORMATIVE):**
 
-FCP requires four distinct key roles:
+FCP requires five distinct key roles:
+0. **Owner signing key** (Ed25519 public key): Root trust anchor. Implementations SHOULD avoid storing the owner *private* key in full on any single device by using threshold signing (§2.2.1).
 1. **Node signing keys** (Ed25519): For frame attribution, gossip auth, operation receipts
 2. **Node encryption keys** (X25519): For receiving sealed zone keys and secret shares
 3. **Node issuance keys** (Ed25519): For minting capability tokens (separately revocable)
@@ -464,9 +505,10 @@ All mesh-stored objects MUST begin with an ObjectHeader (NORMATIVE):
 
 ```rust
 /// Universal object header (NORMATIVE)
+///
+/// NORMATIVE: ObjectId is derived from the canonical encoding of (header, body).
+/// The header MUST NOT embed `object_id` to avoid self-referential hashing ambiguity.
 pub struct ObjectHeader {
-    /// Content-addressed identifier
-    pub object_id: ObjectId,
     /// Schema identifier
     pub schema: SchemaId,
     /// Zone this object belongs to
@@ -477,10 +519,62 @@ pub struct ObjectHeader {
     pub provenance: Provenance,
     /// Strong refs to other objects (object graph for GC + auditability)
     pub refs: Vec<ObjectId>,
-    /// Retention class for GC
-    pub retention: RetentionClass,
     /// Optional TTL in seconds
     pub ttl_secs: Option<u64>,
+    /// Optional placement policy for symbol distribution (NORMATIVE when present)
+    /// Makes "offline = reduced probability" measurable and maintainable.
+    pub placement: Option<ObjectPlacementPolicy>,
+}
+
+/// Object placement policy (NORMATIVE when used)
+///
+/// Defines how symbols for this object should be distributed across the mesh.
+/// Enables quantifiable offline resilience SLOs.
+pub struct ObjectPlacementPolicy {
+    /// Minimum distinct nodes that should hold symbols for this object
+    pub min_nodes: u8,
+    /// Maximum fraction of total symbols any single node may hold (prevents concentration)
+    pub max_node_fraction: f64,
+    /// Preferred device selectors (e.g., "tag:fcp-private", "class:desktop")
+    pub preferred_devices: Vec<String>,
+    /// Hard exclusions (e.g., "tag:fcp-public", specific node IDs)
+    pub excluded_devices: Vec<String>,
+    /// Target coverage ratio (symbols held / symbols needed)
+    /// 1.0 = exactly K symbols distributed; 1.5 = 50% redundancy
+    pub target_coverage: f64,
+}
+
+/// Node-local storage metadata (NOT content-addressed)
+///
+/// Retention is storage policy and SHOULD NOT be committed to content addressing,
+/// because different nodes can store the same object with different retention.
+pub struct StorageMeta {
+    pub retention: RetentionClass,
+}
+
+/// Stored object record (NORMATIVE)
+pub struct StoredObject {
+    pub object_id: ObjectId,
+    pub header: ObjectHeader,
+    /// Canonical CBOR body (schema-prefixed)
+    pub body: Vec<u8>,
+    /// Node-local storage policy
+    pub storage: StorageMeta,
+}
+
+impl StoredObject {
+    /// Canonical bytes used for ObjectId derivation (NORMATIVE)
+    pub fn canonical_bytes(header: &ObjectHeader, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"FCP2-OBJECT-V1");
+        ciborium::ser::into_writer_canonical(header, &mut out).unwrap();
+        out.extend_from_slice(body);
+        out
+    }
+
+    pub fn derive_id(header: &ObjectHeader, body: &[u8], key: &ObjectIdKey) -> ObjectId {
+        ObjectId::new(&Self::canonical_bytes(header, body), &header.zone_id, &header.schema, key)
+    }
 }
 
 /// Retention class for garbage collection (NORMATIVE)
@@ -523,8 +617,8 @@ impl SymbolStore {
         let mut evicted = 0;
         for object_id in self.all_objects(zone_id) {
             if !live.contains(&object_id) {
-                if let Some(header) = self.get_header(&object_id) {
-                    if !matches!(header.retention, RetentionClass::Pinned) {
+                if let Some(meta) = self.get_storage_meta(&object_id) {
+                    if !matches!(meta.retention, RetentionClass::Pinned) {
                         self.evict(&object_id);
                         evicted += 1;
                     }
@@ -578,12 +672,24 @@ pub struct SymbolEnvelope {
     /// AEAD authentication tag
     pub auth_tag: [u8; 16],
 
-    /// Nonce for encryption
-    pub nonce: [u8; 12],
+    // NOTE: Nonce is NOT stored per-symbol.
+    // Nonce is derived as: nonce = frame_nonce_base || esi_le (NORMATIVE; see FCPS header)
+    // This eliminates per-symbol RNG overhead and saves 12 bytes/symbol bandwidth.
+}
+
+/// Derive per-symbol nonce from frame_nonce_base and ESI (NORMATIVE)
+///
+/// nonce = frame_nonce_base[0..8] || esi_le[0..4]
+/// This eliminates per-symbol RNG overhead and is collision-resistant within a frame.
+fn derive_nonce(frame_nonce_base: &[u8; 8], esi: u32) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[0..8].copy_from_slice(frame_nonce_base);
+    nonce[8..12].copy_from_slice(&esi.to_le_bytes());
+    nonce
 }
 
 impl SymbolEnvelope {
-    /// Encrypt symbol data with zone key
+    /// Encrypt symbol data with zone key (NORMATIVE)
     pub fn encrypt(
         object_id: ObjectId,
         esi: u32,
@@ -591,8 +697,10 @@ impl SymbolEnvelope {
         plaintext: &[u8],
         zone_key: &ZoneKey,
         epoch: EpochId,
+        frame_nonce_base: &[u8; 8],
     ) -> Self {
-        let nonce = generate_nonce();
+        // NORMATIVE: derive per-symbol nonce from frame_nonce_base || esi_le
+        let nonce = derive_nonce(frame_nonce_base, esi);
 
         // Associated data binds symbol to context INCLUDING key_id for rotation safety
         let aad = Self::build_aad(&object_id, esi, k, &zone_key.zone_id, zone_key.key_id, epoch);
@@ -608,12 +716,11 @@ impl SymbolEnvelope {
             zone_key_id: zone_key.key_id,
             epoch_id: epoch,
             auth_tag,
-            nonce,
         }
     }
 
-    /// Decrypt and verify symbol
-    pub fn decrypt(&self, zone_key: &ZoneKey) -> Result<Vec<u8>, CryptoError> {
+    /// Decrypt and verify symbol (NORMATIVE)
+    pub fn decrypt(&self, zone_key: &ZoneKey, frame_nonce_base: &[u8; 8]) -> Result<Vec<u8>, CryptoError> {
         // Verify key_id matches to catch rotation mismatches early
         if zone_key.key_id != self.zone_key_id {
             return Err(CryptoError::KeyIdMismatch {
@@ -621,6 +728,9 @@ impl SymbolEnvelope {
                 got: zone_key.key_id,
             });
         }
+
+        // NORMATIVE: derive nonce from frame_nonce_base || esi_le
+        let nonce = derive_nonce(frame_nonce_base, self.esi);
 
         let aad = Self::build_aad(
             &self.object_id,
@@ -631,7 +741,7 @@ impl SymbolEnvelope {
             self.epoch_id
         );
 
-        zone_key.decrypt(&self.data, &self.nonce, &self.auth_tag, &aad)
+        zone_key.decrypt(&self.data, &nonce, &self.auth_tag, &aad)
     }
 
     fn build_aad(
@@ -654,19 +764,64 @@ impl SymbolEnvelope {
 }
 ```
 
-### 4.2 Signed FCPS Frame
+### 4.2 Mesh Session Authentication (NORMATIVE)
 
-For source attribution and rate limiting, FCPS frames are signed (NORMATIVE).
-Per-symbol signatures are OPTIONAL and reserved for critical control-plane objects.
+Ed25519 signatures per data-plane frame are too expensive when frames are near MTU (often ~1 symbol/frame).
+FCP therefore authenticates data-plane FCPS frames via a **session**:
 
-**Why frame-level signatures instead of per-symbol:**
+1. A one-time handshake authenticated by attested node signing keys
+2. Session-key derivation (X25519 ECDH + HKDF)
+3. Per-frame MAC + sequence number for anti-replay
+
+Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput delivery MUST support session MACs.
+
+**Why session MACs instead of per-frame signatures:**
 - Ed25519 signing is expensive at scale (especially mobile)
 - AEAD already provides per-symbol cryptographic integrity
-- Signature primarily needed for attribution/rate limiting, not data integrity
-- This is a major throughput win (amortize one signature over many symbols)
+- Session establishment amortizes signature cost over many frames
+- Preserves "cryptographic attribution independent of transport" goal
 
 ```rust
-/// Signed FCPS frame (NORMATIVE)
+/// Session handshake: initiator → responder
+pub struct MeshSessionHello {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub timestamp: u64,
+    /// Node signature over transcript
+    pub signature: Signature,
+}
+
+/// Session handshake: responder → initiator
+pub struct MeshSessionAck {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub session_id: [u8; 16],
+    pub timestamp: u64,
+    /// Node signature over transcript
+    pub signature: Signature,
+}
+
+/// Session key derivation (NORMATIVE)
+/// session_key = HKDF-SHA256(
+///     ikm = ECDH(initiator_eph, responder_eph),
+///     salt = session_id,
+///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
+/// )
+
+/// Authenticated FCPS frame (NORMATIVE)
+pub struct AuthenticatedFcpsFrame {
+    pub frame: FcpsFrame,
+    pub source_id: TailscaleNodeId,
+    pub session_id: [u8; 16],
+    /// Monotonic sequence for anti-replay
+    pub seq: u64,
+    /// Poly1305(session_key, session_id || seq || frame_bytes)
+    pub mac: [u8; 16],
+}
+
+/// Legacy signed frame (for bootstrap/degraded mode)
 pub struct SignedFcpsFrame {
     pub frame: FcpsFrame,
     pub source_id: TailscaleNodeId,
@@ -707,11 +862,13 @@ Symbol-native frame format:
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
 │  Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)                    │
 │  Bytes 74-81:  Epoch ID (u64 LE)                                            │
-│  Bytes 82+:    Symbol payloads (concatenated)                               │
+│  Bytes 82-89:  Nonce Base (8 bytes, for per-symbol nonce derivation)        │
+│  Bytes 90+:    Symbol payloads (concatenated)                               │
 │  Final 8:      Checksum (XXH3-64)                                           │
 │                                                                             │
-│  Fixed header: 82 bytes                                                     │
-│  Each symbol: 4 (ESI) + 2 (K) + N (data) + 16 (auth_tag) + 12 (nonce)      │
+│  Fixed header: 90 bytes                                                     │
+│  Each symbol: 4 (ESI) + 2 (K) + N (data) + 16 (auth_tag)                    │
+│               (nonce derived from nonce_base || esi_le, NOT stored)         │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -912,22 +1069,67 @@ pub struct Zone {
     pub policy: ZonePolicy,
 }
 
-/// Declassification token for confidentiality downgrades (NORMATIVE)
+/// Unified approval token (NORMATIVE)
 ///
-/// Used when moving data from higher confidentiality → lower confidentiality,
-/// e.g. z:private → z:public for publishing/posting.
-pub struct DeclassificationToken {
+/// Consolidates ElevationToken and DeclassificationToken into a single type.
+/// Simplifies: UI prompting, audit, verification code paths, policy.
+pub struct ApprovalToken {
     pub token_id: ObjectId,
-    pub from_zone: ZoneId,
-    pub to_zone: ZoneId,
-    /// Optional but RECOMMENDED: which objects/data are being declassified
-    pub object_ids: Vec<ObjectId>,
+    pub scope: ApprovalScope,
     /// Human-readable justification (UI + audit)
     pub justification: String,
     pub approved_by: PrincipalId,
     pub approved_at: u64,
     pub expires_at: u64,
     pub signature: Signature,
+}
+
+/// Approval scope (NORMATIVE)
+pub enum ApprovalScope {
+    /// Integrity elevation for a specific operation + provenance
+    Elevation {
+        operation: OperationId,
+        original_provenance: Provenance,
+    },
+    /// Confidentiality downgrade for specific objects
+    Declassification {
+        from_zone: ZoneId,
+        to_zone: ZoneId,
+        object_ids: Vec<ObjectId>,
+    },
+}
+
+impl ApprovalToken {
+    /// Default TTL: 5 minutes
+    pub const DEFAULT_TTL_SECS: u64 = 300;
+
+    /// Verify token is valid
+    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), VerifyError> {
+        // Check expiry
+        if current_timestamp() > self.expires_at {
+            return Err(VerifyError::Expired);
+        }
+
+        // Verify approver authority
+        let approver_key = trust_anchors.get_principal_key(&self.approved_by)?;
+        approver_key.verify(&self.signable_bytes(), &self.signature)?;
+
+        // Verify approver has appropriate authority for the scope
+        match &self.scope {
+            ApprovalScope::Elevation { .. } => {
+                if !trust_anchors.can_approve_elevation(&self.approved_by) {
+                    return Err(VerifyError::InsufficientAuthority);
+                }
+            }
+            ApprovalScope::Declassification { from_zone, to_zone, .. } => {
+                if !trust_anchors.can_approve_declassification(&self.approved_by, from_zone, to_zone) {
+                    return Err(VerifyError::InsufficientAuthority);
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Zone encryption key (NORMATIVE)
@@ -1165,11 +1367,32 @@ pub struct Provenance {
     /// Taint flags (compositional)
     pub taint: TaintFlags,
 
+    /// Taint reductions, each justified by a verifiable attestation (NORMATIVE)
+    /// Allows specific taints to be cleared with proof (e.g., URL scan, malware check)
+    pub taint_reductions: Vec<TaintReduction>,
+
     /// Crossed zones (audit trail)
     pub zone_crossings: Vec<ZoneCrossing>,
 
     /// Timestamp of creation
     pub created_at: u64,
+}
+
+/// Proof-carrying taint reduction (NORMATIVE)
+///
+/// Allows clearing specific taints when you can point to a verifiable attestation.
+/// Examples:
+/// - URL scanning cleared UNVERIFIED_LINK
+/// - Malware scan cleared UNVERIFIED_LINK
+/// - Strict schema validation cleared PROMPT_SURFACE for that field
+#[derive(Clone)]
+pub struct TaintReduction {
+    /// Which taints are cleared
+    pub clears: TaintFlags,
+    /// Attestation/receipt ObjectId that justifies the reduction
+    pub by_attestation: ObjectId,
+    /// When the reduction was applied
+    pub applied_at: u64,
 }
 
 bitflags! {
@@ -1211,6 +1434,18 @@ pub struct ZoneCrossing {
 
 ```rust
 impl Provenance {
+    /// Effective taint after applying reductions (NORMATIVE)
+    ///
+    /// Taint reductions allow specific taints to be cleared with proof.
+    /// Without this, taint-only-accumulates leads to "approve everything" fatigue.
+    pub fn effective_taint(&self) -> TaintFlags {
+        let mut t = self.taint;
+        for r in &self.taint_reductions {
+            t.remove(r.clears);
+        }
+        t
+    }
+
     /// Compute taint when crossing zones
     pub fn cross_zone(&self, target: &Zone) -> Self {
         let mut new = self.clone();
@@ -1241,17 +1476,21 @@ impl Provenance {
         out
     }
 
-    /// Check if operation is allowed given taint
+    /// Check if operation is allowed given taint (NORMATIVE)
+    ///
+    /// Uses effective_taint() which accounts for taint reductions.
     pub fn can_invoke(&self, operation: &Operation, target_zone: &Zone) -> TaintDecision {
+        let effective = self.effective_taint();
+
         // Rule 1: Public inputs cannot directly drive Dangerous ops
-        if self.taint.contains(TaintFlags::PUBLIC_INPUT)
+        if effective.contains(TaintFlags::PUBLIC_INPUT)
             && operation.safety_tier >= SafetyTier::Dangerous
         {
             return TaintDecision::Deny("Public-tainted input cannot invoke dangerous operations");
         }
 
         // Rule 2: Integrity uphill for risky ops requires elevation
-        if self.taint != TaintFlags::NONE
+        if effective != TaintFlags::NONE
             && operation.safety_tier >= SafetyTier::Risky
             && target_zone.integrity_level > self.origin_integrity
         {
@@ -1265,56 +1504,34 @@ impl Provenance {
 
 ### 6.3 Elevation Protocol
 
+Elevation (integrity uphill for tainted operations) now uses the unified `ApprovalToken` (§5.2) with `ApprovalScope::Elevation`.
+
 ```rust
-/// Elevation token for tainted operations (NORMATIVE)
-pub struct ElevationToken {
-    /// Token identifier
-    pub token_id: ObjectId,
-
-    /// What operation is elevated
-    pub operation: OperationId,
-
-    /// Original provenance
-    pub original_provenance: Provenance,
-
-    /// Who approved the elevation
-    pub approved_by: PrincipalId,
-
-    /// Approval timestamp
-    pub approved_at: u64,
-
-    /// Token expiry
-    pub expires_at: u64,
-
-    /// Signature from approver
-    pub signature: Signature,
-}
-
-impl ElevationToken {
-    /// Default TTL: 5 minutes
-    pub const DEFAULT_TTL_SECS: u64 = 300;
-
-    /// Create elevation token
-    pub fn create(
+/// Create an elevation approval (NORMATIVE)
+impl ApprovalToken {
+    pub fn create_elevation(
         operation: OperationId,
         provenance: &Provenance,
         approver: &Identity,
+        justification: &str,
         ttl: Option<u64>,
     ) -> Self {
         let now = current_timestamp();
         let expires_at = now + ttl.unwrap_or(Self::DEFAULT_TTL_SECS);
 
         let mut token = Self {
-            token_id: ObjectId::default(),  // Will be set after signing
-            operation,
-            original_provenance: provenance.clone(),
+            token_id: ObjectId::default(),
+            scope: ApprovalScope::Elevation {
+                operation,
+                original_provenance: provenance.clone(),
+            },
+            justification: justification.to_string(),
             approved_by: approver.principal_id(),
             approved_at: now,
             expires_at,
             signature: Signature::default(),
         };
 
-        // Sign and compute ID
         let signable = token.signable_bytes();
         token.signature = approver.sign(&signable);
         token.token_id = ObjectId::from_bytes(&signable);
@@ -1322,23 +1539,36 @@ impl ElevationToken {
         token
     }
 
-    /// Verify token is valid
-    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), VerifyError> {
-        // Check expiry
-        if current_timestamp() > self.expires_at {
-            return Err(VerifyError::Expired);
-        }
+    pub fn create_declassification(
+        from_zone: ZoneId,
+        to_zone: ZoneId,
+        object_ids: Vec<ObjectId>,
+        approver: &Identity,
+        justification: &str,
+        ttl: Option<u64>,
+    ) -> Self {
+        let now = current_timestamp();
+        let expires_at = now + ttl.unwrap_or(Self::DEFAULT_TTL_SECS);
 
-        // Verify approver authority
-        let approver_key = trust_anchors.get_principal_key(&self.approved_by)?;
-        approver_key.verify(&self.signable_bytes(), &self.signature)?;
+        let mut token = Self {
+            token_id: ObjectId::default(),
+            scope: ApprovalScope::Declassification {
+                from_zone,
+                to_zone,
+                object_ids,
+            },
+            justification: justification.to_string(),
+            approved_by: approver.principal_id(),
+            approved_at: now,
+            expires_at,
+            signature: Signature::default(),
+        };
 
-        // Verify approver has elevation authority
-        if !trust_anchors.can_approve_elevation(&self.approved_by) {
-            return Err(VerifyError::InsufficientAuthority);
-        }
+        let signable = token.signable_bytes();
+        token.signature = approver.sign(&signable);
+        token.token_id = ObjectId::from_bytes(&signable);
 
-        Ok(())
+        token
     }
 }
 ```
@@ -1358,7 +1588,8 @@ fcp.*                    Protocol/meta operations
 └── fcp.introspect       Query capabilities
 
 network.*                Network operations
-├── network.outbound:*   Outbound connections (host:port)
+├── network.egress       Outbound access via MeshNode egress proxy (DEFAULT in strict/moderate sandboxes)
+├── network.raw_outbound:* Direct sockets (RARE; permissive sandbox only)
 ├── network.inbound:*    Listen for connections
 └── network.dns          DNS resolution (explicit capability; policy surface)
 
@@ -1471,8 +1702,8 @@ pub enum ApprovalMode {
     Policy,
     /// Interactive human approval
     Interactive,
-    /// Requires elevation token
-    ElevationToken,
+    /// Requires ApprovalToken (elevation or other scope)
+    ApprovalRequired,
 }
 
 pub struct AgentHint {
@@ -1542,12 +1773,24 @@ pub struct CapabilityConstraints {
 
 /// Network/TLS constraints (NORMATIVE for sensitive connectors)
 ///
-/// Prevents DNS pivot and host confusion attacks.
+/// Prevents DNS pivot, SSRF, and host confusion attacks.
 pub struct NetworkConstraints {
     /// Allowed hostnames (exact or suffix match)
     pub host_allow: Vec<String>,
     /// Allowed ports
     pub port_allow: Vec<u16>,
+    /// Optional explicit IP allow-list
+    pub ip_allow: Vec<IpAddr>,
+    /// CIDR blocks denied by policy
+    /// NORMATIVE default includes: localhost (127.0.0.0/8, ::1), link-local (169.254.0.0/16),
+    /// RFC1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), and tailnet ranges (100.64.0.0/10)
+    pub cidr_deny: Vec<String>,
+    /// Deny localhost unless explicitly allowed (NORMATIVE default: true)
+    pub deny_localhost: bool,
+    /// Deny private ranges unless explicitly allowed (NORMATIVE default: true)
+    pub deny_private_ranges: bool,
+    /// Deny tailnet address ranges unless explicitly allowed (NORMATIVE default: true)
+    pub deny_tailnet_ranges: bool,
     /// Require SNI hostname match
     pub require_sni: bool,
     /// Optional SPKI pins (base64-encoded SHA256 of SubjectPublicKeyInfo)
@@ -1652,6 +1895,10 @@ pub struct CapabilityToken {
     /// Revocation head the issuer considered (NORMATIVE)
     /// Verifiers MUST have revocation state >= this head or fetch before acceptance.
     pub rev_head: ObjectId,
+
+    /// Monotonic revocation sequence at rev_head (NORMATIVE)
+    /// Enables O(1) freshness checks: verifier compares rev_seq, not chain traversal.
+    pub rev_seq: u64,
 
     /// Ed25519 signature (by iss_node's issuance key)
     pub sig: [u8; 64],
@@ -1769,21 +2016,23 @@ impl MeshNode {
         match decision {
             TaintDecision::Deny(reason) => return Err(Error::TaintViolation(reason)),
             TaintDecision::RequireElevation => {
-                if request.elevation_token.is_none() {
-                    return Err(Error::ElevationRequired);
-                }
-                request.elevation_token.as_ref().unwrap().verify(&self.trust_anchors)?;
+                // Find an elevation approval in the approval_tokens
+                let elevation = request.approval_tokens.iter()
+                    .find(|t| matches!(t.scope, ApprovalScope::Elevation { .. }))
+                    .ok_or(Error::ElevationRequired)?;
+                elevation.verify(&self.trust_anchors)?;
             }
             TaintDecision::Allow => {}
         }
 
         // 2d. Enforce confidentiality downgrades (NORMATIVE)
         // If the operation produces outputs into a zone with lower confidentiality than
-        // the data label, require a valid DeclassificationToken.
+        // the data label, require a valid declassification ApprovalToken.
         if self.operation_writes_to_lower_confidentiality(&request).await? {
-            let tok = request.declassification_token.as_ref()
+            let declass = request.approval_tokens.iter()
+                .find(|t| matches!(t.scope, ApprovalScope::Declassification { .. }))
                 .ok_or(Error::DeclassificationRequired)?;
-            tok.verify(&self.trust_anchors)?;
+            declass.verify(&self.trust_anchors)?;
         }
 
         // 2e. Acquire or validate execution lease (NORMATIVE)
@@ -1939,17 +2188,35 @@ FCP V2 supports two protocol modes:
 | `decode_status` | Any → Any | Feedback: how many symbols received / still needed |
 | `symbol_ack` | Any → Any | Stop condition for delivery (object reconstructed) |
 
-### 9.3 Control Plane as Objects (NORMATIVE)
+### 9.3 Control Plane Object Model (NORMATIVE)
 
-All control-plane messages (handshake/introspect/configure/invoke/response/subscribe/event/health/shutdown)
-MUST be represented as canonical CBOR objects with SchemaId and ObjectId. This makes all operations
-auditable, replayable, and content-addressed.
+All control-plane message types MUST have a canonical CBOR object representation with SchemaId/ObjectId.
+This makes all operations auditable, replayable, and content-addressed.
+
+**Storage is governed by retention class:**
+
+| Must Be Stored | May Be Ephemeral |
+|----------------|------------------|
+| invoke, response | health |
+| receipts | handshake, handshake_ack |
+| approvals (elevation, declassification) | decode_status |
+| secret access | symbol_ack |
+| revocations | introspect |
+| audit events/heads | configure |
 
 ```rust
 /// Control plane object wrapper (NORMATIVE)
 pub struct ControlPlaneObject {
     pub header: ObjectHeader,
     pub body: Vec<u8>, // canonical CBOR (schema-prefixed)
+}
+
+/// Retention class for control plane messages (NORMATIVE)
+pub enum ControlPlaneRetention {
+    /// Must be stored (invoke, response, receipts, approvals, audit)
+    Required,
+    /// May be ephemeral (health, decode_status, symbol_ack)
+    Ephemeral,
 }
 ```
 
@@ -1961,7 +2228,8 @@ When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
 1. Verify checksum
 2. Decrypt symbols
 3. Reconstruct the object payload (RAW chunking or RaptorQ)
-4. Verify schema and store the object (subject to retention policy)
+4. Verify schema
+5. Store object if retention class is Required; otherwise MAY discard after processing
 
 ### 9.4 Invoke Request/Response
 
@@ -1973,8 +2241,8 @@ pub struct InvokeRequest {
     pub input: Value,
     pub capability_token: CapabilityToken,
     pub provenance: Provenance,
-    pub elevation_token: Option<ElevationToken>,
-    pub declassification_token: Option<DeclassificationToken>,
+    /// Unified approval tokens for elevation and/or declassification
+    pub approval_tokens: Vec<ApprovalToken>,
     pub idempotency_key: Option<String>,
 
     /// Holder proof (NORMATIVE): binds presentation to holder_node in CapabilityToken
@@ -2140,6 +2408,61 @@ DISCOVERED → VERIFIED → INSTALLED → CONFIGURED → ACTIVE
 
 Connectors MUST implement:
 
+### 10.4 Connector State (NORMATIVE)
+
+Connectors with polling/cursors/dedup caches MUST externalize their canonical state into the mesh.
+Local `$CONNECTOR_STATE` is a **cache only** — the authoritative state lives as mesh objects.
+
+This enables:
+- **Safe failover**: Another node can resume from the last committed state
+- **Resumable polling**: Cursors survive node restarts and migrations
+- **Deterministic migration semantics**: State is explicit, not implicit in process memory
+
+```rust
+/// Stable root for connector state (NORMATIVE)
+pub struct ConnectorStateRoot {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    /// Latest ConnectorStateObject (or None if no state yet)
+    pub head: Option<ObjectId>,
+}
+
+/// Append-only connector state update (NORMATIVE)
+pub struct ConnectorStateObject {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    pub prev: Option<ObjectId>,
+    /// Monotonic sequence for ordering
+    pub seq: u64,
+    /// Canonical connector-specific state blob
+    pub state_cbor: Vec<u8>,
+    pub updated_at: u64,
+    /// Signature by executing node
+    pub signature: Signature,
+}
+```
+
+**Single-Writer Semantics (NORMATIVE):**
+
+For any connector declaring `singleton_writer = true` in its manifest, the MeshNode MUST ensure
+only one node writes `ConnectorStateObject` updates at a time. This is enforced using
+`ExecutionLease` over `ConnectorStateRoot.object_id` or an equivalent lease primitive.
+
+```toml
+# In connector manifest
+[connector]
+singleton_writer = true  # Only one node can write state at a time
+```
+
+This prevents:
+- Double-polling the same messages
+- Duplicate event processing
+- Cursor conflicts during migration
+
 | Method | Purpose |
 |--------|---------|
 | `handshake` | Bind to zone, negotiate protocol |
@@ -2230,6 +2553,22 @@ publisher_threshold = "2-of-3"
 registry_signature = { kid = "registry1", sig = "base64:..." }
 # Optional but RECOMMENDED: reference to transparency log entry
 transparency_log_entry = "objectid:..."
+
+[supply_chain]
+# First-class provenance attestations (RECOMMENDED)
+# Makes provenance machine-checkable, not just "signature valid"
+# e.g., in-toto statements with SLSA provenance predicates
+attestations = [
+  { type = "in-toto", object_id = "objectid:..." },
+  { type = "reproducible-build", object_id = "objectid:..." },
+]
+
+[policy]
+# Owner policy can require attestations and pin publisher roots
+require_transparency_log = true
+require_attestation_types = ["in-toto"]
+min_slsa_level = 2
+trusted_builders = ["github-actions", "internal-ci"]
 ```
 
 ### 11.2 Sandbox Profiles (NORMATIVE)
@@ -2261,6 +2600,15 @@ pub enum SandboxProfile {
     /// Minimal restrictions (only for highly trusted connectors)
     Permissive,
 }
+
+/// NORMATIVE: In Strict and Moderate profiles, connectors MUST NOT be granted raw socket syscalls.
+/// Network capabilities are implemented by a MeshNode-owned **egress proxy** enforcing NetworkConstraints.
+///
+/// This makes "no cross-connector calling" and "least privilege egress" mechanically enforceable:
+/// - Connectors talk to the proxy over capability-gated IPC
+/// - Proxy enforces host_allow, port_allow, cidr_deny, SNI, SPKI pins
+/// - No SSRF into localhost/tailnet/RFC1918 unless explicitly allowed
+/// - DNS resolution goes through proxy with policy checks
 
 impl SandboxConfig {
     /// Create OS-specific sandbox
@@ -2433,6 +2781,46 @@ pub struct ConnectorTransparencyLogEntry {
     /// Signature by publisher quorum or owner
     pub signature: Signature,
 }
+
+/// Supply chain attestation (NORMATIVE when policy requires attestations)
+///
+/// First-class, machine-checkable provenance statement.
+/// Makes "built from repo X at commit Y under workflow Z" enforceable.
+pub struct SupplyChainAttestation {
+    pub header: ObjectHeader,
+    pub attestation_type: AttestationType,
+    /// The connector binary this attestation covers
+    pub subject_binary: ObjectId,
+    /// Raw attestation payload (e.g., in-toto statement JSON)
+    pub payload: Vec<u8>,
+    /// Signature by builder/attestor
+    pub signature: Signature,
+}
+
+pub enum AttestationType {
+    /// in-toto provenance statement (SLSA-compatible)
+    InToto,
+    /// Reproducible build attestation
+    ReproducibleBuild,
+    /// Code review attestation
+    CodeReview,
+    /// Custom attestation type
+    Custom(String),
+}
+
+/// Owner policy for supply chain verification (NORMATIVE)
+pub struct SupplyChainPolicy {
+    /// Require transparency log entry
+    pub require_transparency_log: bool,
+    /// Required attestation types (all must be present)
+    pub require_attestation_types: Vec<AttestationType>,
+    /// Minimum SLSA level (0-4)
+    pub min_slsa_level: u8,
+    /// Trusted builder identities
+    pub trusted_builders: Vec<String>,
+    /// Trusted publisher key fingerprints
+    pub trusted_publishers: Vec<[u8; 32]>,
+}
 ```
 
 **Sovereignty Benefits:**
@@ -2443,13 +2831,16 @@ pub struct ConnectorTransparencyLogEntry {
 
 ### 13.2 Verification Chain
 
-Before execution, verify:
+Before execution, verify (NORMATIVE):
 1. Manifest signature (registry or trusted publisher quorum)
 2. Binary checksum matches manifest
 3. Binary signature matches trusted key
 4. Platform/arch match
 5. Requested capabilities ⊆ zone ceilings
-6. Optional: release is present in ConnectorTransparencyLog (if enabled)
+6. If `policy.require_transparency_log`: release is present in ConnectorTransparencyLog
+7. If `policy.require_attestation_types`: all required attestations present and valid
+8. If `policy.min_slsa_level > 0`: SLSA provenance meets minimum level
+9. If `policy.trusted_builders` non-empty: attestation from trusted builder
 
 ---
 
@@ -2500,6 +2891,9 @@ pub struct RevocationEvent {
     pub header: ObjectHeader,
     pub revocation_object_id: ObjectId,
     pub prev: Option<ObjectId>,
+    /// Monotonic chain sequence number (NORMATIVE)
+    /// Enables O(1) freshness comparison: seq_a > seq_b ⟹ a is fresher than b.
+    pub seq: u64,
     pub occurred_at: u64,
     pub signature: Signature,
 }
@@ -2512,6 +2906,9 @@ pub struct RevocationHead {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
     pub head_event: ObjectId,
+    /// Sequence number of head_event (NORMATIVE)
+    /// Enables O(1) freshness comparison without chain traversal.
+    pub head_seq: u64,
     pub epoch_id: EpochId,
     pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
 }
@@ -3194,6 +3591,75 @@ impl OfflineAccess {
 
 Based on user patterns, pre-stage symbols before needed.
 
+### 21.3 Background Repair (NORMATIVE)
+
+Nodes MUST periodically evaluate symbol coverage against `ObjectPlacementPolicy` and initiate repair.
+Without a placement/repair loop, symbol distribution drifts over time as devices churn.
+
+```rust
+/// Background repair controller (NORMATIVE)
+pub struct RepairController {
+    /// How often to run repair evaluation
+    pub interval: Duration,
+    /// Maximum symbols to repair per cycle (rate limiting)
+    pub max_repairs_per_cycle: u32,
+}
+
+impl RepairController {
+    /// Evaluate and repair symbol coverage (NORMATIVE)
+    pub async fn run_repair_cycle(&self, mesh: &MeshNode) -> RepairResult {
+        let mut repaired = 0;
+
+        for zone_id in mesh.active_zones() {
+            for object_id in mesh.objects_with_placement_policy(&zone_id) {
+                let policy = mesh.get_placement_policy(&object_id)?;
+                let coverage = mesh.evaluate_coverage(&object_id).await?;
+
+                // Check if repair needed
+                if coverage.distinct_nodes < policy.min_nodes as usize {
+                    // Fetch missing symbols from peers
+                    mesh.fetch_symbols_for_repair(&object_id).await?;
+                    repaired += 1;
+                }
+
+                if coverage.max_node_fraction > policy.max_node_fraction {
+                    // Re-distribute symbols to reduce concentration
+                    mesh.rebalance_symbols(&object_id, &policy).await?;
+                    repaired += 1;
+                }
+
+                if coverage.ratio < policy.target_coverage {
+                    // Generate and distribute repair symbols
+                    mesh.distribute_repair_symbols(&object_id, &policy).await?;
+                    repaired += 1;
+                }
+
+                if repaired >= self.max_repairs_per_cycle {
+                    break;
+                }
+            }
+        }
+
+        RepairResult { repaired }
+    }
+}
+
+/// Symbol coverage evaluation result
+pub struct CoverageEvaluation {
+    pub object_id: ObjectId,
+    /// Number of distinct nodes holding symbols
+    pub distinct_nodes: usize,
+    /// Highest fraction of symbols on any single node
+    pub max_node_fraction: f64,
+    /// Coverage ratio: symbols_available / symbols_needed
+    pub ratio: f64,
+    /// Can object be reconstructed with current coverage?
+    pub is_available: bool,
+}
+```
+
+This is what turns "offline resilience" from a slogan into a quantifiable SLO.
+
 ---
 
 ## 22. Agent Integration
@@ -3270,6 +3736,8 @@ pub struct AuditEvent {
     pub result_object_id: Option<ObjectId>,
     /// Previous event in chain (hash link)
     pub prev: Option<ObjectId>,
+    /// Monotonic chain sequence number (NORMATIVE)
+    pub seq: u64,
     /// When event occurred
     pub occurred_at: u64,
     /// Signature by executing node
@@ -3283,6 +3751,8 @@ pub struct AuditHead {
     pub zone_id: ZoneId,
     /// Head event ObjectId
     pub head_event: ObjectId,
+    /// Sequence number of head_event (NORMATIVE)
+    pub head_seq: u64,
     /// Fraction of expected nodes contributing
     pub coverage: f64,
     /// Epoch this head was checkpointed
@@ -3294,6 +3764,24 @@ pub struct AuditHead {
 
 **Quorum Rule (default):** CriticalWrite requires n - f signatures (see §18).
 Nodes MUST refuse to advance AuditHead if quorum is not satisfied, unless in explicit degraded mode.
+
+```rust
+/// Frontier checkpoint for fast sync (NORMATIVE)
+///
+/// Compact checkpoint of zone state for efficient synchronization.
+/// Nodes can compare frontiers to quickly determine staleness.
+pub struct ZoneFrontier {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub rev_head: ObjectId,
+    pub rev_seq: u64,
+    pub audit_head: ObjectId,
+    pub audit_seq: u64,
+    pub as_of_epoch: EpochId,
+    /// Signature by executing node
+    pub signature: Signature,
+}
+```
 
 **Fork Detection:** Nodes discovering multiple heads for the same epoch MUST:
 1. Log the fork event
