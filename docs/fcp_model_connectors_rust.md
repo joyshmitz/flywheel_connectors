@@ -1,9 +1,10 @@
 # FCP Model Connectors (Rust) - V2
 
-## Canonical, Spec-Accurate Reference Patterns for FCP V2
+## Canonical, Spec-Accurate Reference for FCP V2 Connectors
 
-> Purpose: Provide Rust-oriented, spec-accurate connector patterns that match FCP Specification V2.
+> Purpose: Provide a Rust-focused connector guide aligned exactly to FCP Specification V2.
 > Version: 2.0.0
+> Status: Draft
 > Last Updated: 2026-01-12
 > License: MIT
 > Canonical Spec: FCP_Specification_V2.md
@@ -13,34 +14,38 @@
 ## Table of Contents
 
 1. Scope and Alignment
-2. Connector Model (V2)
+2. Connector Model and Lifecycle (V2)
 3. Control-Plane Protocol (FCP2-SYM)
 4. Canonical Types and Serialization
-5. Zones, Provenance, Taint, Elevation, Declassification
-6. Capability System and Tokens
-7. Control-Plane Objects: Invoke, Events, Errors
-8. Connector Manifest (TOML) and Embedding
-9. Sandbox and Resource Limits
-10. Connector Archetypes (V2) and Reference Patterns
-11. Rust Connector Skeleton (SDK-aligned)
-12. Streaming, Replay, and Acks
-13. Idempotency, Rate Limits, and Receipts
-14. Observability and Audit
-15. Conformance Checklist (Connector)
+5. Zones, Declassification, Provenance, Taint, Elevation
+6. Capability System
+7. Invoke, Receipts, and Event Envelopes
+8. Streaming, Replay, and Acks
+9. Error Taxonomy
+10. Connector Manifest (TOML) and Embedding
+11. Sandbox Profiles and Enforcement
+12. Automation Recipes and Provisioning Interface
+13. Registry and Supply Chain
+14. Lifecycle Management and Revocation
+15. Device-Aware Execution and Execution Leases
+16. Observability and Audit
+17. Connector Archetypes (V2) and Patterns
+18. Rust Connector Skeleton (SDK-aligned)
+19. Conformance Checklist (Connector)
 
 ---
 
 ## 1. Scope and Alignment
 
-- This document is a Rust-focused view of the FCP V2 connector model.
+- This document covers connector-facing requirements from FCP Specification V2.
 - Canonical protocol mode is FCP2-SYM (FCPS frames + RaptorQ). FCP1 CBOR/JSON-RPC is compatibility only.
-- All normative requirements use MUST/SHOULD/MAY in the RFC 2119 sense and are aligned to FCP Specification V2 (2026-01-12).
+- All normative language uses MUST/SHOULD/MAY in the RFC 2119 sense.
 
 ---
 
-## 2. Connector Model (V2)
+## 2. Connector Model and Lifecycle (V2)
 
-Connectors are sandboxed binaries that bridge external services to FCP.
+Connectors are sandboxed binaries that bridge external services to FCP:
 
 ```rust
 /// Connector definition (NORMATIVE)
@@ -99,13 +104,22 @@ pub enum ConnectorFormat {
 }
 ```
 
+Connector lifecycle:
+
+```
+DISCOVERED -> VERIFIED -> INSTALLED -> CONFIGURED -> ACTIVE
+         -> rejected                      -> FAILED
+                                          -> PAUSED
+                                          -> STOPPED
+```
+
+Connectors MUST NOT call other connectors directly; all composition happens through the mesh.
+
 ---
 
 ## 3. Control-Plane Protocol (FCP2-SYM)
 
 ### 3.1 Protocol Modes
-
-FCP V2 supports two protocol modes:
 
 | Mode | Encoding | Use Case |
 |------|----------|----------|
@@ -116,22 +130,22 @@ FCP V2 supports two protocol modes:
 
 | Type | Direction | Purpose |
 |------|-----------|---------|
-| `handshake` | Hub/Gateway -> Connector | Establish connection |
-| `handshake_ack` | Connector -> Hub/Gateway | Confirm connection |
-| `introspect` | Hub/Gateway -> Connector | Query operations |
-| `configure` | Hub/Gateway -> Connector | Apply configuration |
-| `invoke` | Hub/Gateway -> Connector | Execute operation |
-| `response` | Connector -> Hub/Gateway | Operation result |
-| `subscribe` | Hub/Gateway -> Connector | Subscribe to events |
-| `event` | Connector -> Hub/Gateway | Async event |
-| `health` | Hub/Gateway <-> Connector | Health check |
-| `shutdown` | Hub/Gateway -> Connector | Graceful shutdown |
+| `handshake` | Hub -> Connector | Establish connection |
+| `handshake_ack` | Connector -> Hub | Confirm connection |
+| `introspect` | Hub -> Connector | Query operations |
+| `configure` | Hub -> Connector | Apply configuration |
+| `invoke` | Hub -> Connector | Execute operation |
+| `response` | Connector -> Hub | Operation result |
+| `subscribe` | Hub -> Connector | Subscribe to events |
+| `event` | Connector -> Hub | Async event |
+| `health` | Hub <-> Connector | Health check |
+| `shutdown` | Hub -> Connector | Graceful shutdown |
 | `symbol_request` | Any -> Any | Request symbols (mesh) |
 | `symbol_delivery` | Any -> Any | Deliver symbols (mesh) |
 | `decode_status` | Any -> Any | Feedback: received/needed symbols |
 | `symbol_ack` | Any -> Any | Stop condition for delivery |
 
-### 3.3 Standard Methods (Connector Requirements)
+### 3.3 Standard Methods
 
 Connectors MUST implement:
 
@@ -150,7 +164,8 @@ Connectors that emit events MUST also support `subscribe` and `event` control-pl
 
 ### 3.4 Control-Plane as Objects (NORMATIVE)
 
-All control-plane messages are canonical CBOR objects with SchemaId and ObjectId.
+All control-plane messages (handshake/introspect/configure/invoke/response/subscribe/event/health/shutdown)
+MUST be represented as canonical CBOR objects with SchemaId and ObjectId.
 
 ```rust
 /// Control plane object wrapper (NORMATIVE)
@@ -165,7 +180,8 @@ Transport options:
 1. Local/IPC: canonical CBOR bytes over the connector transport.
 2. Mesh: encoded to symbols and sent inside FCPS frames with `FrameFlags::CONTROL_PLANE`.
 
-When `FrameFlags::CONTROL_PLANE` is set, receivers MUST verify checksum, decrypt symbols, reconstruct the object, verify schema, and store the object (subject to retention policy).
+When `FrameFlags::CONTROL_PLANE` is set, receivers MUST verify checksum, decrypt symbols, reconstruct the object,
+verify schema, and store the object (subject to retention policy).
 
 ---
 
@@ -209,7 +225,7 @@ Security objects MUST use `ObjectId::new(content, zone, schema, key)`:
 - DeviceEnrollment, NodeKeyAttestation
 - Any object used as an authority anchor or enforcement input
 
-### 4.2 Canonical Serialization
+### 4.2 Canonical CBOR Serialization
 
 ```rust
 /// Canonical CBOR serialization (NORMATIVE)
@@ -265,7 +281,7 @@ pub enum RetentionClass {
 
 ---
 
-## 5. Zones, Provenance, Taint, Elevation, Declassification
+## 5. Zones, Declassification, Provenance, Taint, Elevation
 
 ### 5.1 Zone
 
@@ -285,9 +301,10 @@ pub struct Zone {
 
 ### 5.2 Declassification Token
 
-Used for confidentiality downgrades (e.g., z:private -> z:public).
+Used when moving data from higher confidentiality to lower confidentiality (e.g., z:private -> z:public).
 
 ```rust
+/// Declassification token for confidentiality downgrades (NORMATIVE)
 pub struct DeclassificationToken {
     pub token_id: ObjectId,
     pub from_zone: ZoneId,
@@ -318,6 +335,7 @@ pub struct Provenance {
 }
 
 bitflags! {
+    /// Taint flags (NORMATIVE)
     pub struct TaintFlags: u32 {
         const NONE            = 0;
         const PUBLIC_INPUT    = 1 << 0;
@@ -335,12 +353,11 @@ pub struct ZoneCrossing {
     pub crossed_at: u64,
     pub authorized_by: Option<ObjectId>,
 }
-
-impl Provenance {
-    pub fn merge(inputs: &[Provenance]) -> Provenance { /* NORMATIVE */ }
-    pub fn can_invoke(&self, operation: &Operation, target_zone: &Zone) -> TaintDecision { /* NORMATIVE */ }
-}
 ```
+
+Taint decisions are enforced before invocation. Public-tainted input cannot directly drive Dangerous operations;
+Risky operations with tainted inputs require elevation; cross-zone movement updates `current_zone` and records
+zone crossings.
 
 ### 5.4 Elevation Token
 
@@ -359,13 +376,12 @@ pub struct ElevationToken {
 
 Connector implications:
 
-- The MeshNode/Gateway enforces taint, elevation, and declassification before invoking a connector.
-- Connectors MUST preserve provenance on outputs and events and MUST NOT drop taint flags.
-- If a connector merges inputs, it MUST merge provenance per the spec.
+- All outputs and events MUST preserve provenance and taint.
+- Connectors MUST NOT drop or reset taint flags.
 
 ---
 
-## 6. Capability System and Tokens
+## 6. Capability System
 
 ### 6.1 Capability Taxonomy (Non-exhaustive)
 
@@ -414,7 +430,7 @@ pub struct AgentHint {
 }
 ```
 
-### 6.3 Capability Objects and Constraints
+### 6.3 Capability Object and Constraints
 
 ```rust
 pub struct CapabilityObject {
@@ -466,6 +482,7 @@ pub struct PlacementPolicy {
 ### 6.5 Capability Token (FCT)
 
 ```rust
+/// Capability Token for operation invocation (NORMATIVE)
 pub struct CapabilityToken {
     pub jti: Uuid,
     pub sub: PrincipalId,
@@ -484,11 +501,12 @@ pub struct CapabilityToken {
 }
 ```
 
-Token verification MUST use the node issuance public key (not the node signing key), and the issuing node MUST have a valid `NodeKeyAttestation`.
+Token verification MUST use the node issuance public key (not the node signing key). Issuance keys are
+separately revocable.
 
 ---
 
-## 7. Control-Plane Objects: Invoke, Events, Errors
+## 7. Invoke, Receipts, and Event Envelopes
 
 ### 7.1 Invoke Request/Response
 
@@ -502,7 +520,9 @@ pub struct InvokeRequest {
     pub elevation_token: Option<ElevationToken>,
     pub declassification_token: Option<DeclassificationToken>,
     pub idempotency_key: Option<String>,
-    pub holder_proof: Signature, // NORMATIVE
+
+    /// Holder proof (NORMATIVE): binds request to holder_node in CapabilityToken
+    pub holder_proof: Signature,
 }
 
 pub struct InvokeResponse {
@@ -510,15 +530,17 @@ pub struct InvokeResponse {
     pub result: Value,
     pub resource_uris: Vec<String>,
     pub next_cursor: Option<String>,
+    /// Receipt ObjectId (for operations with side effects)
     pub receipt: Option<ObjectId>,
 }
 ```
 
-The holder proof binds the request to the `holder_node` in the token and prevents replay by other nodes.
+The holder proof prevents token replay by anyone other than the designated holder.
 
 ### 7.2 Operation Receipt
 
 ```rust
+/// Operation receipt object (NORMATIVE)
 pub struct OperationReceipt {
     pub header: ObjectHeader,
     pub request_object_id: ObjectId,
@@ -547,7 +569,20 @@ pub struct EventEnvelope {
 }
 ```
 
-### 7.4 Error Taxonomy
+---
+
+## 8. Streaming, Replay, and Acks
+
+Event streaming requirements:
+
+- Event envelopes include `topic`, `seq`, `cursor`, and `requires_ack` fields.
+- If `requires_ack` is true, the consumer MUST ack; connectors SHOULD track delivery state.
+- When `event_caps.replay = true`, connectors MUST support replay from a cursor.
+- `event_caps.min_buffer_events` sets the minimum replay buffer size.
+
+---
+
+## 9. Error Taxonomy
 
 ```rust
 pub struct FcpError {
@@ -575,9 +610,9 @@ FCP-9000..9999  Internal errors
 
 ---
 
-## 8. Connector Manifest (TOML) and Embedding
+## 10. Connector Manifest (TOML) and Embedding
 
-Manifest format is normative. Example:
+### 10.1 Manifest Structure (NORMATIVE)
 
 ```toml
 [manifest]
@@ -651,7 +686,9 @@ registry_signature = { kid = "registry1", sig = "base64:..." }
 transparency_log_entry = "objectid:..."
 ```
 
-Manifest embedding (MUST be extractable without execution):
+### 10.2 Manifest Embedding (NORMATIVE)
+
+Manifests MUST be extractable without execution:
 
 - ELF: `.fcp_manifest`
 - Mach-O: `__FCP,__manifest`
@@ -661,9 +698,10 @@ Connectors MUST implement `--manifest` to print the embedded manifest.
 
 ---
 
-## 9. Sandbox and Resource Limits
+## 11. Sandbox Profiles and Enforcement
 
 ```rust
+/// Sandbox configuration from manifest (NORMATIVE)
 pub struct SandboxConfig {
     pub profile: SandboxProfile,
     pub memory_mb: u32,
@@ -676,44 +714,248 @@ pub struct SandboxConfig {
 }
 
 pub enum SandboxProfile {
+    /// Maximum restrictions (recommended for untrusted connectors)
     Strict,
-    StrictPlus, // microVM-backed where available
+    /// Maximum isolation (Linux): microVM-backed sandbox for high-risk connectors (NORMATIVE where available)
+    StrictPlus,
+    /// Balanced restrictions (default)
     Moderate,
+    /// Minimal restrictions (only for highly trusted connectors)
     Permissive,
 }
 ```
 
 Enforcement:
 
-- Resource limits are enforced by the OS sandbox.
+- Resource limits (memory, CPU, time) are enforced by the OS sandbox.
 - Filesystem access is limited to declared paths.
 - Network access is limited to declared capabilities and constraints.
 - Child process spawning and debugging/tracing can be denied.
 
 ---
 
-## 10. Connector Archetypes (V2) and Reference Patterns
+## 12. Automation Recipes and Provisioning Interface
 
-### 10.1 V2 Archetypes (Manifest `archetypes`)
+### 12.1 Recipe Model
 
-- **Bidirectional**: Send/receive messages. Examples: chat protocols, collaborative apps.
-- **Streaming**: Emit events (read-only). Examples: webhooks, SSE, log tailing.
-- **Operational**: Execute operations (request/response). Examples: REST, GraphQL, gRPC-unary.
-- **Storage**: Store/retrieve data. Examples: S3, GCS, local storage.
-- **Knowledge**: Search/index/answer. Examples: note search, doc retrieval.
+Recipes are deterministic step lists for connector setup:
+
+```toml
+[recipe]
+id = "telegram/setup"
+version = "1"
+description = "Set up Telegram bot integration"
+
+[[steps]]
+type = "prompt_user"
+id = "bot_name"
+message = "Choose a Telegram bot name"
+
+[[steps]]
+type = "open_url"
+requires_approval = true
+url = "https://t.me/BotFather"
+
+[[steps]]
+type = "prompt_secret"
+id = "bot_token"
+message = "Paste the Telegram bot token"
+
+[[steps]]
+type = "store_secret"
+key = "telegram.bot_token"
+value_from = "bot_token"
+scope = "connector:fcp.telegram"
+```
+
+### 12.2 Provisioning Interface
+
+| Operation | Purpose |
+|-----------|---------|
+| `fcp.provision.start` | Begin auth flow |
+| `fcp.provision.poll` | Check status |
+| `fcp.provision.complete` | Finalize credentials |
+| `fcp.provision.abort` | Cancel and cleanup |
+
+---
+
+## 13. Registry and Supply Chain
+
+### 13.1 Registry Sources (NORMATIVE)
+
+Registries are sources, not dependencies. Implementations MUST support at least one of:
+
+1. Remote registry (HTTP) - public registry like registry.flywheel.dev
+2. Self-hosted registry (HTTP) - enterprise/private registry
+3. Mesh mirror registry - connectors pinned as objects in z:owner or z:private
+
+Connector binaries MUST be content-addressed objects and MAY be distributed via the symbol layer.
+
+```rust
+/// Registry source configuration (NORMATIVE)
+pub enum RegistrySource {
+    Remote { url: Url, trusted_keys: Vec<Ed25519PublicKey> },
+    SelfHosted { url: Url, trusted_keys: Vec<Ed25519PublicKey> },
+    MeshMirror { zone: ZoneId, index_object_id: ObjectId },
+}
+```
+
+### 13.2 Transparency Log (Optional, NORMATIVE if enabled)
+
+```rust
+pub struct ConnectorTransparencyLogEntry {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub version: Version,
+    pub manifest_object_id: ObjectId,
+    pub binary_object_id: ObjectId,
+    pub prev: Option<ObjectId>,
+    pub published_at: u64,
+    pub signature: Signature,
+}
+```
+
+### 13.3 Verification Chain
+
+Before execution, verify:
+
+1. Manifest signature (registry or trusted publisher quorum)
+2. Binary checksum matches manifest
+3. Binary signature matches trusted key
+4. Platform/arch match
+5. Requested capabilities are within zone ceilings
+6. Optional: release present in transparency log (if enabled)
+
+---
+
+## 14. Lifecycle Management and Revocation
+
+### 14.1 Activation Requirements
+
+On activation:
+
+1. Create sandbox
+2. Inject secrets ephemerally
+3. Negotiate handshake
+4. Issue capability tokens
+5. Start health checks
+
+### 14.2 Updates and Rollback
+
+- Staged updates
+- Automatic rollback on crash loops
+- Explicit pinning to known-good versions
+
+### 14.3 Revocation (NORMATIVE)
+
+Revocations are mesh objects and MUST be enforced before use.
+
+```rust
+/// Revocation object (NORMATIVE)
+pub struct RevocationObject {
+    pub header: ObjectHeader,
+    pub revoked: Vec<ObjectId>,
+    pub scope: RevocationScope,
+    pub reason: String,
+    pub effective_at: u64,
+    pub expires_at: Option<u64>,
+    pub signature: Signature,
+}
+
+pub enum RevocationScope {
+    Capability,
+    IssuerKey,
+    NodeAttestation,
+    ZoneKey,
+    ConnectorBinary,
+}
+```
+
+**Enforcement points (NORMATIVE):**
+
+1. Before accepting a capability token
+2. Before executing an operation
+3. Before accepting symbols for audit head updates
+4. Before using zone keys
+5. On connector startup
+
+---
+
+## 15. Device-Aware Execution and Execution Leases
+
+Execution leases prevent duplicate side effects and stabilize migration:
+
+```rust
+/// Execution lease (NORMATIVE)
+pub struct ExecutionLease {
+    pub header: ObjectHeader,
+    pub request_object_id: ObjectId,
+    pub owner_node: TailscaleNodeId,
+    pub iat: u64,
+    pub exp: u64,
+    pub signature: Signature,
+}
+```
+
+Lease semantics:
+
+- For Risky/Dangerous operations, execution MUST require a valid lease.
+- The executing node MUST present the lease to run the connector operation.
+- If the node dies, the lease expires and another node can acquire.
+
+---
+
+## 16. Observability and Audit
+
+Metrics (NORMATIVE):
+
+- Request counts, latencies, error rates
+- Resource usage
+- Rate-limit denials
+- Zone/taint denials
+
+Structured logs MUST:
+
+- Be JSON
+- Redact secrets
+- Include `correlation_id`, `zone_id`, and `connector_id`
+- Include `operation_id` when applicable
+
+Audit events MUST be recorded for:
+
+- Secret access
+- High-risk capability use
+- Approvals/elevations
+- Zone transitions
+- Security violations
+
+Audit chain (per zone) is append-only and hash-linked. Audit heads are quorum-signed; nodes MUST refuse to
+advance an audit head without quorum unless explicitly in degraded mode.
+
+---
+
+## 17. Connector Archetypes (V2) and Patterns
+
+### 17.1 V2 Archetypes (Manifest `archetypes`)
+
+- Bidirectional: send and receive messages
+- Streaming: emit events (read-only)
+- Operational: execute operations (request/response)
+- Storage: store/retrieve data
+- Knowledge: search/index/answer
 
 Only these values are valid in `connector.archetypes`.
 
-### 10.2 Interaction Patterns (Non-archetype)
+### 17.2 Interaction Pattern Mapping (Non-archetype)
 
-These patterns are helpful for design, but MUST map to V2 archetypes in the manifest:
+These patterns MUST map to V2 archetypes in the manifest:
 
 - Request/Response -> Operational
 - Polling -> Operational (often paired with Streaming events)
-- Webhook -> Streaming (and/or Operational for ack/side effects)
-- Queue/Pub-Sub -> Bidirectional or Streaming depending on the API
+- Webhook -> Streaming (and/or Operational for acknowledgments)
+- Queue/Pub-Sub -> Bidirectional or Streaming depending on API
 
-### 10.3 Reference Connector Patterns (Appendix C)
+### 17.3 Reference Connector Patterns (Appendix C)
 
 | Pattern | Description | Examples |
 |---------|-------------|----------|
@@ -724,36 +966,22 @@ These patterns are helpful for design, but MUST map to V2 archetypes in the mani
 
 ---
 
-## 11. Rust Connector Skeleton (SDK-aligned)
+## 18. Rust Connector Skeleton (SDK-aligned)
 
-### 11.1 Toolchain
+### 18.1 Toolchain Requirements
 
 - Rust edition: 2024 (nightly required)
 - Cargo only
 - `#![forbid(unsafe_code)]`
 
-### 11.2 Crate Layout
-
-```
-connectors/myservice/
-├── Cargo.toml
-└── src/
-    ├── lib.rs
-    ├── connector.rs
-    ├── ops/
-    ├── events/
-    └── error.rs
-```
-
-### 11.3 Minimal Skeleton
+### 18.2 Minimal Skeleton (Control-Plane Object Dispatch)
 
 ```rust
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
 use fcp_core::{
-    Connector, ControlPlaneObject, FcpError, InvokeRequest, InvokeResponse,
-    EventEnvelope, ObjectId, Provenance,
+    Connector, ControlPlaneObject, FcpError,
 };
 
 #[async_trait]
@@ -763,7 +991,7 @@ pub trait FcpConnector {
 }
 
 pub struct MyConnector {
-    // client handles, config, caches
+    // clients, config, caches
 }
 
 #[async_trait]
@@ -774,67 +1002,30 @@ impl FcpConnector for MyConnector {
     }
 
     async fn handle_control_plane(&self, obj: ControlPlaneObject) -> Result<ControlPlaneObject, FcpError> {
-        // Dispatch by SchemaId from obj.header.schema
+        // Dispatch by SchemaId from obj.header.schema:
         // handshake | describe | introspect | capabilities | configure | invoke | subscribe | health | shutdown
         unimplemented!()
     }
 }
 ```
 
-Guidance:
+Implementation notes:
 
 - Dispatch on SchemaId, not JSON method strings.
-- Validate all inputs against the declared schemas in the manifest.
-- Enforce idempotency and rate limits within the connector for operations that require it.
-- Preserve and propagate provenance on all outputs and events.
+- Validate inputs against the manifest schemas.
+- Enforce Strict idempotency when required; return prior receipts on duplicate idempotency_key.
+- Preserve provenance on outputs and events.
 
 ---
 
-## 12. Streaming, Replay, and Acks
+## 19. Conformance Checklist (Connector)
 
-- Event streams use `EventEnvelope { topic, seq, cursor, requires_ack, data }`.
-- `seq` MUST be monotonically increasing per topic.
-- `cursor` MUST be opaque and stable for replay.
-- If `requires_ack` is true, the consumer MUST ack via the control-plane schema defined in the SDK (connector should track delivery state).
-
-Manifest flags:
-
-```toml
-[event_caps]
-streaming = true
-replay = true
-min_buffer_events = 10000
-```
-
----
-
-## 13. Idempotency, Rate Limits, and Receipts
-
-- `SafetyTier::Dangerous` -> `IdempotencyClass::Strict` (MUST).
-- `SafetyTier::Risky` -> `IdempotencyClass::Strict` (SHOULD).
-- Use `idempotency_key` to dedupe and return the prior `OperationReceipt`.
-- Receipts are content-addressed objects stored via the symbol layer and referenced in `InvokeResponse.receipt`.
-
----
-
-## 14. Observability and Audit
-
-Connectors MUST:
-
-- Emit structured logs (JSON) with `correlation_id`, `zone_id`, `connector_id`, `operation_id`.
-- Redact secrets and PII.
-- Emit audit events for secret access, high-risk operations, approvals/elevations, and zone transitions (via the Gateway/Mesh).
-
----
-
-## 15. Conformance Checklist (Connector)
-
-**Connector MUST:**
+Connector MUST:
 
 - Implement `--manifest` flag.
 - Implement standard methods: `handshake`, `describe`, `introspect`, `capabilities`, `configure`, `invoke`, `health`, `shutdown`.
-- Support event cursors and replay (when streaming).
-- Declare capabilities in the manifest.
+- Support event cursors and replay when streaming.
+- Declare required/optional/forbidden capabilities in the manifest.
 - Validate inputs.
 - Never log secrets.
 - Include AI hints for operations.
@@ -843,5 +1034,5 @@ Connectors MUST:
 
 ## Notes
 
-- This document intentionally avoids FCP1-only constructs unless explicitly labeled as compatibility.
+- This document intentionally avoids FCP1-only constructs except where marked as compatibility.
 - For mesh, symbol, audit, and trust-anchor details, refer to `FCP_Specification_V2.md`.
