@@ -268,6 +268,14 @@ pub struct ControlPlaneObject {
     pub header: ObjectHeader,
     pub body: Vec<u8>, // canonical CBOR (schema-prefixed)
 }
+
+/// Retention class for control plane messages (NORMATIVE)
+pub enum ControlPlaneRetention {
+    /// Must be stored (invoke, response, receipts, approvals, audit)
+    Required,
+    /// May be ephemeral (health, decode_status, symbol_ack)
+    Ephemeral,
+}
 ```
 
 Transport options:
@@ -275,8 +283,12 @@ Transport options:
 1. Local/IPC: canonical CBOR bytes over the connector transport.
 2. Mesh: encoded to symbols and sent inside FCPS frames with `FrameFlags::CONTROL_PLANE`.
 
-When `FrameFlags::CONTROL_PLANE` is set, receivers MUST verify checksum, decrypt symbols, reconstruct the object,
-verify schema, and store the object (subject to node-local retention policy).
+When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
+1. Verify checksum
+2. Decrypt symbols
+3. Reconstruct the object payload (RAW chunking or RaptorQ)
+4. Verify schema
+5. Store the object if retention class is Required; otherwise MAY discard after processing
 
 ### 3.5 Session Authentication (NORMATIVE)
 
@@ -342,7 +354,7 @@ Signed frames MAY still be used for bootstrap/degraded mode, but high-throughput
 |----------------|------------------|
 | invoke, response | health |
 | receipts | handshake, handshake_ack |
-| approvals (elevation, declassification) | decode_status |
+| approvals (ApprovalToken) | decode_status |
 | secret access | symbol_ack |
 | revocations | introspect |
 | audit events/heads | configure |
@@ -1170,13 +1182,17 @@ First-class provenance attestations make supply chain verification machine-check
 
 ```rust
 /// Supply chain attestation (NORMATIVE when present)
+///
+/// First-class, machine-checkable provenance statement.
+/// Makes "built from repo X at commit Y under workflow Z" enforceable.
 pub struct SupplyChainAttestation {
     pub header: ObjectHeader,
-    pub connector_id: ConnectorId,
-    pub version: Version,
     pub attestation_type: AttestationType,
-    /// Canonical attestation payload (e.g., in-toto Statement JSON)
+    /// The connector binary this attestation covers
+    pub subject_binary: ObjectId,
+    /// Raw attestation payload (e.g., in-toto statement JSON)
     pub payload: Vec<u8>,
+    /// Signature by builder/attestor
     pub signature: Signature,
 }
 
@@ -1258,25 +1274,84 @@ On activation:
 ### 15.3 Revocation (NORMATIVE)
 
 Revocations are mesh objects and MUST be enforced before use.
+Without revocation, "compromised device" recovery is mostly imaginary.
 
 ```rust
 /// Revocation object (NORMATIVE)
 pub struct RevocationObject {
     pub header: ObjectHeader,
+    /// ObjectIds being revoked
     pub revoked: Vec<ObjectId>,
+    /// Scope of revocation
     pub scope: RevocationScope,
+    /// Human-readable reason
     pub reason: String,
+    /// When revocation becomes effective
     pub effective_at: u64,
+    /// Optional expiry (None = permanent)
     pub expires_at: Option<u64>,
+    /// Owner signature (revocations MUST be owner-signed)
     pub signature: Signature,
 }
 
+/// Revocation event chain node (NORMATIVE)
+///
+/// Hash-linked chain for revocation freshness.
+pub struct RevocationEvent {
+    pub header: ObjectHeader,
+    pub revocation_object_id: ObjectId,
+    pub prev: Option<ObjectId>,
+    /// Monotonic chain sequence number (NORMATIVE)
+    /// Enables O(1) freshness comparison: seq_a > seq_b ⟹ a is fresher than b.
+    pub seq: u64,
+    pub occurred_at: u64,
+    pub signature: Signature,
+}
+
+/// Revocation head checkpoint (NORMATIVE)
+///
+/// Enables freshness semantics: tokens bound to a rev_head, verifiers MUST
+/// have revocation state >= that head before accepting the token.
+pub struct RevocationHead {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub head_event: ObjectId,
+    /// Sequence number of head_event (NORMATIVE)
+    /// Enables O(1) freshness comparison without chain traversal.
+    pub head_seq: u64,
+    pub epoch_id: EpochId,
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
+
 pub enum RevocationScope {
+    /// Revoke capability objects/tokens
     Capability,
+    /// Revoke issuer keys (node can no longer mint tokens)
     IssuerKey,
+    /// Revoke node attestation (removes device from mesh)
     NodeAttestation,
+    /// Revoke zone key (forces rotation)
     ZoneKey,
+    /// Revoke connector binary (supply chain response)
     ConnectorBinary,
+}
+
+/// Revocation registry (NORMATIVE)
+pub struct RevocationRegistry {
+    revocations: HashMap<ObjectId, RevocationObject>,
+    bloom_filter: BloomFilter, // Fast negative lookup
+    /// Latest revocation head known for this zone
+    pub head: Option<ObjectId>,
+}
+
+impl RevocationRegistry {
+    /// Check if object is revoked (MUST be called before use)
+    pub fn is_revoked(&self, object_id: &ObjectId) -> bool {
+        if !self.bloom_filter.might_contain(object_id.as_bytes()) {
+            return false; // Fast path: definitely not revoked
+        }
+        self.revocations.contains_key(object_id)
+    }
 }
 ```
 
