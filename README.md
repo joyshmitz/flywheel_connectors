@@ -20,6 +20,8 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 
 **This is not a cloud alternative. This is digital sovereignty.**
 
+**Registry Note**: Registries are just sources of signed manifests/binaries. Your mesh can mirror and pin connectors as content-addressed objects so installs/updates work offline and without upstream dependency.
+
 ### Three Foundational Axioms
 
 | Axiom | Principle |

@@ -172,10 +172,41 @@ pub struct MeshIdentity {
     /// ACL tags assigned to this node
     pub tags: Vec<String>,
 
-    /// Device's owner key (for capability verification)
+    /// Owner root public key (trust anchor)
     pub owner_pubkey: Ed25519PublicKey,
+
+    /// Node signing public key (used for SignedSymbolEnvelope, gossip auth, receipts)
+    pub node_sig_pubkey: Ed25519PublicKey,
+
+    /// Owner-signed attestation binding node_id ↔ node_sig_pubkey ↔ tags
+    pub node_attestation: NodeKeyAttestation,
+}
+
+/// Owner-signed binding of node identity to a signing key (NORMATIVE)
+pub struct NodeKeyAttestation {
+    /// Tailscale node being attested
+    pub node_id: TailscaleNodeId,
+    /// Node's signing public key
+    pub node_sig_pubkey: Ed25519PublicKey,
+    /// Authorized ACL tags for this node
+    pub tags: Vec<String>,
+    /// When attestation was issued
+    pub issued_at: u64,
+    /// Optional expiry (None = no expiry)
+    pub expires_at: Option<u64>,
+    /// Signature by owner private key
+    pub signature: Signature,
 }
 ```
+
+**Key Role Separation (NORMATIVE):**
+
+FCP requires three distinct key roles:
+1. **Node signing keys** (Ed25519): For symbol attribution, gossip auth, operation receipts
+2. **Zone encryption keys** (ChaCha20-Poly1305): For AEAD encryption of symbols/objects
+3. **Issuance keys** (Ed25519): For capability tokens and authority chains
+
+Node signing keys MUST be attested by owner signature via `NodeKeyAttestation`.
 
 ### 2.3 Axiom 3: Explicit Authority
 
@@ -229,7 +260,7 @@ Content-addressed identifier binding content to zone and schema:
 pub struct ObjectId([u8; 32]);
 
 impl ObjectId {
-    /// Create ObjectId from content, zone, and schema
+    /// Create ObjectId from content, zone, and schema (NORMATIVE for security objects)
     pub fn new(content: &[u8], zone: &ZoneId, schema: &SchemaId) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"FCP2-OBJECT-V1");
@@ -239,14 +270,26 @@ impl ObjectId {
         Self(hasher.finalize().into())
     }
 
-    /// Quick creation from bytes only (for small objects)
-    pub fn from_bytes(content: &[u8]) -> Self {
+    /// Unscoped content hash (NON-NORMATIVE; MUST NOT be used for security objects)
+    ///
+    /// WARNING: This creates a content hash without binding to zone + schema.
+    /// This is a footgun for anything security-relevant.
+    pub fn from_unscoped_bytes(content: &[u8]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"FCP2-CONTENT-V1");
         hasher.update(content);
         Self(hasher.finalize().into())
     }
 }
+
+/// NORMATIVE SAFETY RULE:
+/// The following object classes MUST use ObjectId::new(content, zone, schema):
+/// - CapabilityObject, CapabilityToken, PolicyObject, RevocationObject
+/// - AuditEvent, AuditHead, SecretObject, ZoneKeyManifest
+/// - DeviceEnrollment, NodeKeyAttestation
+/// - Any object used as an authority anchor or enforcement input
+///
+/// Using from_unscoped_bytes() for these objects is a SECURITY VIOLATION.
 ```
 
 ### 3.2 EpochId
@@ -375,6 +418,91 @@ impl CanonicalSerializer {
 }
 ```
 
+### 3.6 ObjectHeader
+
+All mesh-stored objects MUST begin with an ObjectHeader (NORMATIVE):
+
+```rust
+/// Universal object header (NORMATIVE)
+pub struct ObjectHeader {
+    /// Content-addressed identifier
+    pub object_id: ObjectId,
+    /// Schema identifier
+    pub schema: SchemaId,
+    /// Zone this object belongs to
+    pub zone_id: ZoneId,
+    /// Creation timestamp
+    pub created_at: u64,
+    /// Origin provenance
+    pub provenance: Provenance,
+    /// Strong refs to other objects (object graph for GC + auditability)
+    pub refs: Vec<ObjectId>,
+    /// Retention class for GC
+    pub retention: RetentionClass,
+    /// Optional TTL in seconds
+    pub ttl_secs: Option<u64>,
+}
+
+/// Retention class for garbage collection (NORMATIVE)
+pub enum RetentionClass {
+    /// Never evict unless explicitly unpinned
+    Pinned,
+    /// Keep until lease expires (renewable)
+    Lease { expires_at: u64 },
+    /// Best-effort cache; eviction allowed under pressure
+    Ephemeral,
+}
+```
+
+### 3.7 Garbage Collection and Pinning
+
+Nodes MUST implement reachability-based GC per zone (NORMATIVE):
+
+```rust
+/// GC algorithm (NORMATIVE)
+impl SymbolStore {
+    pub fn garbage_collect(&mut self, zone_id: &ZoneId) -> GcResult {
+        // 1. Compute root set
+        let mut roots = HashSet::new();
+        roots.insert(self.get_zone_root_set(zone_id));
+        roots.insert(self.get_latest_audit_head(zone_id));
+        roots.insert(self.get_capability_registry_head(zone_id));
+
+        // 2. Mark phase: traverse refs from roots
+        let mut live = HashSet::new();
+        let mut queue: VecDeque<_> = roots.into_iter().collect();
+        while let Some(object_id) = queue.pop_front() {
+            if live.insert(object_id) {
+                if let Some(header) = self.get_header(&object_id) {
+                    queue.extend(header.refs.iter().cloned());
+                }
+            }
+        }
+
+        // 3. Sweep phase: evict unreachable non-pinned objects
+        let mut evicted = 0;
+        for object_id in self.all_objects(zone_id) {
+            if !live.contains(&object_id) {
+                if let Some(header) = self.get_header(&object_id) {
+                    if !matches!(header.retention, RetentionClass::Pinned) {
+                        self.evict(&object_id);
+                        evicted += 1;
+                    }
+                }
+            }
+        }
+
+        GcResult { live: live.len(), evicted }
+    }
+}
+```
+
+**GC Invariants:**
+- Never evict `Pinned` objects without explicit unpin request
+- Respect `Lease` expiry times
+- Enforce per-zone quotas
+- Root set always includes: ZoneRootSet, latest AuditHead, CapabilityRegistryHead
+
 ---
 
 ## 4. Symbol Layer
@@ -401,6 +529,9 @@ pub struct SymbolEnvelope {
     /// Zone for key derivation
     pub zone_id: ZoneId,
 
+    /// Zone key ID (for key rotation - enables deterministic decryption)
+    pub zone_key_id: [u8; 8],
+
     /// Epoch for replay protection
     pub epoch_id: EpochId,
 
@@ -423,8 +554,8 @@ impl SymbolEnvelope {
     ) -> Self {
         let nonce = generate_nonce();
 
-        // Associated data binds symbol to context
-        let aad = Self::build_aad(&object_id, esi, k, &zone_key.zone_id, epoch);
+        // Associated data binds symbol to context INCLUDING key_id for rotation safety
+        let aad = Self::build_aad(&object_id, esi, k, &zone_key.zone_id, zone_key.key_id, epoch);
 
         let (ciphertext, auth_tag) = zone_key.encrypt(plaintext, &nonce, &aad);
 
@@ -434,6 +565,7 @@ impl SymbolEnvelope {
             k,
             data: ciphertext,
             zone_id: zone_key.zone_id.clone(),
+            zone_key_id: zone_key.key_id,
             epoch_id: epoch,
             auth_tag,
             nonce,
@@ -442,11 +574,20 @@ impl SymbolEnvelope {
 
     /// Decrypt and verify symbol
     pub fn decrypt(&self, zone_key: &ZoneKey) -> Result<Vec<u8>, CryptoError> {
+        // Verify key_id matches to catch rotation mismatches early
+        if zone_key.key_id != self.zone_key_id {
+            return Err(CryptoError::KeyIdMismatch {
+                expected: self.zone_key_id,
+                got: zone_key.key_id,
+            });
+        }
+
         let aad = Self::build_aad(
             &self.object_id,
             self.esi,
             self.k,
             &self.zone_id,
+            self.zone_key_id,
             self.epoch_id
         );
 
@@ -458,13 +599,15 @@ impl SymbolEnvelope {
         esi: u32,
         k: u16,
         zone_id: &ZoneId,
+        zone_key_id: [u8; 8],
         epoch: EpochId,
     ) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(64);
+        let mut aad = Vec::with_capacity(72);
         aad.extend_from_slice(object_id.as_bytes());
         aad.extend_from_slice(&esi.to_le_bytes());
         aad.extend_from_slice(&k.to_le_bytes());
         aad.extend_from_slice(zone_id.as_bytes());
+        aad.extend_from_slice(&zone_key_id);  // Binds AAD to specific key version
         aad.extend_from_slice(&epoch.0.to_le_bytes());
         aad
     }
@@ -528,16 +671,24 @@ Symbol-native frame format:
 │  Bytes 8-11:   Symbol Count (u32 LE)                                        │
 │  Bytes 12-15:  Total Payload Length (u32 LE)                                │
 │  Bytes 16-47:  Object ID (32 bytes)                                         │
-│  Bytes 48-63:  Zone ID hash (16 bytes, truncated SHA256)                    │
-│  Bytes 64-71:  Epoch ID (u64 LE)                                            │
-│  Bytes 72+:    Symbol payloads (concatenated)                               │
+│  Bytes 48-49:  Symbol Size (u16 LE, default 1024)                           │
+│  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
+│  Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)                    │
+│  Bytes 74-81:  Epoch ID (u64 LE)                                            │
+│  Bytes 82+:    Symbol payloads (concatenated)                               │
 │  Final 8:      Checksum (XXH3-64)                                           │
 │                                                                             │
-│  Fixed header: 72 bytes                                                     │
+│  Fixed header: 82 bytes                                                     │
 │  Each symbol: 4 (ESI) + 2 (K) + N (data) + 16 (auth_tag) + 12 (nonce)      │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Rotation Benefits:**
+- Including `zone_key_id` in frame header enables deterministic key selection
+- No trial-decrypt needed during rotation periods
+- Faster decrypt path, less DoS surface
+- Cleaner auditability (log exactly which key was used)
 
 ### 4.4 Frame Flags
 
@@ -690,19 +841,28 @@ pub struct ZoneKey {
 }
 
 impl ZoneKey {
-    /// Derive zone key from owner key and zone ID
+    /// Derive zone key from owner key and zone ID (NORMATIVE)
+    ///
+    /// CRITICAL: Zone keys MUST be derived from owner SECRET material, not public key.
+    /// Deriving from public key would allow anyone to derive zone encryption keys.
     pub fn derive(owner_key: &Ed25519PrivateKey, zone_id: &ZoneId) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"FCP2-ZONE-KEY-V1");
-        hasher.update(zone_id.as_bytes());
-        hasher.update(owner_key.public_key().as_bytes());
+        // Extract owner seed (secret material) - NEVER use public key here
+        let owner_seed: [u8; 32] = owner_key.to_seed_bytes();
 
-        let key_material = hasher.finalize();
+        // HKDF salt with domain separation
+        let salt = Sha256::digest(b"FCP2-ZONE-KEY-SALT-V1");
+        let hk = Hkdf::<Sha256>::new(Some(&salt), &owner_seed);
+
+        // Derive key material: 8 bytes key_id + 32 bytes symmetric key
+        let mut okm = [0u8; 40];
+        let info = [b"FCP2-ZONE-KEY-V1".as_slice(), zone_id.as_bytes()].concat();
+        hk.expand(&info, &mut okm)
+            .expect("HKDF expand cannot fail for valid output length");
 
         Self {
             zone_id: zone_id.clone(),
-            key_id: key_material[0..8].try_into().unwrap(),
-            symmetric_key: key_material[8..40].try_into().unwrap(),
+            key_id: okm[0..8].try_into().unwrap(),
+            symmetric_key: okm[8..40].try_into().unwrap(),
             created_at: current_timestamp(),
             expires_at: None,
         }
@@ -1262,6 +1422,12 @@ pub enum DeviceRequirement {
     Network { min_bandwidth_mbps: Option<u32> },
     /// Must have specific Tailscale tag
     TailscaleTag(String),
+    /// Required connector must be available (installed or fetchable)
+    ConnectorAvailable { connector_id: ConnectorId, min_version: Option<Version> },
+    /// Secret must be reconstructable under current policy
+    SecretReconstructable { secret_id: SecretId, min_nodes: u8 },
+    /// Must have sufficient quota headroom in the target zone store
+    ZoneQuotaHeadroom { zone_id: ZoneId, min_free_mb: u32 },
 }
 
 pub enum DevicePreference {
@@ -1290,7 +1456,13 @@ pub struct CapabilityToken {
     pub sub: PrincipalId,
 
     /// Issuing zone
-    pub iss: ZoneId,
+    pub iss_zone: ZoneId,
+
+    /// Issuing node (signer) - the node that minted this token
+    pub iss_node: TailscaleNodeId,
+
+    /// Issuer key id (for rotation)
+    pub kid: [u8; 8],
 
     /// Intended audience (connector)
     pub aud: ConnectorId,
@@ -1310,7 +1482,7 @@ pub struct CapabilityToken {
     /// Constraints
     pub constraints: CapabilityConstraints,
 
-    /// Ed25519 signature
+    /// Ed25519 signature (by iss_node's signing key)
     pub sig: [u8; 64],
 }
 
@@ -1325,16 +1497,20 @@ impl CapabilityToken {
     /// Default TTL: 5 minutes
     pub const DEFAULT_TTL_SECS: u64 = 300;
 
-    /// Verify token validity
+    /// Verify token validity (NORMATIVE)
     pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), TokenError> {
         // Check expiry
         if current_timestamp() > self.exp {
             return Err(TokenError::Expired);
         }
 
-        // Verify signature
-        let issuer_key = trust_anchors.get_zone_key(&self.iss)?;
-        issuer_key.verify(&self.signable_bytes(), &self.sig)?;
+        // Verify signature using node issuer pubkey (NOT zone key - that's symmetric!)
+        // The issuing node must have a valid NodeKeyAttestation from owner
+        let issuer_pubkey = trust_anchors.get_node_issuer_pubkey(&self.iss_node, &self.kid)?;
+        issuer_pubkey.verify(&self.signable_bytes(), &self.sig)?;
+
+        // Enforce that issuing node is authorized to mint tokens for this zone
+        trust_anchors.enforce_token_issuer_policy(&self.iss_zone, &self.iss_node)?;
 
         Ok(())
     }
@@ -1401,12 +1577,15 @@ impl MeshNode {
     /// Invoke a capability
     pub async fn invoke(&self, request: InvokeRequest) -> Result<ResponseObject> {
         // 1. Verify capability token
-        request.token.verify(&self.trust_anchors)?;
+        request.capability_token.verify(&self.trust_anchors)?;
+
+        // 1b. Enforce revocations (token, capability objects, issuer keys, connector version)
+        self.revocations.enforce(&request)?;
 
         // 2. Check provenance/taint
         let decision = request.provenance.can_invoke(
             &request.operation,
-            self.get_zone(&request.token.iss)?,
+            self.get_zone(&request.capability_token.iss_zone)?,
         );
         match decision {
             TaintDecision::Deny(reason) => return Err(Error::TaintViolation(reason)),
@@ -1434,19 +1613,19 @@ impl MeshNode {
 
 ### 8.2 Gossip Layer
 
-Efficient discovery without flooding:
+Efficient discovery with convergent anti-entropy:
 
 ```rust
 /// Gossip layer for symbol and object discovery (NORMATIVE)
 pub struct MeshGossip {
-    /// Bloom filter of known object IDs
-    pub object_filter: BloomFilter,
+    /// Fast membership hint (XOR filter - low false positive, replaceable)
+    pub object_xor_filter: XorFilter,
 
-    /// Bloom filter of available symbols
-    pub symbol_filter: BloomFilter,
+    /// Symbol availability filter
+    pub symbol_xor_filter: XorFilter,
 
-    /// Vector clock for consistency
-    pub vector_clock: VectorClock,
+    /// IBLT state for precise set reconciliation
+    pub iblt_state: IbltState,
 
     /// Known peer states
     pub peer_states: HashMap<TailscaleNodeId, PeerGossipState>,
@@ -1455,21 +1634,47 @@ pub struct MeshGossip {
 impl MeshGossip {
     /// Announce local symbol availability
     pub async fn announce_symbol(&mut self, object_id: &ObjectId, esi: u32) {
-        self.object_filter.insert(object_id.as_bytes());
-        self.symbol_filter.insert(&symbol_key(object_id, esi));
-        self.vector_clock.increment_local();
+        self.object_xor_filter.insert(object_id.as_bytes());
+        self.symbol_xor_filter.insert(&symbol_key(object_id, esi));
+        self.iblt_state.note_local_change(object_id, esi);
     }
 
     /// Find peers that might have symbols for an object
     pub fn find_symbol_sources(&self, object_id: &ObjectId) -> Vec<TailscaleNodeId> {
         self.peer_states
             .iter()
-            .filter(|(_, state)| state.object_filter.might_contain(object_id.as_bytes()))
+            .filter(|(_, state)| state.object_xor_filter.contains(object_id.as_bytes()))
             .map(|(id, _)| id.clone())
             .collect()
     }
 }
+
+/// Signed gossip summary for anti-entropy (NORMATIVE)
+pub struct GossipSummary {
+    /// Source node
+    pub from: TailscaleNodeId,
+    /// Current epoch
+    pub epoch_id: EpochId,
+    /// Digest of object filter
+    pub object_filter_digest: [u8; 32],
+    /// Digest of symbol filter
+    pub symbol_filter_digest: [u8; 32],
+    /// Compact IBLT encoding for precise delta reconciliation
+    pub iblt: Vec<u8>,
+    /// Timestamp
+    pub timestamp: u64,
+    /// Node signature (for authentication and rate limiting)
+    pub signature: Signature,
+}
 ```
+
+**Why XOR Filters + IBLT instead of Bloom Filters:**
+- Bloom filters are good for "might contain" but terrible for reconciling exact differences
+- XOR filters: faster membership queries, lower false positive rates
+- IBLT (Invertible Bloom Lookup Table): precise delta reconciliation
+- Dramatically reduces wasted symbol requests at scale
+- Faster convergence after offline periods
+- Signed summaries make gossip a defendable surface (auth + rate limits)
 
 ### 8.3 DistributedState
 
@@ -1536,7 +1741,31 @@ FCP V2 supports two protocol modes:
 | `symbol_request` | Any → Any | Request symbols (mesh) |
 | `symbol_delivery` | Any → Any | Deliver symbols (mesh) |
 
-### 9.3 Invoke Request/Response
+### 9.3 Control Plane as Objects (NORMATIVE)
+
+All control-plane messages (handshake/introspect/configure/invoke/response/subscribe/event/health/shutdown)
+MUST be represented as canonical CBOR objects with SchemaId and ObjectId. This makes all operations
+auditable, replayable, and content-addressed.
+
+```rust
+/// Control plane object wrapper (NORMATIVE)
+pub struct ControlPlaneObject {
+    pub header: ObjectHeader,
+    pub body: Vec<u8>, // canonical CBOR (schema-prefixed)
+}
+```
+
+**Transport Options:**
+1. **Direct (local)**: Canonical CBOR bytes over local connector transport
+2. **Mesh**: Encoded to symbols and sent inside FCPS frames with `FrameFlags::CONTROL_PLANE` set
+
+When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
+1. Verify checksum
+2. Decrypt symbols
+3. Reconstruct the object payload (RAW chunking or RaptorQ)
+4. Verify schema and store the object (subject to retention policy)
+
+### 9.4 Invoke Request/Response
 
 ```rust
 /// Invoke request (NORMATIVE)
@@ -1556,10 +1785,47 @@ pub struct InvokeResponse {
     pub result: Value,
     pub resource_uris: Vec<String>,
     pub next_cursor: Option<String>,
+    /// Receipt ObjectId (for operations with side effects)
+    pub receipt: Option<ObjectId>,
+}
+
+/// Operation receipt object (NORMATIVE)
+///
+/// Operations with SafetyTier::Dangerous MUST be IdempotencyClass::Strict.
+/// Operations with SafetyTier::Risky SHOULD be Strict unless there is a clear reason.
+pub struct OperationReceipt {
+    pub header: ObjectHeader,
+    /// ObjectId of the original request
+    pub request_object_id: ObjectId,
+    /// Idempotency key (if provided)
+    pub idempotency_key: Option<String>,
+    /// ObjectIds of outcome objects
+    pub outcome_object_ids: Vec<ObjectId>,
+    /// Resource URIs created/modified
+    pub resource_uris: Vec<String>,
+    /// When execution completed
+    pub executed_at: u64,
+    /// Node that executed the operation
+    pub executed_by: TailscaleNodeId,
+    /// Signature by executing node's signing key
+    pub signature: Signature,
+}
+
+impl OperationReceipt {
+    /// Verify receipt authenticity
+    pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), ReceiptError> {
+        let node_pubkey = trust_anchors.get_node_sig_pubkey(&self.executed_by)?;
+        node_pubkey.verify(&self.signable_bytes(), &self.signature)
+    }
 }
 ```
 
-### 9.4 Event Streaming
+**Idempotency Enforcement:**
+- On retry with same `idempotency_key`, mesh returns prior receipt instead of re-executing (for Strict)
+- Receipts are stored in symbol store (RetentionClass::Lease or Pinned for critical ones)
+- Makes "best-effort vs strict idempotency" enforceable, not advisory
+
+### 9.5 Event Streaming
 
 Events are batched into epochs for RaptorQ encoding:
 
@@ -1705,12 +1971,72 @@ streaming = true
 replay = true
 min_buffer_events = 10000
 
+[sandbox]
+# Sandbox profile (NORMATIVE)
+profile = "strict"           # "strict", "moderate", or "permissive"
+memory_mb = 256              # Maximum memory
+cpu_percent = 50             # Maximum CPU percentage
+wall_clock_timeout_ms = 30000 # Maximum execution time per operation
+fs_readonly_paths = ["/usr", "/lib"]  # Paths connector can read
+fs_writable_paths = ["$CONNECTOR_STATE"]  # Paths connector can write
+deny_exec = true             # Deny spawning child processes
+deny_ptrace = true           # Deny debugging/tracing
+
 [signatures]
 publisher_ed25519 = "base64:..."
 registry_ed25519 = "base64:..."
 ```
 
-### 11.2 Manifest Embedding
+### 11.2 Sandbox Profiles (NORMATIVE)
+
+MeshNode uses the `[sandbox]` section to construct OS sandbox (seccomp/seatbelt/AppContainer)
+and enforce resource budgets. This dramatically cuts blast radius for compromised connectors.
+
+```rust
+/// Sandbox configuration from manifest (NORMATIVE)
+pub struct SandboxConfig {
+    pub profile: SandboxProfile,
+    pub memory_mb: u32,
+    pub cpu_percent: u8,
+    pub wall_clock_timeout_ms: u64,
+    pub fs_readonly_paths: Vec<PathBuf>,
+    pub fs_writable_paths: Vec<PathBuf>,
+    pub deny_exec: bool,
+    pub deny_ptrace: bool,
+}
+
+pub enum SandboxProfile {
+    /// Maximum restrictions (recommended for untrusted connectors)
+    Strict,
+    /// Balanced restrictions (default)
+    Moderate,
+    /// Minimal restrictions (only for highly trusted connectors)
+    Permissive,
+}
+
+impl SandboxConfig {
+    /// Create OS-specific sandbox
+    pub fn create_sandbox(&self) -> Result<Box<dyn Sandbox>> {
+        #[cfg(target_os = "linux")]
+        return Ok(Box::new(SeccompSandbox::from_config(self)?));
+
+        #[cfg(target_os = "macos")]
+        return Ok(Box::new(SeatbeltSandbox::from_config(self)?));
+
+        #[cfg(target_os = "windows")]
+        return Ok(Box::new(AppContainerSandbox::from_config(self)?));
+    }
+}
+```
+
+**Sandbox Enforcement:**
+- Resource limits (memory, CPU, time) are enforced by OS
+- Filesystem access is limited to declared paths
+- Network access is limited to declared capabilities
+- Child process spawning can be denied
+- Debugging/tracing can be denied
+
+### 11.3 Manifest Embedding
 
 Manifests MUST be extractable without execution:
 - ELF: `.fcp_manifest` section
@@ -1768,17 +2094,86 @@ scope = "connector:fcp.telegram"
 
 ### 13.1 Registry Architecture
 
+Registries are **SOURCES, not dependencies** (NORMATIVE).
+
+This aligns with the digital sovereignty vision: your mesh can mirror and pin connectors
+as content-addressed objects so installs/updates work offline and without upstream dependency.
+
+Implementations MUST support at least one of:
+1. **Remote registry** (HTTP) — Public registry like registry.flywheel.dev
+2. **Self-hosted registry** (HTTP) — Enterprise/private registry
+3. **Mesh mirror registry** — Objects pinned in z:owner or z:private
+
+Connector binaries MUST be content-addressed objects and MAY be distributed via the symbol layer.
+
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                    PRIMARY REGISTRY                        │
-│                  registry.flywheel.dev                     │
-│  ├── Git-backed manifest index                            │
-│  ├── Binary storage (S3-compatible)                       │
-│  ├── Signature verifier                                   │
-│  ├── Reproducible build attestor                          │
-│  └── CDN (global edge)                                    │
+│                    REGISTRY SOURCES                        │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│  1. Remote Registry (optional)                            │
+│     └── registry.flywheel.dev (public)                    │
+│     └── registry.enterprise.com (private)                 │
+│                                                           │
+│  2. Self-Hosted Registry (optional)                       │
+│     └── HTTP server with signed manifests                 │
+│                                                           │
+│  3. Mesh Mirror Registry (recommended)                    │
+│     └── Connectors as pinned objects in z:owner           │
+│     └── Full offline capability                           │
+│     └── Symbol-layer distribution                         │
+│                                                           │
 └───────────────────────────────────────────────────────────┘
 ```
+
+```rust
+/// Registry source configuration (NORMATIVE)
+pub enum RegistrySource {
+    /// Remote HTTP registry
+    Remote {
+        url: Url,
+        trusted_keys: Vec<Ed25519PublicKey>,
+    },
+    /// Self-hosted registry
+    SelfHosted {
+        url: Url,
+        trusted_keys: Vec<Ed25519PublicKey>,
+    },
+    /// Mesh-native (connectors are objects)
+    MeshMirror {
+        zone: ZoneId,
+        index_object_id: ObjectId,
+    },
+}
+
+impl RegistrySource {
+    /// Fetch connector binary
+    pub async fn fetch(&self, connector_id: &ConnectorId) -> Result<ConnectorBinary> {
+        match self {
+            Self::Remote { url, trusted_keys } | Self::SelfHosted { url, trusted_keys } => {
+                let manifest = self.fetch_manifest(url, connector_id).await?;
+                manifest.verify_signature(trusted_keys)?;
+                let binary = self.fetch_binary(url, &manifest).await?;
+                binary.verify_checksum(&manifest)?;
+                Ok(binary)
+            }
+            Self::MeshMirror { zone, index_object_id } => {
+                // Reconstruct from local/mesh symbols
+                let index = self.mesh_node.reconstruct_object(index_object_id).await?;
+                let binary_object_id = index.lookup(connector_id)?;
+                let binary = self.mesh_node.reconstruct_object(&binary_object_id).await?;
+                Ok(binary)
+            }
+        }
+    }
+}
+```
+
+**Sovereignty Benefits:**
+- Offline installs from mesh-mirrored connectors
+- No upstream dependency for air-gapped deployments
+- Pin known-good versions and ignore upstream
+- Enterprise can point at internal registry
 
 ### 13.2 Verification Chain
 
@@ -1807,6 +2202,88 @@ On activation:
 - Staged updates
 - Automatic rollback on crash loops
 - Explicit pinning to known-good versions
+
+### 14.3 Revocation (NORMATIVE)
+
+Revocations are mesh objects distributed like any other object and MUST be enforced before use.
+Without revocation, "compromised device" recovery is mostly imaginary.
+
+```rust
+/// Revocation object (NORMATIVE)
+pub struct RevocationObject {
+    pub header: ObjectHeader,
+    /// ObjectIds being revoked
+    pub revoked: Vec<ObjectId>,
+    /// Scope of revocation
+    pub scope: RevocationScope,
+    /// Human-readable reason
+    pub reason: String,
+    /// When revocation becomes effective
+    pub effective_at: u64,
+    /// Optional expiry (None = permanent)
+    pub expires_at: Option<u64>,
+    /// Owner signature (revocations MUST be owner-signed)
+    pub signature: Signature,
+}
+
+pub enum RevocationScope {
+    /// Revoke capability objects/tokens
+    Capability,
+    /// Revoke issuer keys (node can no longer mint tokens)
+    IssuerKey,
+    /// Revoke node attestation (removes device from mesh)
+    NodeAttestation,
+    /// Revoke zone key (forces rotation)
+    ZoneKey,
+    /// Revoke connector binary (supply chain response)
+    ConnectorBinary,
+}
+
+/// Revocation registry (NORMATIVE)
+pub struct RevocationRegistry {
+    revocations: HashMap<ObjectId, RevocationObject>,
+    bloom_filter: BloomFilter, // Fast negative lookup
+}
+
+impl RevocationRegistry {
+    /// Check if object is revoked (MUST be called before use)
+    pub fn is_revoked(&self, object_id: &ObjectId) -> bool {
+        if !self.bloom_filter.might_contain(object_id.as_bytes()) {
+            return false; // Fast path: definitely not revoked
+        }
+        self.revocations.contains_key(object_id)
+    }
+
+    /// Enforce revocations for an invoke request
+    pub fn enforce(&self, request: &InvokeRequest) -> Result<(), RevocationError> {
+        // Check capability token
+        if self.is_revoked(&request.capability_token.to_object_id()) {
+            return Err(RevocationError::TokenRevoked);
+        }
+
+        // Check issuer node attestation
+        if self.is_node_revoked(&request.capability_token.iss_node) {
+            return Err(RevocationError::IssuerRevoked);
+        }
+
+        // Check connector binary
+        if let Some(connector_id) = &request.connector_id {
+            if self.is_connector_revoked(connector_id) {
+                return Err(RevocationError::ConnectorRevoked);
+            }
+        }
+
+        Ok(())
+    }
+}
+```
+
+**Enforcement Points (NORMATIVE):**
+1. Before accepting a capability token
+2. Before executing an operation
+3. Before accepting symbols for audit head updates
+4. Before using zone keys
+5. On connector startup
 
 ---
 
@@ -1885,10 +2362,62 @@ impl ExecutionPlanner {
                 DevicePreference::HighResources { weight } => {
                     score += weight * (device.capabilities.memory_mb as f64 / 16000.0);
                 }
+                DevicePreference::DataLocality { object_ids, weight } => {
+                    // Score based on how many required symbols are already local
+                    score += weight * device.local_coverage_score(object_ids);
+                }
                 _ => {}
             }
         }
+
+        // NORMATIVE: Subtract costs that affect real-world execution
+        // Secret reconstruction cost (how many peers needed to reconstruct secrets)
+        score -= device.estimated_secret_reconstruction_cost(policy) as f64;
+
+        // DERP penalty (prefer direct connections over relay)
+        score -= device.derp_penalty() as f64;
+
+        // Symbol locality bonus (fewer symbols to fetch = faster execution)
+        score += device.symbol_locality_bonus(policy) as f64;
+
         score
+    }
+}
+
+impl DeviceProfile {
+    /// Calculate how many required symbols are already local
+    fn local_coverage_score(&self, object_ids: &[ObjectId]) -> f64 {
+        if object_ids.is_empty() {
+            return 1.0;
+        }
+        let local_count = object_ids.iter()
+            .filter(|id| self.symbol_store.has_complete_object(id))
+            .count();
+        local_count as f64 / object_ids.len() as f64
+    }
+
+    /// Estimate cost of reconstructing secrets required by this operation
+    fn estimated_secret_reconstruction_cost(&self, policy: &PlacementPolicy) -> u32 {
+        // Count how many peer round-trips needed to gather k shares
+        let mut cost = 0u32;
+        for req in &policy.requires {
+            if let DeviceRequirement::SecretReconstructable { secret_id, min_nodes } = req {
+                let local_shares = self.count_local_secret_shares(secret_id);
+                if local_shares < *min_nodes {
+                    cost += (*min_nodes - local_shares) as u32;
+                }
+            }
+        }
+        cost
+    }
+
+    /// Penalty for using DERP relay instead of direct connection
+    fn derp_penalty(&self) -> u32 {
+        match &self.current_state.connection_type {
+            ConnectionType::Direct => 0,
+            ConnectionType::DerpRelay { relay_latency_ms } => relay_latency_ms / 10,
+            ConnectionType::Unknown => 50,
+        }
     }
 }
 ```
@@ -1977,30 +2506,89 @@ impl DiversityPolicy {
 
 ### 17.3 Threshold Secrets
 
-Secrets distributed as k-of-n symbols:
+Secrets use real cryptographic secret sharing (Shamir), not just RaptorQ symbols.
+RaptorQ symbols are NOT a secret sharing scheme—a single symbol can leak structure.
 
 ```rust
-/// Threshold secret (NORMATIVE)
-pub struct ThresholdSecret {
+/// Secret object (NORMATIVE)
+pub struct SecretObject {
+    pub header: ObjectHeader,
+    /// Unique secret identifier
     pub secret_id: SecretId,
-    pub k: u8,  // Need k symbols
-    pub n: u8,  // Distributed across n devices
-    pub distribution: HashMap<TailscaleNodeId, SymbolId>,
+    /// Zone this secret belongs to
+    pub zone_id: ZoneId,
+    /// Threshold (need k shares to reconstruct)
+    pub k: u8,
+    /// Total shares distributed
+    pub n: u8,
+    /// Secret sharing scheme
+    pub scheme: SecretSharingScheme,
+    /// Wrapped shares (node MUST be unable to decrypt other nodes' shares)
+    pub wrapped_shares: HashMap<TailscaleNodeId, Vec<u8>>,
+    /// Rotation policy
+    pub rotation: SecretRotationPolicy,
 }
 
-impl ThresholdSecret {
-    /// Use secret ephemerally
-    pub async fn use_secret<F, R>(&self, f: F) -> Result<R>
+pub enum SecretSharingScheme {
+    /// Shamir's Secret Sharing over GF(2^8)
+    ShamirGf256,
+}
+
+pub struct SecretRotationPolicy {
+    /// Rotate after this many seconds
+    pub rotate_after_secs: u64,
+    /// Overlap period during rotation (both old and new valid)
+    pub overlap_secs: u64,
+}
+
+/// Short-lived authorization to reconstruct/use a secret (NORMATIVE)
+pub struct SecretAccessToken {
+    /// Unique token ID
+    pub jti: Uuid,
+    /// Which secret can be accessed
+    pub secret_id: SecretId,
+    /// Purpose of access (for audit)
+    pub purpose: String,
+    /// Who requested access
+    pub requested_by: PrincipalId,
+    /// Issued at
+    pub iat: u64,
+    /// Expires at (short-lived)
+    pub exp: u64,
+    /// Approver signature (owner or delegated approver)
+    pub signature: Signature,
+}
+
+impl SecretObject {
+    /// Use secret ephemerally (NORMATIVE)
+    pub async fn use_secret<F, R>(&self, access_token: &SecretAccessToken, f: F) -> Result<R>
     where F: FnOnce(&[u8]) -> R
     {
-        let symbols = self.collect_k_symbols().await?;
-        let secret = reconstruct_secure(&symbols)?;
+        // NORMATIVE: reconstruction requires SecretAccessToken and audit event
+        access_token.verify()?;
+        self.audit_secret_access(access_token).await?;
+
+        // Collect k wrapped shares from peers
+        let shares = self.collect_k_wrapped_shares(access_token).await?;
+
+        // Reconstruct using Shamir
+        let secret = reconstruct_shamir_secure(&shares)?;
+
         let result = f(&secret);
+
+        // Zeroize immediately after use
         secure_zero(secret);
+
         Ok(result)
     }
 }
 ```
+
+**Why Shamir instead of RaptorQ for secrets:**
+- RaptorQ symbols can leak structure (not semantically secure)
+- Single RaptorQ symbol may reveal partial information
+- Shamir shares reveal nothing until k shares collected
+- Wrapped shares ensure a node cannot decrypt other nodes' shares
 
 ---
 
@@ -2126,6 +2714,88 @@ pub struct FunnelPolicy {
 }
 ```
 
+### 19.4 Device Enrollment and Removal (NORMATIVE)
+
+Tailscale gives authenticated transport, but you still need mesh membership semantics.
+
+```rust
+/// Device enrollment object (NORMATIVE)
+pub struct DeviceEnrollment {
+    pub header: ObjectHeader,
+    /// Tailscale node being enrolled
+    pub node_id: TailscaleNodeId,
+    /// Node's signing public key
+    pub node_sig_pubkey: Ed25519PublicKey,
+    /// Zones this device can participate in
+    pub allowed_zones: Vec<ZoneId>,
+    /// Storage permissions (what this device can store)
+    pub storage_permissions: Vec<StoragePermission>,
+    /// When enrollment was issued
+    pub issued_at: u64,
+    /// Optional expiry
+    pub expires_at: Option<u64>,
+    /// Owner signature
+    pub signature: Signature,
+}
+
+pub enum StoragePermission {
+    /// Can store symbols for specified zones
+    StoreSymbols { zones: Vec<ZoneId> },
+    /// Can store secret shares
+    StoreSecretShares,
+    /// Can store audit events
+    StoreAuditEvents,
+}
+```
+
+**Enrollment Workflow:**
+1. New device joins Tailscale tailnet
+2. Owner issues `DeviceEnrollment` object (signed)
+3. Owner issues `NodeKeyAttestation` binding node to signing key
+4. Device receives enrollment and attestation via mesh gossip
+5. Other nodes accept the new device as peer
+
+**Removal Workflow:**
+On removal, owner MUST publish `RevocationObject` for:
+1. `DeviceEnrollment` for the device
+2. `NodeKeyAttestation` for the device
+3. Any issuer keys bound to the device
+
+And SHOULD trigger:
+- Zone key rotation (publish new zone keys)
+- Secret resharing (exclude removed device from distribution)
+
+```rust
+impl MeshNode {
+    /// Remove a device from the mesh
+    pub async fn remove_device(&self, node_id: &TailscaleNodeId) -> Result<()> {
+        // 1. Revoke device enrollment
+        let revocation = RevocationObject {
+            revoked: vec![self.get_enrollment_object_id(node_id)?],
+            scope: RevocationScope::NodeAttestation,
+            reason: "Device removed from mesh".into(),
+            ..Default::default()
+        };
+        self.publish_revocation(revocation).await?;
+
+        // 2. Revoke node attestation
+        self.revoke_node_attestation(node_id).await?;
+
+        // 3. Rotate zone keys (required)
+        for zone in &self.affected_zones(node_id) {
+            self.rotate_zone_key(zone).await?;
+        }
+
+        // 4. Reshare secrets (recommended)
+        for secret in &self.secrets_with_shares_on(node_id) {
+            self.reshare_secret_excluding(secret, node_id).await?;
+        }
+
+        Ok(())
+    }
+}
+```
+
 ---
 
 ## 20. RaptorQ Deep Integration
@@ -2244,6 +2914,64 @@ Record for:
 - Approvals/elevations
 - Zone transitions
 - Security violations
+
+### 23.4 Audit Chain (NORMATIVE)
+
+Audit is an append-only, hash-linked object chain per zone. This makes "tamper-evident by construction" a testable, interoperable mechanism.
+
+```rust
+/// Audit event (NORMATIVE)
+pub struct AuditEvent {
+    pub header: ObjectHeader,
+    /// Correlation ID for request tracing
+    pub correlation_id: [u8; 16],
+    /// Event type (e.g., "secret.access", "capability.invoke", "elevation.granted")
+    pub event_type: String,
+    /// Actor who triggered the event
+    pub actor: PrincipalId,
+    /// Zone where event occurred
+    pub zone_id: ZoneId,
+    /// Connector ID (if applicable)
+    pub connector_id: Option<ConnectorId>,
+    /// Operation ID (if applicable)
+    pub operation: Option<OperationId>,
+    /// Capability token JTI (if applicable)
+    pub capability_token_jti: Option<Uuid>,
+    /// Request object ID (if applicable)
+    pub request_object_id: Option<ObjectId>,
+    /// Result object ID (if applicable)
+    pub result_object_id: Option<ObjectId>,
+    /// Previous event in chain (hash link)
+    pub prev: Option<ObjectId>,
+    /// When event occurred
+    pub occurred_at: u64,
+    /// Signature by executing node
+    pub signature: Signature,
+}
+
+/// Audit head checkpoint (NORMATIVE)
+pub struct AuditHead {
+    pub header: ObjectHeader,
+    /// Zone this head covers
+    pub zone_id: ZoneId,
+    /// Head event ObjectId
+    pub head_event: ObjectId,
+    /// Fraction of expected nodes contributing
+    pub coverage: f64,
+    /// Epoch this head was checkpointed
+    pub epoch_id: EpochId,
+    /// Quorum signatures from nodes
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
+```
+
+**Quorum Rule (default):** CriticalWrite requires n - f signatures (see §18).
+Nodes MUST refuse to advance AuditHead if quorum is not satisfied, unless in explicit degraded mode.
+
+**Fork Detection:** Nodes discovering multiple heads for the same epoch MUST:
+1. Log the fork event
+2. Refuse to advance until reconciled
+3. Alert owner for manual resolution
 
 ---
 
