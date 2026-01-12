@@ -175,8 +175,14 @@ pub struct MeshIdentity {
     /// Owner root public key (trust anchor)
     pub owner_pubkey: Ed25519PublicKey,
 
-    /// Node signing public key (used for SignedSymbolEnvelope, gossip auth, receipts)
+    /// Node signing public key (used for SignedFcpsFrame, gossip auth, receipts)
     pub node_sig_pubkey: Ed25519PublicKey,
+
+    /// Node encryption public key (X25519) for wrapping zone keys + secret shares
+    pub node_enc_pubkey: X25519PublicKey,
+
+    /// Node issuance public key (Ed25519) used ONLY for minting capability tokens
+    pub node_iss_pubkey: Ed25519PublicKey,
 
     /// Owner-signed attestation binding node_id ↔ node_sig_pubkey ↔ tags
     pub node_attestation: NodeKeyAttestation,
@@ -188,6 +194,10 @@ pub struct NodeKeyAttestation {
     pub node_id: TailscaleNodeId,
     /// Node's signing public key
     pub node_sig_pubkey: Ed25519PublicKey,
+    /// Node's encryption public key (X25519) for sealed key distribution
+    pub node_enc_pubkey: X25519PublicKey,
+    /// Node's issuance public key for capability token minting
+    pub node_iss_pubkey: Ed25519PublicKey,
     /// Authorized ACL tags for this node
     pub tags: Vec<String>,
     /// When attestation was issued
@@ -201,12 +211,14 @@ pub struct NodeKeyAttestation {
 
 **Key Role Separation (NORMATIVE):**
 
-FCP requires three distinct key roles:
-1. **Node signing keys** (Ed25519): For symbol attribution, gossip auth, operation receipts
-2. **Zone encryption keys** (ChaCha20-Poly1305): For AEAD encryption of symbols/objects
-3. **Issuance keys** (Ed25519): For capability tokens and authority chains
+FCP requires four distinct key roles:
+1. **Node signing keys** (Ed25519): For frame attribution, gossip auth, operation receipts
+2. **Node encryption keys** (X25519): For receiving sealed zone keys and secret shares
+3. **Node issuance keys** (Ed25519): For minting capability tokens (separately revocable)
+4. **Zone encryption keys** (ChaCha20-Poly1305): For AEAD encryption of symbols/objects
 
-Node signing keys MUST be attested by owner signature via `NodeKeyAttestation`.
+All three node key types MUST be attested by owner signature via `NodeKeyAttestation`.
+Issuance keys are separately revocable so token minting can be disabled without affecting other node functions.
 
 ### 2.3 Axiom 3: Explicit Authority
 
@@ -259,15 +271,26 @@ Content-addressed identifier binding content to zone and schema:
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ObjectId([u8; 32]);
 
+/// Secret per-zone object-id key (NORMATIVE)
+///
+/// This key is distributed to zone members (e.g. via ZoneKeyManifest or a ZoneSecrets object)
+/// and is intended to remain stable across routine zone_key rotations.
+/// It provides privacy against dictionary attacks on low-entropy objects.
+pub struct ObjectIdKey(pub [u8; 32]);
+
 impl ObjectId {
     /// Create ObjectId from content, zone, and schema (NORMATIVE for security objects)
-    pub fn new(content: &[u8], zone: &ZoneId, schema: &SchemaId) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"FCP2-OBJECT-V1");
-        hasher.update(zone.as_bytes());
-        hasher.update(schema.as_bytes());
-        hasher.update(content);
-        Self(hasher.finalize().into())
+    ///
+    /// Uses keyed BLAKE3 for:
+    /// - Performance (BLAKE3 is faster and parallel-friendly)
+    /// - Privacy (keyed hash prevents dictionary attacks on low-entropy objects)
+    pub fn new(content: &[u8], zone: &ZoneId, schema: &SchemaId, key: &ObjectIdKey) -> Self {
+        let mut h = blake3::Hasher::new_keyed(&key.0);
+        h.update(b"FCP2-OBJECT-V2");
+        h.update(zone.as_bytes());
+        h.update(schema.hash().as_bytes());
+        h.update(content);
+        Self(*h.finalize().as_bytes())
     }
 
     /// Unscoped content hash (NON-NORMATIVE; MUST NOT be used for security objects)
@@ -275,10 +298,10 @@ impl ObjectId {
     /// WARNING: This creates a content hash without binding to zone + schema.
     /// This is a footgun for anything security-relevant.
     pub fn from_unscoped_bytes(content: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"FCP2-CONTENT-V1");
-        hasher.update(content);
-        Self(hasher.finalize().into())
+        let mut h = blake3::Hasher::new();
+        h.update(b"FCP2-CONTENT-V2");
+        h.update(content);
+        Self(*h.finalize().as_bytes())
     }
 }
 
@@ -342,6 +365,23 @@ impl SchemaId {
     pub fn as_bytes(&self) -> Vec<u8> {
         format!("{}:{}@{}", self.namespace, self.name, self.version).into_bytes()
     }
+
+    /// Canonical type binding hash (NORMATIVE)
+    /// Uses fixed-size hash to prevent DoS via maliciously large schema strings.
+    pub fn hash(&self) -> SchemaHash {
+        let mut h = blake3::Hasher::new();
+        h.update(b"FCP2-SCHEMA-V1");
+        h.update(&self.as_bytes());
+        SchemaHash(*h.finalize().as_bytes())
+    }
+}
+
+/// 32-byte schema hash (NORMATIVE)
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SchemaHash([u8; 32]);
+
+impl SchemaHash {
+    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
 }
 ```
 
@@ -387,9 +427,8 @@ impl CanonicalSerializer {
     pub fn serialize<T: Serialize>(value: &T, schema: &SchemaId) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Schema prefix for type binding
-        buf.extend_from_slice(&(schema.as_bytes().len() as u16).to_le_bytes());
-        buf.extend_from_slice(&schema.as_bytes());
+        // Schema hash prefix for type binding (fixed-size, DoS-resistant)
+        buf.extend_from_slice(schema.hash().as_bytes());
 
         // Deterministic CBOR
         ciborium::ser::into_writer_canonical(value, &mut buf)
@@ -403,16 +442,17 @@ impl CanonicalSerializer {
         data: &[u8],
         expected_schema: &SchemaId,
     ) -> Result<T, SerializationError> {
-        // Verify schema prefix
-        let schema_len = u16::from_le_bytes([data[0], data[1]]) as usize;
-        let schema_bytes = &data[2..2 + schema_len];
-
-        if schema_bytes != expected_schema.as_bytes() {
+        // Verify schema hash prefix
+        if data.len() < 32 {
+            return Err(SerializationError::SchemaMismatch);
+        }
+        let got = &data[0..32];
+        if got != expected_schema.hash().as_bytes() {
             return Err(SerializationError::SchemaMismatch);
         }
 
         // Deserialize content
-        ciborium::de::from_reader(&data[2 + schema_len..])
+        ciborium::de::from_reader(&data[32..])
             .map_err(SerializationError::CborError)
     }
 }
@@ -614,44 +654,36 @@ impl SymbolEnvelope {
 }
 ```
 
-### 4.2 Signed Symbol Envelope
+### 4.2 Signed FCPS Frame
 
-For source attribution and integrity:
+For source attribution and rate limiting, FCPS frames are signed (NORMATIVE).
+Per-symbol signatures are OPTIONAL and reserved for critical control-plane objects.
+
+**Why frame-level signatures instead of per-symbol:**
+- Ed25519 signing is expensive at scale (especially mobile)
+- AEAD already provides per-symbol cryptographic integrity
+- Signature primarily needed for attribution/rate limiting, not data integrity
+- This is a major throughput win (amortize one signature over many symbols)
 
 ```rust
-/// Symbol with source signature (NORMATIVE)
-pub struct SignedSymbolEnvelope {
-    pub symbol: SymbolEnvelope,
-
-    /// Source node identity
+/// Signed FCPS frame (NORMATIVE)
+pub struct SignedFcpsFrame {
+    pub frame: FcpsFrame,
     pub source_id: TailscaleNodeId,
-
-    /// Signature over symbol
-    pub signature: Signature,
-
-    /// Timestamp (for freshness)
     pub timestamp: u64,
+    pub signature: Signature,
 }
 
-impl SignedSymbolEnvelope {
-    pub fn sign(symbol: SymbolEnvelope, identity: &MeshIdentity) -> Self {
+impl SignedFcpsFrame {
+    pub fn sign(frame: FcpsFrame, identity: &MeshIdentity) -> Self {
         let timestamp = current_timestamp();
-        let signature = identity.sign(&Self::signable_bytes(&symbol, timestamp));
-
-        Self {
-            symbol,
-            source_id: identity.node_id.clone(),
-            signature,
-            timestamp,
-        }
+        let signature = identity.sign(&Self::signable_bytes(&frame, timestamp));
+        Self { frame, source_id: identity.node_id.clone(), timestamp, signature }
     }
 
     pub fn verify(&self, trusted_keys: &TrustAnchors) -> Result<(), VerifyError> {
-        let pubkey = trusted_keys.get_node_key(&self.source_id)?;
-        pubkey.verify(
-            &Self::signable_bytes(&self.symbol, self.timestamp),
-            &self.signature
-        )
+        let pubkey = trusted_keys.get_node_sig_pubkey(&self.source_id)?;
+        pubkey.verify(&Self::signable_bytes(&self.frame, self.timestamp), &self.signature)
     }
 }
 ```
@@ -709,6 +741,36 @@ bitflags! {
         const CONTROL_PLANE     = 0b1000_0000_0000;  // Control plane object
     }
 }
+
+/// Decode status feedback (NORMATIVE)
+///
+/// Enables flow control: receiver tells sender how many symbols received/needed.
+pub struct DecodeStatus {
+    pub header: ObjectHeader,
+    pub object_id: ObjectId,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+    pub epoch_id: EpochId,
+    /// Unique symbols received so far for this object
+    pub received_unique: u32,
+    /// Target required to decode (K')
+    pub required: u32,
+    /// Optional: compact bitmap/IBLT of missing ESIs (for targeted repair)
+    pub missing_hint: Option<Vec<u8>>,
+}
+
+/// Symbol ack / stop condition (NORMATIVE)
+///
+/// Receiver tells sender to stop: object reconstructed.
+pub struct SymbolAck {
+    pub header: ObjectHeader,
+    pub object_id: ObjectId,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+    pub epoch_id: EpochId,
+    /// If present: reconstructed payload object id
+    pub reconstructed_object_id: Option<ObjectId>,
+}
 ```
 
 ### 4.5 Multipath Symbol Delivery
@@ -740,15 +802,22 @@ pub enum DeliveryPath {
 }
 
 impl MultipathDelivery {
-    /// Send symbols via all paths (receivers dedupe)
-    pub async fn deliver(&self, symbols: Vec<SignedSymbolEnvelope>) -> DeliveryResult {
+    /// Send symbols with feedback-based pacing (NORMATIVE)
+    ///
+    /// NORMATIVE: sender SHOULD stop once it receives SymbolAck OR DecodeStatus indicates completion.
+    /// NORMATIVE: sender MUST apply backpressure to avoid unbounded buffering.
+    /// NORMATIVE: sender SHOULD use AIMD or BBR-style pacing based on DecodeStatus feedback.
+    pub async fn deliver(&self, frame: SignedFcpsFrame) -> DeliveryResult {
         let mut results = Vec::new();
 
-        for (i, symbol) in symbols.iter().enumerate() {
-            // Round-robin across paths
+        // Round-robin symbols across paths
+        for (i, symbol) in frame.frame.symbols.iter().enumerate() {
             let path = &self.paths[i % self.paths.len()];
             results.push(path.send(symbol.clone()).await);
         }
+
+        // Listen for DecodeStatus/SymbolAck to stop early
+        // Implementation should check for stop condition and halt delivery
 
         DeliveryResult::from_results(results)
     }
@@ -776,30 +845,39 @@ impl MultipathDelivery {
 
 ### 5.1 Zone Hierarchy
 
-Zones form a cryptographic trust hierarchy:
+Zones enforce **two independent security axes**:
+
+1. **Integrity ("input trust")** — prevents low-integrity inputs from driving high-integrity effects
+2. **Confidentiality ("data secrecy")** — prevents high-secrecy data from leaking into low-secrecy zones
+
+Both axes are enforced mechanically (not by prompt, convention, or agent compliance).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           ZONE TRUST HIERARCHY                               │
+│                    ZONE INTEGRITY/CONFIDENTIALITY LATTICE                    │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│   z:owner        [Trust: 100]  Direct owner control, most privileged        │
+│   z:owner        [Integrity: 100 | Confidentiality: 100]  Direct owner      │
 │       │                        Tailscale tag: tag:fcp-owner                 │
 │       ▼                                                                     │
-│   z:private      [Trust: 80]   Personal data, high sensitivity              │
+│   z:private      [Integrity: 80  | Confidentiality: 90]   Personal data     │
 │       │                        Tailscale tag: tag:fcp-private               │
 │       ▼                                                                     │
-│   z:work         [Trust: 60]   Professional context, medium sensitivity     │
+│   z:work         [Integrity: 60  | Confidentiality: 70]   Work context      │
 │       │                        Tailscale tag: tag:fcp-work                  │
 │       ▼                                                                     │
-│   z:community    [Trust: 40]   Trusted external (paired users)              │
+│   z:community    [Integrity: 40  | Confidentiality: 40]   Trusted external  │
 │       │                        Tailscale tag: tag:fcp-community             │
 │       ▼                                                                     │
-│   z:public       [Trust: 20]   Public/anonymous inputs                      │
+│   z:public       [Integrity: 20  | Confidentiality: 10]   Public inputs     │
 │                                Tailscale tag: tag:fcp-public                │
 │                                                                             │
-│   INVARIANT: Data can flow DOWN (higher → lower trust) freely.              │
-│              Data flowing UP requires explicit elevation + approval.        │
+│   INVARIANTS:                                                               │
+│     Integrity: data can flow DOWN (higher → lower integrity) freely.        │
+│               data flowing UP requires explicit elevation + approval.       │
+│     Confidentiality: data can flow UP (lower → higher confidentiality)      │
+│                     freely. data flowing DOWN requires explicit             │
+│                     declassification.                                       │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -815,11 +893,14 @@ pub struct Zone {
     /// Human-readable name
     pub name: String,
 
-    /// Trust level (0-100)
-    pub trust_level: u8,
+    /// Integrity level (0-100). Higher = more trusted inputs.
+    pub integrity_level: u8,
 
-    /// Zone encryption key (derived from owner key)
-    pub zone_key: ZoneKey,
+    /// Confidentiality level (0-100). Higher = more secret data.
+    pub confidentiality_level: u8,
+
+    /// Active zone key id (selected from local ZoneKeyRing)
+    pub active_zone_key_id: [u8; 8],
 
     /// Tailscale ACL tag
     pub tailscale_tag: String,
@@ -829,6 +910,24 @@ pub struct Zone {
 
     /// Access policy
     pub policy: ZonePolicy,
+}
+
+/// Declassification token for confidentiality downgrades (NORMATIVE)
+///
+/// Used when moving data from higher confidentiality → lower confidentiality,
+/// e.g. z:private → z:public for publishing/posting.
+pub struct DeclassificationToken {
+    pub token_id: ObjectId,
+    pub from_zone: ZoneId,
+    pub to_zone: ZoneId,
+    /// Optional but RECOMMENDED: which objects/data are being declassified
+    pub object_ids: Vec<ObjectId>,
+    /// Human-readable justification (UI + audit)
+    pub justification: String,
+    pub approved_by: PrincipalId,
+    pub approved_at: u64,
+    pub expires_at: u64,
+    pub signature: Signature,
 }
 
 /// Zone encryption key (NORMATIVE)
@@ -841,32 +940,13 @@ pub struct ZoneKey {
 }
 
 impl ZoneKey {
-    /// Derive zone key from owner key and zone ID (NORMATIVE)
+    /// Zone keys are provisioned via ZoneKeyManifest objects (NORMATIVE).
+    /// Nodes MUST NOT require access to owner secret key material to encrypt/decrypt zone data.
     ///
-    /// CRITICAL: Zone keys MUST be derived from owner SECRET material, not public key.
-    /// Deriving from public key would allow anyone to derive zone encryption keys.
-    pub fn derive(owner_key: &Ed25519PrivateKey, zone_id: &ZoneId) -> Self {
-        // Extract owner seed (secret material) - NEVER use public key here
-        let owner_seed: [u8; 32] = owner_key.to_seed_bytes();
-
-        // HKDF salt with domain separation
-        let salt = Sha256::digest(b"FCP2-ZONE-KEY-SALT-V1");
-        let hk = Hkdf::<Sha256>::new(Some(&salt), &owner_seed);
-
-        // Derive key material: 8 bytes key_id + 32 bytes symmetric key
-        let mut okm = [0u8; 40];
-        let info = [b"FCP2-ZONE-KEY-V1".as_slice(), zone_id.as_bytes()].concat();
-        hk.expand(&info, &mut okm)
-            .expect("HKDF expand cannot fail for valid output length");
-
-        Self {
-            zone_id: zone_id.clone(),
-            key_id: okm[0..8].try_into().unwrap(),
-            symmetric_key: okm[8..40].try_into().unwrap(),
-            created_at: current_timestamp(),
-            expires_at: None,
-        }
-    }
+    /// This enables:
+    /// - True key rotation (new key_id without changing owner key)
+    /// - Per-node key distribution (sealed to each node's X25519 key)
+    /// - Operational key management without owner key exposure
 
     /// Encrypt data with this zone key
     pub fn encrypt(&self, plaintext: &[u8], nonce: &[u8; 12], aad: &[u8]) -> (Vec<u8>, [u8; 16]) {
@@ -890,6 +970,54 @@ impl ZoneKey {
         cipher.decrypt_in_place_detached(nonce.into(), aad, &mut plaintext, tag.into())
             .map_err(|_| CryptoError::DecryptionFailed)?;
         Ok(plaintext)
+    }
+}
+
+/// Zone key manifest (NORMATIVE)
+///
+/// Signed by the owner key. Distributes a specific zone_key_id's symmetric key
+/// to eligible nodes by sealing it to each node_enc_pubkey.
+pub struct ZoneKeyManifest {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+    pub algorithm: ZoneKeyAlgorithm,
+    pub valid_from: u64,
+    pub valid_until: Option<u64>,
+    /// Optional overlap with previous key_id for rotation windows
+    pub prev_zone_key_id: Option<[u8; 8]>,
+    /// Sealed key material per node
+    pub wrapped_keys: Vec<WrappedZoneKey>,
+    pub signature: Signature,
+}
+
+pub enum ZoneKeyAlgorithm {
+    ChaCha20Poly1305,
+    XChaCha20Poly1305,
+}
+
+pub struct WrappedZoneKey {
+    pub node_id: TailscaleNodeId,
+    /// Which node_enc_pubkey was used (supports node key rotation)
+    pub node_enc_kid: [u8; 8],
+    /// Sealed box containing the 32-byte zone symmetric key
+    pub sealed_key: Vec<u8>,
+}
+
+/// Local keyring for zone keys (NORMATIVE)
+pub struct ZoneKeyRing {
+    pub zone_id: ZoneId,
+    pub keys: HashMap<[u8; 8], ZoneKey>,
+    pub active: [u8; 8],
+}
+
+impl ZoneKeyRing {
+    pub fn get(&self, zone_key_id: &[u8; 8]) -> Option<&ZoneKey> {
+        self.keys.get(zone_key_id)
+    }
+
+    pub fn active_key(&self) -> Option<&ZoneKey> {
+        self.keys.get(&self.active)
     }
 }
 ```
@@ -977,10 +1105,13 @@ impl AclGenerator {
             );
         }
 
-        // ACL rules: higher trust can access lower trust
+        // ACL rules: defense-in-depth for BOTH axes
+        // A node must not be able to network-reach a zone "above" it on either axis.
         for zone in &self.zones {
             for target in &self.zones {
-                if zone.trust_level >= target.trust_level {
+                if zone.integrity_level >= target.integrity_level
+                    && zone.confidentiality_level >= target.confidentiality_level
+                {
                     acl.acls.push(AclRule {
                         action: "accept".into(),
                         src: vec![zone.tailscale_tag.clone()],
@@ -1021,14 +1152,18 @@ pub struct Provenance {
     /// Origin zone
     pub origin_zone: ZoneId,
 
-    /// Trust grade of origin
-    pub origin_trust: TrustGrade,
+    /// Current zone (NORMATIVE): updated on every zone crossing
+    pub current_zone: ZoneId,
+
+    /// Integrity/confidentiality labels inherited from origin (NORMATIVE)
+    pub origin_integrity: u8,
+    pub origin_confidentiality: u8,
 
     /// Principal who introduced the data
     pub origin_principal: Option<PrincipalId>,
 
-    /// Taint level
-    pub taint: TaintLevel,
+    /// Taint flags (compositional)
+    pub taint: TaintFlags,
 
     /// Crossed zones (audit trail)
     pub zone_crossings: Vec<ZoneCrossing>,
@@ -1037,16 +1172,18 @@ pub struct Provenance {
     pub created_at: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TaintLevel {
-    /// No taint (owner-generated)
-    Untainted = 0,
-
-    /// Mild taint (trusted external)
-    Tainted = 1,
-
-    /// Heavy taint (public/anonymous)
-    HighlyTainted = 2,
+bitflags! {
+    /// Taint flags (NORMATIVE)
+    ///
+    /// Compositional: merged via OR across inputs.
+    pub struct TaintFlags: u32 {
+        const NONE            = 0;
+        const PUBLIC_INPUT    = 1 << 0;  // e.g. z:public messages, web
+        const EXTERNAL_INPUT  = 1 << 1;  // e.g. paired external identities
+        const UNVERIFIED_LINK = 1 << 2;  // URLs / attachments not scanned
+        const USER_SUPPLIED   = 1 << 3;  // direct human input
+        const PROMPT_SURFACE  = 1 << 4;  // content interpreted by an LLM
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1078,39 +1215,46 @@ impl Provenance {
     pub fn cross_zone(&self, target: &Zone) -> Self {
         let mut new = self.clone();
 
-        // Record crossing
+        // Record crossing (NORMATIVE: use current_zone, not origin_zone)
         new.zone_crossings.push(ZoneCrossing {
-            from_zone: self.origin_zone.clone(),
+            from_zone: self.current_zone.clone(),
             to_zone: target.id.clone(),
             crossed_at: current_timestamp(),
             authorized_by: None,
         });
 
-        // Taint increases when moving to higher-trust zone
-        if target.trust_level > self.origin_trust.to_level() {
-            new.taint = TaintLevel::max(new.taint, TaintLevel::Tainted);
-        }
+        // Update current zone (NORMATIVE)
+        new.current_zone = target.id.clone();
 
         new
     }
 
+    /// Merge provenance from multiple inputs (NORMATIVE)
+    ///
+    /// Used when an operation consumes multiple data sources.
+    pub fn merge(inputs: &[Provenance]) -> Provenance {
+        let mut out = inputs[0].clone();
+        for p in inputs.iter().skip(1) {
+            out.taint |= p.taint;
+            out.zone_crossings.extend_from_slice(&p.zone_crossings);
+        }
+        out
+    }
+
     /// Check if operation is allowed given taint
     pub fn can_invoke(&self, operation: &Operation, target_zone: &Zone) -> TaintDecision {
-        // Rule 1: Untainted can do anything
-        if self.taint == TaintLevel::Untainted {
-            return TaintDecision::Allow;
+        // Rule 1: Public inputs cannot directly drive Dangerous ops
+        if self.taint.contains(TaintFlags::PUBLIC_INPUT)
+            && operation.safety_tier >= SafetyTier::Dangerous
+        {
+            return TaintDecision::Deny("Public-tainted input cannot invoke dangerous operations");
         }
 
-        // Rule 2: HighlyTainted cannot invoke dangerous operations
-        if self.taint == TaintLevel::HighlyTainted
-            && operation.safety_tier >= SafetyTier::Dangerous {
-            return TaintDecision::Deny("Highly tainted origin cannot invoke dangerous operations");
-        }
-
-        // Rule 3: Tainted invoking risky in higher-trust zone needs elevation
-        if self.taint >= TaintLevel::Tainted
+        // Rule 2: Integrity uphill for risky ops requires elevation
+        if self.taint != TaintFlags::NONE
             && operation.safety_tier >= SafetyTier::Risky
-            && target_zone.trust_level > self.origin_trust.to_level() {
+            && target_zone.integrity_level > self.origin_integrity
+        {
             return TaintDecision::RequireElevation;
         }
 
@@ -1216,7 +1360,11 @@ fcp.*                    Protocol/meta operations
 network.*                Network operations
 ├── network.outbound:*   Outbound connections (host:port)
 ├── network.inbound:*    Listen for connections
-└── network.dns          DNS resolution
+└── network.dns          DNS resolution (explicit capability; policy surface)
+
+network.tls.*            TLS identity constraints (NORMATIVE for sensitive connectors)
+├── network.tls.sni       Enforce SNI hostname match
+└── network.tls.spki_pin  Enforce SPKI pin(s) for target host(s)
 
 storage.*                Data persistence
 ├── storage.persistent   Durable storage
@@ -1388,6 +1536,22 @@ pub struct CapabilityConstraints {
     pub max_bytes: Option<u64>,
     /// Idempotency key scope
     pub idempotency_scope: Option<String>,
+    /// Optional network/TLS constraints (NORMATIVE when network.outbound is used)
+    pub network: Option<NetworkConstraints>,
+}
+
+/// Network/TLS constraints (NORMATIVE for sensitive connectors)
+///
+/// Prevents DNS pivot and host confusion attacks.
+pub struct NetworkConstraints {
+    /// Allowed hostnames (exact or suffix match)
+    pub host_allow: Vec<String>,
+    /// Allowed ports
+    pub port_allow: Vec<u16>,
+    /// Require SNI hostname match
+    pub require_sni: bool,
+    /// Optional SPKI pins (base64-encoded SHA256 of SubjectPublicKeyInfo)
+    pub spki_pins: Vec<String>,
 }
 ```
 
@@ -1482,7 +1646,14 @@ pub struct CapabilityToken {
     /// Constraints
     pub constraints: CapabilityConstraints,
 
-    /// Ed25519 signature (by iss_node's signing key)
+    /// The only node allowed to present this token (sender-constrained)
+    pub holder_node: TailscaleNodeId,
+
+    /// Revocation head the issuer considered (NORMATIVE)
+    /// Verifiers MUST have revocation state >= this head or fetch before acceptance.
+    pub rev_head: ObjectId,
+
+    /// Ed25519 signature (by iss_node's issuance key)
     pub sig: [u8; 64],
 }
 
@@ -1504,9 +1675,9 @@ impl CapabilityToken {
             return Err(TokenError::Expired);
         }
 
-        // Verify signature using node issuer pubkey (NOT zone key - that's symmetric!)
+        // Verify signature using node issuance pubkey (NOT signing key, NOT zone key)
         // The issuing node must have a valid NodeKeyAttestation from owner
-        let issuer_pubkey = trust_anchors.get_node_issuer_pubkey(&self.iss_node, &self.kid)?;
+        let issuer_pubkey = trust_anchors.get_node_iss_pubkey(&self.iss_node, &self.kid)?;
         issuer_pubkey.verify(&self.signable_bytes(), &self.sig)?;
 
         // Enforce that issuing node is authorized to mint tokens for this zone
@@ -1543,8 +1714,11 @@ pub struct MeshNode {
     /// Capability registry
     pub capabilities: CapabilityRegistry,
 
-    /// Zone keys (for encryption/decryption)
-    pub zone_keys: HashMap<ZoneId, ZoneKey>,
+    /// Zone keyrings (for deterministic decryption by zone_key_id)
+    pub zone_keyrings: HashMap<ZoneId, ZoneKeyRing>,
+
+    /// Revocation registry
+    pub revocations: RevocationRegistry,
 
     /// Trust anchors (owner key, known keys)
     pub trust_anchors: TrustAnchors,
@@ -1559,9 +1733,11 @@ impl MeshNode {
         // Verify frame integrity
         frame.verify_checksum()?;
 
-        // Decrypt and store symbols
-        let zone_key = self.zone_keys.get(&frame.zone_id)
+        // Get keyring and select key by zone_key_id (deterministic, no trial-decrypt)
+        let keyring = self.zone_keyrings.get(&frame.zone_id)
             .ok_or(Error::UnknownZone)?;
+        let zone_key = keyring.get(&frame.zone_key_id)
+            .ok_or(Error::UnknownZoneKey)?;
 
         for symbol in frame.symbols {
             let envelope = symbol.decrypt(zone_key)?;
@@ -1579,7 +1755,10 @@ impl MeshNode {
         // 1. Verify capability token
         request.capability_token.verify(&self.trust_anchors)?;
 
-        // 1b. Enforce revocations (token, capability objects, issuer keys, connector version)
+        // 1b. Verify holder proof for sender-constrained tokens (NORMATIVE)
+        request.verify_holder_proof(&self.trust_anchors)?;
+
+        // 1c. Enforce revocations (token, capability objects, issuer keys, connector version)
         self.revocations.enforce(&request)?;
 
         // 2. Check provenance/taint
@@ -1596,6 +1775,23 @@ impl MeshNode {
                 request.elevation_token.as_ref().unwrap().verify(&self.trust_anchors)?;
             }
             TaintDecision::Allow => {}
+        }
+
+        // 2d. Enforce confidentiality downgrades (NORMATIVE)
+        // If the operation produces outputs into a zone with lower confidentiality than
+        // the data label, require a valid DeclassificationToken.
+        if self.operation_writes_to_lower_confidentiality(&request).await? {
+            let tok = request.declassification_token.as_ref()
+                .ok_or(Error::DeclassificationRequired)?;
+            tok.verify(&self.trust_anchors)?;
+        }
+
+        // 2e. Acquire or validate execution lease (NORMATIVE)
+        // For Risky/Dangerous operations, execution MUST require a valid lease.
+        let operation = self.get_operation(&request.operation)?;
+        if operation.safety_tier >= SafetyTier::Risky {
+            let lease = self.acquire_execution_lease(&request).await?;
+            self.verify_execution_lease(&lease, &request).await?;
         }
 
         // 3. Find best device for execution
@@ -1740,6 +1936,8 @@ FCP V2 supports two protocol modes:
 | `shutdown` | Hub → Connector | Graceful shutdown |
 | `symbol_request` | Any → Any | Request symbols (mesh) |
 | `symbol_delivery` | Any → Any | Deliver symbols (mesh) |
+| `decode_status` | Any → Any | Feedback: how many symbols received / still needed |
+| `symbol_ack` | Any → Any | Stop condition for delivery (object reconstructed) |
 
 ### 9.3 Control Plane as Objects (NORMATIVE)
 
@@ -1776,7 +1974,30 @@ pub struct InvokeRequest {
     pub capability_token: CapabilityToken,
     pub provenance: Provenance,
     pub elevation_token: Option<ElevationToken>,
+    pub declassification_token: Option<DeclassificationToken>,
     pub idempotency_key: Option<String>,
+
+    /// Holder proof (NORMATIVE): binds presentation to holder_node in CapabilityToken
+    /// Prevents token replay by anyone other than the designated holder.
+    pub holder_proof: Signature,
+}
+
+impl InvokeRequest {
+    /// Verify holder proof (NORMATIVE)
+    pub fn verify_holder_proof(&self, trust_anchors: &TrustAnchors) -> Result<(), VerifyError> {
+        let holder = &self.capability_token.holder_node;
+        let holder_pubkey = trust_anchors.get_node_sig_pubkey(holder)?;
+        holder_pubkey.verify(&self.holder_signable_bytes(), &self.holder_proof)
+    }
+
+    fn holder_signable_bytes(&self) -> Vec<u8> {
+        // Include request id, operation, and token jti to bind holder proof to specific request
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(self.id.as_bytes());
+        bytes.extend_from_slice(self.operation.as_bytes());
+        bytes.extend_from_slice(self.capability_token.jti.as_bytes());
+        bytes
+    }
 }
 
 /// Invoke response (NORMATIVE)
@@ -1861,6 +2082,9 @@ pub struct Connector {
     /// Version
     pub version: Version,
 
+    /// Runtime format
+    pub format: ConnectorFormat,
+
     /// Connector archetypes
     pub archetypes: Vec<ConnectorArchetype>,
 
@@ -1891,6 +2115,15 @@ pub enum ConnectorArchetype {
     Storage,
     /// Provides knowledge/search
     Knowledge,
+}
+
+/// Connector runtime format (NORMATIVE)
+pub enum ConnectorFormat {
+    /// Native executable (ELF/Mach-O/PE)
+    Native,
+    /// WASI module (WASM) executed under a WASI runtime with hostcalls gated by capabilities
+    /// Provides portable, capability-based sandbox consistent across OSes.
+    Wasi,
 }
 ```
 
@@ -1935,6 +2168,7 @@ name = "Telegram Connector"
 version = "2026.1.0"
 description = "Secure Telegram Bot API integration"
 archetypes = ["bidirectional", "streaming"]
+format = "native"  # "native" | "wasi"
 
 [zones]
 home = "z:community"
@@ -1945,7 +2179,10 @@ forbidden = ["z:public"]
 [capabilities]
 required = [
   "ipc.gateway",
+  "network.dns",
   "network.outbound:api.telegram.org:443",
+  "network.tls.sni",
+  "network.tls.spki_pin",
   "storage.persistent:encrypted",
 ]
 optional = ["media.download", "media.upload"]
@@ -1961,6 +2198,7 @@ rate_limit = "60/min"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["chat_id", "text"] }
 output_schema = { type = "object", required = ["message_id"] }
+network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true, spki_pins = ["base64:..."] }
 
 [provides.operations.telegram_send_message.ai_hints]
 when_to_use = "Use to post updates to approved chats."
@@ -1973,7 +2211,7 @@ min_buffer_events = 10000
 
 [sandbox]
 # Sandbox profile (NORMATIVE)
-profile = "strict"           # "strict", "moderate", or "permissive"
+profile = "strict"           # "strict", "strict_plus", "moderate", or "permissive"
 memory_mb = 256              # Maximum memory
 cpu_percent = 50             # Maximum CPU percentage
 wall_clock_timeout_ms = 30000 # Maximum execution time per operation
@@ -1983,8 +2221,15 @@ deny_exec = true             # Deny spawning child processes
 deny_ptrace = true           # Deny debugging/tracing
 
 [signatures]
-publisher_ed25519 = "base64:..."
-registry_ed25519 = "base64:..."
+# Threshold signing: single leaked key doesn't instantly end you
+publisher_signatures = [
+  { kid = "pubkey1", sig = "base64:..." },
+  { kid = "pubkey2", sig = "base64:..." },
+]
+publisher_threshold = "2-of-3"
+registry_signature = { kid = "registry1", sig = "base64:..." }
+# Optional but RECOMMENDED: reference to transparency log entry
+transparency_log_entry = "objectid:..."
 ```
 
 ### 11.2 Sandbox Profiles (NORMATIVE)
@@ -2008,6 +2253,9 @@ pub struct SandboxConfig {
 pub enum SandboxProfile {
     /// Maximum restrictions (recommended for untrusted connectors)
     Strict,
+    /// Maximum isolation (Linux): microVM-backed sandbox for high-risk connectors (NORMATIVE where available)
+    /// Use for browser automation, universal adapters, or connectors parsing adversarial content.
+    StrictPlus,
     /// Balanced restrictions (default)
     Moderate,
     /// Minimal restrictions (only for highly trusted connectors)
@@ -2167,6 +2415,24 @@ impl RegistrySource {
         }
     }
 }
+
+/// Append-only transparency log entry (NORMATIVE if transparency is enabled)
+///
+/// Provides:
+/// - Downgrade detection (someone serves you an older binary)
+/// - Equivocation detection (registry serves different binaries to different nodes)
+/// - Stable anchor for "what did I install when?"
+pub struct ConnectorTransparencyLogEntry {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub version: Version,
+    pub manifest_object_id: ObjectId,
+    pub binary_object_id: ObjectId,
+    pub prev: Option<ObjectId>,
+    pub published_at: u64,
+    /// Signature by publisher quorum or owner
+    pub signature: Signature,
+}
 ```
 
 **Sovereignty Benefits:**
@@ -2178,11 +2444,12 @@ impl RegistrySource {
 ### 13.2 Verification Chain
 
 Before execution, verify:
-1. Manifest signature (registry or trusted publisher)
+1. Manifest signature (registry or trusted publisher quorum)
 2. Binary checksum matches manifest
 3. Binary signature matches trusted key
 4. Platform/arch match
 5. Requested capabilities ⊆ zone ceilings
+6. Optional: release is present in ConnectorTransparencyLog (if enabled)
 
 ---
 
@@ -2226,6 +2493,29 @@ pub struct RevocationObject {
     pub signature: Signature,
 }
 
+/// Revocation event chain node (NORMATIVE)
+///
+/// Hash-linked chain for revocation freshness.
+pub struct RevocationEvent {
+    pub header: ObjectHeader,
+    pub revocation_object_id: ObjectId,
+    pub prev: Option<ObjectId>,
+    pub occurred_at: u64,
+    pub signature: Signature,
+}
+
+/// Revocation head checkpoint (NORMATIVE)
+///
+/// Enables freshness semantics: tokens bound to a rev_head, verifiers MUST
+/// have revocation state >= that head before accepting the token.
+pub struct RevocationHead {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub head_event: ObjectId,
+    pub epoch_id: EpochId,
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
+
 pub enum RevocationScope {
     /// Revoke capability objects/tokens
     Capability,
@@ -2243,6 +2533,8 @@ pub enum RevocationScope {
 pub struct RevocationRegistry {
     revocations: HashMap<ObjectId, RevocationObject>,
     bloom_filter: BloomFilter, // Fast negative lookup
+    /// Latest revocation head known for this zone
+    pub head: Option<ObjectId>,
 }
 
 impl RevocationRegistry {
@@ -2289,7 +2581,37 @@ impl RevocationRegistry {
 
 ## 15. Device-Aware Execution
 
-### 15.1 Device Profiles
+### 15.1 Execution Leases
+
+Execution leases prevent duplicate side effects and "thrash-migrate" loops:
+
+```rust
+/// Execution lease (NORMATIVE)
+///
+/// Prevents duplicate execution and stabilizes computation migration.
+/// A short-lived, renewable lock that says "node X owns execution of request R until time T."
+pub struct ExecutionLease {
+    pub header: ObjectHeader,
+    /// The request/computation being leased
+    pub request_object_id: ObjectId,
+    /// Which node currently owns execution
+    pub owner_node: TailscaleNodeId,
+    /// Lease issued at
+    pub iat: u64,
+    /// Lease expires at (short-lived; renewable)
+    pub exp: u64,
+    /// Signature by lease issuer (owner or quorum policy)
+    pub signature: Signature,
+}
+```
+
+**Lease Semantics:**
+- For Risky/Dangerous operations, execution MUST require a valid lease
+- The executing node must present the lease to run the connector operation
+- If the node dies, lease expires and someone else can acquire
+- This is a mesh-native way to coordinate without a central coordinator
+
+### 15.2 Device Profiles
 
 ```rust
 /// Device profile (NORMATIVE)
@@ -2459,7 +2781,11 @@ impl MigratableComputation {
         // 3. Notify target device
         mesh.send_migration_request(&target, self.computation_id, checkpoint.id).await?;
 
-        // 4. Target reconstructs and resumes
+        // 4. Transfer execution lease ownership (NORMATIVE)
+        // Prevents duplicate execution during migration
+        mesh.transfer_execution_lease(self.computation_id, &target).await?;
+
+        // 5. Target reconstructs and resumes
         self.current_device = target;
         self.state = ComputationState::Running { progress: checkpoint.progress };
 
@@ -2494,8 +2820,9 @@ pub struct DiversityPolicy {
 }
 
 impl DiversityPolicy {
-    pub fn verify(&self, symbols: &[SignedSymbolEnvelope]) -> Result<()> {
-        let nodes: HashSet<_> = symbols.iter().map(|s| &s.source_id).collect();
+    /// Verify diversity at frame granularity (not symbol)
+    pub fn verify(&self, frames: &[SignedFcpsFrame]) -> Result<()> {
+        let nodes: HashSet<_> = frames.iter().map(|f| &f.source_id).collect();
         if nodes.len() < self.min_nodes as usize {
             return Err(Error::InsufficientNodeDiversity);
         }
