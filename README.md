@@ -760,6 +760,123 @@ cargo clippy --all-targets -- -D warnings
 
 ---
 
+## Specification Refinement with APR
+
+The FCP specification is refined iteratively using [APR (Automated Plan Reviser Pro)](https://github.com/Dicklesworthstone/automated_plan_reviser_pro), which automates multi-round reviews with GPT Pro 5.2 Extended Reasoning.
+
+### Why Iterative Refinement?
+
+Complex protocol specifications benefit from multiple rounds of AI review. Like gradient descent converging on a minimum, each round focuses on finer details as major issues are resolved:
+
+```
+Round 1-3:   Security gaps, architectural flaws
+Round 4-7:   Interface refinements, edge cases
+Round 8-12:  Nuanced optimizations, abstractions
+Round 13+:   Converging on stable design
+```
+
+### Setup
+
+```bash
+# Install APR
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/automated_plan_reviser_pro/main/install.sh" | bash
+
+# Install Oracle (GPT Pro browser automation)
+npm install -g @steipete/oracle
+```
+
+The workflow is already configured in `.apr/workflows/fcp.yaml`:
+
+```yaml
+documents:
+  readme: README.md
+  spec: FCP_Specification_V2.md
+  implementation: docs/fcp_model_connectors_rust.md
+```
+
+### Running Revision Rounds
+
+```bash
+# First round (requires manual ChatGPT login)
+apr run 1 --login --wait
+
+# Subsequent rounds
+apr run 2
+apr run 3 --include-impl  # Include implementation doc every 3-4 rounds
+
+# Check status
+apr status
+
+# View round output
+apr show 5
+```
+
+### Remote/SSH Setup (Oracle Serve Mode)
+
+If running on a remote server via SSH (no local browser), use Oracle's serve mode:
+
+**On your local machine (with browser):**
+```bash
+oracle serve --port 9333 --token "your-secret-token"
+```
+
+**On the remote server:**
+```bash
+export ORACLE_REMOTE_HOST="100.x.x.x:9333"  # Local machine's Tailscale IP
+export ORACLE_REMOTE_TOKEN="your-secret-token"
+
+# Test connection
+oracle -p "test" -e browser -m "5.2 Thinking"
+
+# Now APR works normally
+apr run 1
+```
+
+**Important:** Use port 9333 (not 9222) to avoid conflict with Chrome's DevTools Protocol.
+
+### Integration Workflow
+
+After GPT Pro completes a round, integrate the feedback:
+
+1. **Prime Claude Code** with full context:
+   ```
+   Read ALL of AGENTS.md and README.md. Use your code investigation agent
+   to understand the project. Read FCP_Specification_V2.md and
+   docs/fcp_model_connectors_rust.md.
+   ```
+
+2. **Integrate feedback** from GPT Pro:
+   ```
+   Integrate this feedback from GPT 5.2 (evaluate each suggestion):
+   <paste apr show N output>
+   ```
+
+3. **Harmonize documents**: Update README, then implementation doc
+
+4. **Commit changes** in logical groupings with detailed messages
+
+### Useful Commands
+
+```bash
+apr status          # Check Oracle sessions
+apr list            # List workflows
+apr history         # Show revision history
+apr diff 4 5        # Compare rounds 4 and 5
+apr stats           # Convergence analytics
+apr integrate 5 -c  # Copy integration prompt to clipboard
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `FCP_Specification_V2.md` | Main protocol specification |
+| `docs/fcp_model_connectors_rust.md` | Rust implementation guide |
+| `.apr/workflows/fcp.yaml` | APR workflow configuration |
+| `.apr/rounds/fcp/round_N.md` | GPT Pro output for each round |
+
+---
+
 ## Contributing
 
 > *About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.

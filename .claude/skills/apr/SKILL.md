@@ -26,19 +26,24 @@ For headless/SSH environments, Oracle can delegate browser automation to a local
 npm install -g @steipete/oracle
 
 # Start server (keep this terminal open)
-oracle serve --port 9222 --token "flywheel-apr-2026"
+# IMPORTANT: Use port 9333 (not 9222) to avoid conflict with Chrome DevTools
+oracle serve --port 9333 --token "flywheel-apr-2026"
 ```
 
 ### On the REMOTE machine (this server):
 ```bash
 # Add to shell config for persistence
-echo 'export ORACLE_REMOTE_HOST="100.114.183.31:9222"' >> ~/.zshrc
+echo 'export ORACLE_REMOTE_HOST="100.114.183.31:9333"' >> ~/.zshrc
 echo 'export ORACLE_REMOTE_TOKEN="flywheel-apr-2026"' >> ~/.zshrc
 source ~/.zshrc
 
 # Test connection
 oracle -p "test connection" -e browser -m "5.2 Thinking"
 ```
+
+**Why port 9333?** Oracle serve listens on this port for incoming requests. When it
+receives a request, it launches Chrome which uses port 9222 for DevTools Protocol.
+Using 9333 for the server avoids the port conflict.
 
 **Tailscale IPs for this setup:**
 - Mac Mini: `100.114.183.31`
