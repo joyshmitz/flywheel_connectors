@@ -1,0 +1,52 @@
+name: fcp
+description: Flywheel Connector Protocol specification refinement
+
+documents:
+  readme: README.md
+  spec: FCP_Specification_V2.md
+  implementation: docs/fcp_model_connectors_rust.md
+
+oracle:
+  model: "5.2 Thinking"
+  thinking_time: heavy
+
+rounds:
+  output_dir: .apr/rounds/fcp
+
+template: |
+  First, read this README:
+
+  ```
+  {{README}}
+  ```
+
+  ---
+
+  NOW: Carefully review this entire plan for me and come up with your best revisions in terms of better architecture, new features, changed features, etc. to make it better, more robust/reliable, more performant, more compelling/useful, etc. For each proposed change, give me your detailed analysis and rationale/justification for why it would make the project better along with the git-diff style change versus the original plan shown below:
+
+  ```
+  {{SPEC}}
+  ```
+
+template_with_impl: |
+  First, read this README:
+
+  ```
+  {{README}}
+  ```
+
+  ---
+
+  And here is a document detailing Rust implementations for the canonical connector types that follow the specification document given below; you should also keep the implementation in mind as you think about the specification, since ultimately the specification needs to be translated into the Rust code eventually!
+
+  ```
+  {{IMPLEMENTATION}}
+  ```
+
+  ---
+
+  NOW: Carefully review this entire plan for me and come up with your best revisions in terms of better architecture, new features, changed features, etc. to make it better, more robust/reliable, more performant, more compelling/useful, etc. For each proposed change, give me your detailed analysis and rationale/justification for why it would make the project better along with the git-diff style change versus the original plan shown below:
+
+  ```
+  {{SPEC}}
+  ```
