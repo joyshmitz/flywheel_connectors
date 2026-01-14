@@ -17,6 +17,19 @@ This specification defines:
 - Distributed state, computation migration, and offline access
 - Registry, supply chain, and conformance requirements
 
+## Conformance Language
+
+This document uses the key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
+**SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **MAY**, and **OPTIONAL** as described in RFC 2119
+and RFC 8174.
+
+Text explicitly labeled **(NORMATIVE)** is part of the interoperability and security contract.
+Text labeled **(INFORMATIVE)** is explanatory and non-binding.
+
+Code blocks and structs annotated with `NORMATIVE:` describe **behavioral requirements** and
+validation rules. They are not literal implementation constraints (language, crate layout,
+or exact types are non-normative unless stated otherwise).
+
 ---
 
 ## Table of Contents
@@ -177,12 +190,18 @@ pub struct MeshIdentity {
 
     /// Node signing public key (used for SignedFcpsFrame, gossip auth, receipts)
     pub node_sig_pubkey: Ed25519PublicKey,
+    /// Node signing key id (kid) for rotation (NORMATIVE)
+    pub node_sig_kid: [u8; 8],
 
     /// Node encryption public key (X25519) for wrapping zone keys + secret shares
     pub node_enc_pubkey: X25519PublicKey,
+    /// Node encryption key id (kid) for rotation (NORMATIVE)
+    pub node_enc_kid: [u8; 8],
 
     /// Node issuance public key (Ed25519) used ONLY for minting capability tokens
     pub node_iss_pubkey: Ed25519PublicKey,
+    /// Node issuance key id (kid) for rotation (NORMATIVE)
+    pub node_iss_kid: [u8; 8],
 
     /// Owner-signed attestation binding node_id ↔ node_sig_pubkey ↔ tags
     pub node_attestation: NodeKeyAttestation,
@@ -194,10 +213,16 @@ pub struct NodeKeyAttestation {
     pub node_id: TailscaleNodeId,
     /// Node's signing public key
     pub node_sig_pubkey: Ed25519PublicKey,
+    /// Key id for node_sig_pubkey (NORMATIVE)
+    pub node_sig_kid: [u8; 8],
     /// Node's encryption public key (X25519) for sealed key distribution
     pub node_enc_pubkey: X25519PublicKey,
+    /// Key id for node_enc_pubkey (NORMATIVE)
+    pub node_enc_kid: [u8; 8],
     /// Node's issuance public key for capability token minting
     pub node_iss_pubkey: Ed25519PublicKey,
+    /// Key id for node_iss_pubkey (NORMATIVE)
+    pub node_iss_kid: [u8; 8],
     /// Authorized ACL tags for this node
     pub tags: Vec<String>,
     /// When attestation was issued
@@ -517,8 +542,14 @@ pub struct ObjectHeader {
     pub created_at: u64,
     /// Origin provenance
     pub provenance: Provenance,
-    /// Strong refs to other objects (object graph for GC + auditability)
+    /// Strong refs to other objects in the SAME zone (NORMATIVE)
+    /// These participate in reachability GC.
+    ///
+    /// NORMATIVE: refs MUST NOT contain cross-zone object ids.
     pub refs: Vec<ObjectId>,
+    /// Cross-zone references for audit/provenance only (NORMATIVE when present)
+    /// These MUST NOT participate in GC reachability in the foreign zone.
+    pub foreign_refs: Vec<ObjectId>,
     /// Optional TTL in seconds
     pub ttl_secs: Option<u64>,
     /// Optional placement policy for symbol distribution (NORMATIVE when present)
@@ -530,18 +561,39 @@ pub struct ObjectHeader {
 ///
 /// Defines how symbols for this object should be distributed across the mesh.
 /// Enables quantifiable offline resilience SLOs.
+///
+/// Note: Uses fixed-point basis points (bps) instead of floating-point to avoid
+/// float parsing differences across languages and policy comparison bugs.
 pub struct ObjectPlacementPolicy {
     /// Minimum distinct nodes that should hold symbols for this object
     pub min_nodes: u8,
-    /// Maximum fraction of total symbols any single node may hold (prevents concentration)
-    pub max_node_fraction: f64,
-    /// Preferred device selectors (e.g., "tag:fcp-private", "class:desktop")
-    pub preferred_devices: Vec<String>,
-    /// Hard exclusions (e.g., "tag:fcp-public", specific node IDs)
-    pub excluded_devices: Vec<String>,
-    /// Target coverage ratio (symbols held / symbols needed)
-    /// 1.0 = exactly K symbols distributed; 1.5 = 50% redundancy
-    pub target_coverage: f64,
+    /// Maximum fraction of total symbols any single node may hold in basis points (0..=10000)
+    /// 10000 = 100%, 5000 = 50%
+    pub max_node_fraction_bps: u16,
+    /// Preferred device selectors (typed to prevent implementation divergence)
+    pub preferred_devices: Vec<DeviceSelector>,
+    /// Hard exclusions (typed to prevent implementation divergence)
+    pub excluded_devices: Vec<DeviceSelector>,
+    /// Target coverage ratio in basis points (10000 = 1.0x, 15000 = 1.5x)
+    /// 10000 = exactly K symbols distributed; 15000 = 50% redundancy
+    pub target_coverage_bps: u32,
+}
+
+/// Typed device selector for placement policies (NORMATIVE)
+///
+/// Prevents implementation divergence by defining a concrete grammar rather
+/// than free-form strings.
+pub enum DeviceSelector {
+    /// Match devices by tag (e.g., Tag("fcp-private"))
+    Tag(String),
+    /// Match devices by class (e.g., Class("desktop"), Class("mobile"))
+    Class(String),
+    /// Match specific node by Tailscale ID
+    NodeId(NodeId),
+    /// Match by zone membership
+    Zone(ZoneId),
+    /// Match devices with specific capability
+    HasCapability(String),
 }
 
 /// Node-local storage metadata (NOT content-addressed)
@@ -640,11 +692,10 @@ impl SymbolStore {
 - Respect `Lease` expiry times
 - Enforce per-zone quotas
 - Root set always includes: latest ZoneFrontier (pinned) + all explicitly pinned objects
-- **Cross-zone ref mirroring (NORMATIVE):** When object A in zone_x holds a ref to object B
-  in zone_y, zone_y MUST maintain a mirrored "back-ref" stub. This prevents B from being
-  GC'd in zone_y even if zone_y's frontier doesn't directly reference B. The back-ref stub
-  expires when zone_x's frontier no longer transitively references A, communicated via
-  cross-zone epoch sync or explicit unref messages.
+- **Cross-zone refs (NORMATIVE):** Cross-zone references MUST be carried in `foreign_refs`
+  and MUST NOT affect GC in the foreign zone. If a foreign object must be retained, it MUST
+  be retained by that zone's own frontier/pins/leases/policy. This eliminates the complexity
+  of back-ref stubs and makes per-zone GC independent.
 
 ### 3.8 ZoneFrontier as the Root Pointer (NORMATIVE)
 
@@ -928,9 +979,13 @@ pub struct AuthenticatedFcpsFrame {
 /// Replay protection policy (NORMATIVE defaults)
 pub struct SessionReplayPolicy {
     /// Allow limited reordering; MUST be bounded
-    pub max_reorder_window: u64,   // default: 128
+    pub max_reorder_window: u64,       // default: 128
     /// Rekey periodically for operational hygiene and suite agility
-    pub rekey_after_frames: u64,   // default: 1_000_000_000
+    pub rekey_after_frames: u64,       // default: 1_000_000_000
+    /// Rekey after elapsed time to avoid pathological long-lived sessions
+    pub rekey_after_seconds: u64,      // default: 86400 (24 hours)
+    /// Rekey after cumulative bytes to bound key exposure
+    pub rekey_after_bytes: u64,        // default: 1_099_511_627_776 (1 TiB)
 }
 
 /// Legacy signed frame (for bootstrap/degraded mode)
@@ -1639,9 +1694,21 @@ pub struct Provenance {
     /// Current zone (NORMATIVE): updated on every zone crossing
     pub current_zone: ZoneId,
 
-    /// Integrity/confidentiality labels inherited from origin (NORMATIVE)
-    pub origin_integrity: u8,
-    pub origin_confidentiality: u8,
+    /// Data labels (NORMATIVE)
+    ///
+    /// These are properties of the *data*, not the storage location.
+    /// - integrity_label: lower = less trustworthy input (Biba-style)
+    /// - confidentiality_label: higher = more secret (Bell-LaPadula-style)
+    ///
+    /// Merge rule (NORMATIVE):
+    /// - integrity_label = MIN across inputs (worst trust dominates)
+    /// - confidentiality_label = MAX across inputs (most secret dominates)
+    pub integrity_label: u8,
+    pub confidentiality_label: u8,
+
+    /// Proof-carrying label adjustments (NORMATIVE)
+    /// Allows *changing* labels only when you can point to a valid ApprovalToken.
+    pub label_adjustments: Vec<LabelAdjustment>,
 
     /// Principal who introduced the data
     pub origin_principal: Option<PrincipalId>,
@@ -1660,9 +1727,25 @@ pub struct Provenance {
     pub created_at: u64,
 }
 
+/// Proof-carrying label adjustment (NORMATIVE)
+#[derive(Clone)]
+pub enum LabelAdjustment {
+    /// Human-approved integrity elevation (e.g., reviewed content)
+    IntegrityElevated { to: u8, by_approval: ObjectId, applied_at: u64 },
+    /// Human-approved declassification (lower secrecy)
+    ConfidentialityDeclassified { to: u8, by_approval: ObjectId, applied_at: u64 },
+}
+
+/// **Declassification Output Label Rule (NORMATIVE):**
+/// When declassifying data from zone A to zone B (where B.confidentiality < A.confidentiality),
+/// the resulting object's `confidentiality_label` MUST be set to `target_zone.confidentiality`
+/// and a `LabelAdjustment::ConfidentialityDeclassified` entry MUST be appended referencing
+/// the ApprovalToken. This ensures the derived object can flow freely within the target zone
+/// while maintaining an auditable chain of custody.
+
 /// Proof-carrying taint reduction (NORMATIVE)
 ///
-/// Allows clearing specific taints when you can point to a verifiable attestation.
+/// Allows clearing specific taints when you can point to a verifiable SanitizerReceipt.
 /// Examples:
 /// - URL scanning cleared UNVERIFIED_LINK
 /// - Malware scan cleared UNVERIFIED_LINK
@@ -1671,10 +1754,37 @@ pub struct Provenance {
 pub struct TaintReduction {
     /// Which taints are cleared
     pub clears: TaintFlags,
-    /// Attestation/receipt ObjectId that justifies the reduction
-    pub by_attestation: ObjectId,
+    /// SanitizerReceipt ObjectId that justifies the reduction (NORMATIVE)
+    pub by_receipt: ObjectId,
     /// When the reduction was applied
     pub applied_at: u64,
+}
+
+/// Sanitizer receipt (NORMATIVE)
+///
+/// A verifier MUST validate:
+/// - signature (executing node)
+/// - that the sanitizer connector/operation is authorized by capability token / grant objects
+/// - that `clears` is consistent with the sanitizer operation semantics
+/// - that `inputs` includes the object(s) being reduced (coverage)
+pub struct SanitizerReceipt {
+    pub header: ObjectHeader,
+    /// Connector that performed sanitization
+    pub sanitizer_connector: ConnectorId,
+    /// Operation that performed sanitization
+    pub sanitizer_operation: OperationId,
+    /// Input objects that were sanitized
+    pub inputs: Vec<ObjectId>,
+    /// Taints cleared by this sanitization
+    pub clears: TaintFlags,
+    /// Optional sanitizer-specific findings (e.g., scan results)
+    pub findings: Option<Value>,
+    /// When sanitization was executed
+    pub executed_at: u64,
+    /// Node that executed the sanitizer
+    pub executed_by: TailscaleNodeId,
+    /// Node signature over the receipt
+    pub signature: Signature,
 }
 
 bitflags! {
@@ -1716,6 +1826,28 @@ pub struct ZoneCrossing {
 
 ```rust
 impl Provenance {
+    /// Effective integrity after applying label adjustments (NORMATIVE)
+    pub fn effective_integrity(&self) -> u8 {
+        let mut v = self.integrity_label;
+        for a in &self.label_adjustments {
+            if let LabelAdjustment::IntegrityElevated { to, .. } = a {
+                v = v.max(*to);
+            }
+        }
+        v
+    }
+
+    /// Effective confidentiality after applying label adjustments (NORMATIVE)
+    pub fn effective_confidentiality(&self) -> u8 {
+        let mut v = self.confidentiality_label;
+        for a in &self.label_adjustments {
+            if let LabelAdjustment::ConfidentialityDeclassified { to, .. } = a {
+                v = v.min(*to);
+            }
+        }
+        v
+    }
+
     /// Effective taint after applying reductions (NORMATIVE)
     ///
     /// Taint reductions allow specific taints to be cleared with proof.
@@ -1723,6 +1855,9 @@ impl Provenance {
     pub fn effective_taint(&self) -> TaintFlags {
         let mut t = self.taint;
         for r in &self.taint_reductions {
+            // NORMATIVE: reductions only count if the referenced SanitizerReceipt
+            // is valid and covers the relevant inputs. Implementations MUST NOT
+            // apply reductions based on unverified receipts.
             t.remove(r.clears);
         }
         t
@@ -1749,12 +1884,43 @@ impl Provenance {
     /// Merge provenance from multiple inputs (NORMATIVE)
     ///
     /// Used when an operation consumes multiple data sources.
+    ///
+    /// SECURITY-CRITICAL: Integrity uses MIN (worst trust dominates),
+    /// confidentiality uses MAX (most secret dominates). This prevents
+    /// integrity bypass by reordering inputs.
     pub fn merge(inputs: &[Provenance]) -> Provenance {
         let mut out = inputs[0].clone();
-        for p in inputs.iter().skip(1) {
-            out.taint |= p.taint;
-            out.zone_crossings.extend_from_slice(&p.zone_crossings);
-        }
+
+        // NORMATIVE: integrity_label = MIN across all effective integrities
+        out.integrity_label = inputs.iter()
+            .map(|p| p.effective_integrity())
+            .min()
+            .unwrap_or(out.integrity_label);
+
+        // NORMATIVE: confidentiality_label = MAX across all effective confidentialities
+        out.confidentiality_label = inputs.iter()
+            .map(|p| p.effective_confidentiality())
+            .max()
+            .unwrap_or(out.confidentiality_label);
+
+        // Merge taints (OR semantics)
+        out.taint = inputs.iter().fold(TaintFlags::NONE, |acc, p| acc | p.taint);
+
+        // Collect all zone crossings
+        out.zone_crossings = inputs.iter()
+            .flat_map(|p| p.zone_crossings.clone())
+            .collect();
+
+        // Collect all taint reductions
+        out.taint_reductions = inputs.iter()
+            .flat_map(|p| p.taint_reductions.clone())
+            .collect();
+
+        // Collect all label adjustments
+        out.label_adjustments = inputs.iter()
+            .flat_map(|p| p.label_adjustments.clone())
+            .collect();
+
         out
     }
 
@@ -1774,7 +1940,7 @@ impl Provenance {
         // Rule 2: Integrity uphill for risky ops requires elevation
         if effective != TaintFlags::NONE
             && operation.safety_tier >= SafetyTier::Risky
-            && target_zone.integrity_level > self.origin_integrity
+            && target_zone.integrity_level > self.effective_integrity()
         {
             return TaintDecision::RequireElevation;
         }
@@ -1789,68 +1955,115 @@ impl Provenance {
 Elevation (integrity uphill for tainted operations) now uses the unified `ApprovalToken` (§5.2) with `ApprovalScope::Elevation`.
 
 ```rust
-/// Create an elevation approval (NORMATIVE)
+/// Construct an ApprovalToken as a normal mesh object (NORMATIVE)
+///
+/// NORMATIVE RULES:
+/// - ApprovalToken MUST be content-addressed using ObjectId::new(content, zone, schema, ObjectIdKey)
+/// - The approver signature MUST cover the canonical bytes of the token body (excluding signature)
+/// - The token MUST be stored as a mesh object and referenced by its ObjectId, not an embedded token_id
 impl ApprovalToken {
-    pub fn create_elevation(
-        operation: OperationId,
-        provenance: &Provenance,
+    pub fn create(
+        zone_id: ZoneId,
+        scope: ApprovalScope,
+        justification: String,
         approver: &Identity,
-        justification: &str,
-        ttl: Option<u64>,
-    ) -> Self {
+        ttl_secs: Option<u64>,
+        zone_object_id_key: &ObjectIdKey,
+    ) -> (StoredObject, ApprovalToken) {
         let now = current_timestamp();
-        let expires_at = now + ttl.unwrap_or(Self::DEFAULT_TTL_SECS);
+        let expires_at = now + ttl_secs.unwrap_or(Self::DEFAULT_TTL_SECS);
+        let schema = SchemaId {
+            namespace: "fcp.core".into(),
+            name: "ApprovalToken".into(),
+            version: Version::new(2, 0, 0),
+        };
 
-        let mut token = Self {
-            token_id: ObjectId::default(),
-            scope: ApprovalScope::Elevation {
-                operation,
-                original_provenance: provenance.clone(),
-            },
-            justification: justification.to_string(),
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: now,
+            provenance: Provenance::owner_action(zone_id.clone(), approver.principal_id()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: Some(expires_at.saturating_sub(now)),
+            placement: None,
+        };
+
+        let mut token = ApprovalToken {
+            header: header.clone(),
+            scope,
+            justification,
             approved_by: approver.principal_id(),
             approved_at: now,
             expires_at,
             signature: Signature::default(),
         };
 
+        // Sign canonical token bytes (excluding signature field)
         let signable = token.signable_bytes();
         token.signature = approver.sign(&signable);
-        token.token_id = ObjectId::from_bytes(&signable);
 
-        token
+        // Derive ObjectId per mesh object rules
+        let body = CanonicalSerializer::serialize(&token, &schema);
+        let object_id = StoredObject::derive_id(&header, &body, zone_object_id_key);
+        let stored = StoredObject {
+            object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: RetentionClass::Lease { expires_at },
+            },
+        };
+
+        (stored, token)
     }
 
+    /// Convenience: create elevation approval
+    pub fn create_elevation(
+        zone_id: ZoneId,
+        operation: OperationId,
+        provenance: &Provenance,
+        approver: &Identity,
+        justification: &str,
+        ttl: Option<u64>,
+        zone_object_id_key: &ObjectIdKey,
+    ) -> (StoredObject, ApprovalToken) {
+        Self::create(
+            zone_id,
+            ApprovalScope::Elevation {
+                operation,
+                original_provenance: provenance.clone(),
+            },
+            justification.to_string(),
+            approver,
+            ttl,
+            zone_object_id_key,
+        )
+    }
+
+    /// Convenience: create declassification approval
     pub fn create_declassification(
+        zone_id: ZoneId,
         from_zone: ZoneId,
         to_zone: ZoneId,
         object_ids: Vec<ObjectId>,
         approver: &Identity,
         justification: &str,
         ttl: Option<u64>,
-    ) -> Self {
-        let now = current_timestamp();
-        let expires_at = now + ttl.unwrap_or(Self::DEFAULT_TTL_SECS);
-
-        let mut token = Self {
-            token_id: ObjectId::default(),
-            scope: ApprovalScope::Declassification {
+        zone_object_id_key: &ObjectIdKey,
+    ) -> (StoredObject, ApprovalToken) {
+        Self::create(
+            zone_id,
+            ApprovalScope::Declassification {
                 from_zone,
                 to_zone,
                 object_ids,
             },
-            justification: justification.to_string(),
-            approved_by: approver.principal_id(),
-            approved_at: now,
-            expires_at,
-            signature: Signature::default(),
-        };
-
-        let signable = token.signable_bytes();
-        token.signature = approver.sign(&signable);
-        token.token_id = ObjectId::from_bytes(&signable);
-
-        token
+            justification.to_string(),
+            approver,
+            ttl,
+            zone_object_id_key,
+        )
     }
 }
 ```
@@ -2659,9 +2872,10 @@ pub enum ControlPlaneRetention {
 }
 ```
 
-**Transport Options:**
-1. **Direct (local)**: Canonical CBOR bytes over local connector transport
-2. **Mesh**: Encoded to symbols and sent inside FCPS frames with `FrameFlags::CONTROL_PLANE` set
+**Transport Options (NORMATIVE):**
+1. **FCPC (recommended)**: Reliable stream framing for control-plane messages using the mesh session `k_ctx`
+2. **Direct (local)**: Canonical CBOR bytes over local connector transport (may reuse FCPC framing)
+3. **Mesh fallback**: Encoded to symbols and sent inside FCPS frames with `FrameFlags::CONTROL_PLANE` set (for degraded/offline sync)
 
 When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
 1. Verify checksum
@@ -2670,7 +2884,39 @@ When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
 4. Verify schema
 5. Store object if retention class is Required; otherwise MAY discard after processing
 
-### 9.4 Invoke Request/Response
+### 9.4 FCPC: Control Plane Framing (NORMATIVE)
+
+FCPC provides a reliable, backpressured framing for control-plane objects (invoke/simulate/configure/response/etc).
+It is carried over a stream transport (TCP or QUIC) inside the tailnet.
+
+**Security (NORMATIVE):**
+- FCPC messages MUST be bound to an authenticated MeshSession (see §4.2)
+- FCPC payloads MUST be authenticated using `k_ctx` derived from the MeshSession key schedule
+- Implementations SHOULD encrypt FCPC payloads (AEAD) using `k_ctx` to provide end-to-end
+  confidentiality independent of the underlying transport.
+
+```text
+FCPC FRAME (conceptual)
+  magic = "FCPC"
+  version = u16
+  session_id = [16]
+  seq = u64 (per-direction monotonic)
+  flags = u16
+  len = u32
+  ciphertext[len] (AEAD under k_ctx; aad includes session_id||seq||flags)
+  tag = [16]
+```
+
+**Replay protection (NORMATIVE):**
+- Receivers MUST enforce a bounded replay window like SessionReplayPolicy (max_reorder_window)
+- seq MUST be strictly increasing per direction for the authenticated session
+
+**Why FCPC?**
+- Avoids RaptorQ overhead for small control-plane messages
+- Provides reliable, ordered, backpressured delivery for invoke/response semantics
+- Improves DoS resistance with bounded per-connection parsing
+
+### 9.5 Invoke Request/Response
 
 ```rust
 /// Distributed trace context for end-to-end observability (NORMATIVE when present)
@@ -2725,10 +2971,32 @@ impl InvokeRequest {
 pub struct InvokeResponse {
     pub id: String,
     pub result: Value,
-    pub resource_uris: Vec<String>,
+    /// Resource handles created/modified by the operation (NORMATIVE)
+    /// Each ResourceObject is a mesh object carrying provenance + zone binding.
+    pub resource_object_ids: Vec<ObjectId>,
     pub next_cursor: Option<String>,
     /// Receipt ObjectId (for operations with side effects)
     pub receipt: Option<ObjectId>,
+}
+
+/// Resource handle object (NORMATIVE)
+///
+/// Replaces free-form resource URIs with zone-bound, auditable handles.
+/// Prevents exfiltration channels and enables capability-gated dereferencing.
+pub struct ResourceObject {
+    pub header: ObjectHeader,
+    /// Connector that created/manages this resource
+    pub connector_id: ConnectorId,
+    /// Type of resource (e.g., "file", "message", "attachment")
+    pub resource_type: String,
+    /// Original URI (for connector-internal use)
+    pub resource_uri: String,
+    /// When resource was created
+    pub created_at: u64,
+    /// Optional expiry
+    pub expires_at: Option<u64>,
+    /// Connector signature over resource metadata
+    pub signature: Signature,
 }
 
 /// Simulate request for preflight checks (NORMATIVE)
@@ -2799,8 +3067,8 @@ pub struct OperationReceipt {
     pub idempotency_key: Option<String>,
     /// ObjectIds of outcome objects
     pub outcome_object_ids: Vec<ObjectId>,
-    /// Resource URIs created/modified
-    pub resource_uris: Vec<String>,
+    /// ResourceObject ids created/modified (NORMATIVE)
+    pub resource_object_ids: Vec<ObjectId>,
     /// When execution completed
     pub executed_at: u64,
     /// Node that executed the operation
@@ -2963,6 +3231,17 @@ DISCOVERED → VERIFIED → INSTALLED → CONFIGURED → ACTIVE
 
 Connectors MUST implement:
 
+| Method | Purpose |
+|--------|---------|
+| `handshake` | Bind to zone, negotiate protocol |
+| `describe` | Return manifest metadata |
+| `introspect` | Return operations, events, resources |
+| `capabilities` | Return full catalog |
+| `configure` | Apply configuration |
+| `invoke` | Execute operation |
+| `health` | Report readiness |
+| `shutdown` | Graceful termination |
+
 ### 10.4 Connector State (NORMATIVE)
 
 Connectors with polling/cursors/dedup caches MUST externalize their canonical state into the mesh.
@@ -3053,17 +3332,6 @@ If `singleton_writer = true` and two different `ConnectorStateObject` share the 
 2. Require manual resolution OR automated "choose-by-lease" recovery
 3. Log the fork event for audit
 
-| Method | Purpose |
-|--------|---------|
-| `handshake` | Bind to zone, negotiate protocol |
-| `describe` | Return manifest metadata |
-| `introspect` | Return operations, events, resources |
-| `capabilities` | Return full catalog |
-| `configure` | Apply configuration |
-| `invoke` | Execute operation |
-| `health` | Report readiness |
-| `shutdown` | Graceful termination |
-
 ---
 
 ## 11. Connector Manifest
@@ -3090,13 +3358,16 @@ allowed_targets = ["z:community"]
 forbidden = ["z:public"]
 
 [capabilities]
+# NORMATIVE: Host restrictions MUST NOT be encoded in capability IDs.
+# Use network_constraints in operation definitions instead.
 required = [
   "ipc.gateway",
   "network.dns",
-  "network.outbound:api.telegram.org:443",
+  "network.egress",
   "network.tls.sni",
   "network.tls.spki_pin",
-  "storage.persistent:encrypted",
+  "storage.persistent",
+  "storage.encrypted",
 ]
 optional = ["media.download", "media.upload"]
 forbidden = ["system.exec", "network.inbound"]
@@ -3563,6 +3834,28 @@ impl RevocationRegistry {
 3. Before accepting symbols for audit head updates
 4. Before using zone keys
 5. On connector startup
+
+#### 14.3.1 Revocation Freshness Policy (NORMATIVE)
+
+Implementations MUST define a revocation freshness policy that is enforced based on SafetyTier:
+
+```rust
+pub struct RevocationFreshnessPolicy {
+    /// Max allowed age of the latest known ZoneFrontier before we refuse Risky/Dangerous ops
+    pub max_frontier_age_secs: u64,   // default: 300
+    /// If true, Safe ops MAY proceed in degraded mode when frontier is stale/unavailable
+    pub allow_safe_ops_in_degraded_mode: bool, // default: true
+    /// If true, Risky ops MAY proceed only with an interactive ApprovalToken::Execution in degraded mode
+    pub allow_risky_ops_with_interactive_override: bool, // default: false
+}
+```
+
+**Enforcement (NORMATIVE):**
+- For **Dangerous** operations: verifier MUST have revocation state >= token.rev_seq AND frontier age <= max_frontier_age_secs
+- For **Risky** operations: same as Dangerous by default; MAY allow interactive override if policy allows
+- For **Safe** operations: MAY proceed if allow_safe_ops_in_degraded_mode is true, but MUST emit an audit event `revocation.degraded_mode`
+
+This makes offline/partition behavior consistent, auditable, and configurable.
 
 ---
 
@@ -4272,14 +4565,16 @@ impl RepairController {
 }
 
 /// Symbol coverage evaluation result
+///
+/// Uses fixed-point basis points for interop stability.
 pub struct CoverageEvaluation {
     pub object_id: ObjectId,
     /// Number of distinct nodes holding symbols
     pub distinct_nodes: usize,
-    /// Highest fraction of symbols on any single node
-    pub max_node_fraction: f64,
-    /// Coverage ratio: symbols_available / symbols_needed
-    pub ratio: f64,
+    /// Highest fraction of symbols on any single node (basis points, 0..=10000)
+    pub max_node_fraction_bps: u16,
+    /// Coverage ratio in basis points (10000 = 1.0x)
+    pub coverage_bps: u32,
     /// Can object be reconstructed with current coverage?
     pub is_available: bool,
 }
@@ -4383,8 +4678,8 @@ pub struct AuditHead {
     pub head_event: ObjectId,
     /// Sequence number of head_event (NORMATIVE)
     pub head_seq: u64,
-    /// Fraction of expected nodes contributing
-    pub coverage: f64,
+    /// Fraction of expected nodes contributing (basis points, 0..=10000)
+    pub coverage_bps: u16,
     /// Epoch this head was checkpointed
     pub epoch_id: EpochId,
     /// Quorum signatures from nodes
@@ -4528,6 +4823,17 @@ Step 6: Disable FCP1 endpoints
 3. Object reconstruction
 4. Capability verification
 5. Cross-zone bridging
+
+### 27.3 Fuzzing and Adversarial Tests (NORMATIVE for reference implementation)
+
+The reference implementation MUST include fuzz targets for:
+
+1. **FCPS frame parsing** — invalid lengths, malformed symbol counts, checksum edge cases
+2. **Session handshake transcript verification** — replay, splicing, nonce reuse
+3. **CapabilityToken verification** — `grant_object_ids` inconsistencies, revocation staleness
+4. **ZoneKeyManifest parsing and sealed key unwrap behavior**
+
+At least one corpus MUST include "decode DoS" adversarial inputs designed to maximize decode CPU.
 
 ---
 
