@@ -52,9 +52,13 @@ Using 9333 for the server avoids the port conflict.
 
 ## Commands
 
-### Check Status
+**Important: Always run APR from the project directory:**
 ```bash
 cd /data/projects/flywheel_connectors
+```
+
+### Check Status
+```bash
 apr status          # Check Oracle sessions
 apr list            # List workflows
 apr history         # Show revision history
@@ -66,8 +70,10 @@ apr dashboard       # Interactive analytics
 # Standard round (README + spec only)
 apr run <N>
 
-# Include implementation doc (every 3-4 rounds)
+# Include implementation doc (manual override)
 apr run <N> --include-impl
+
+# With impl_every_n: 4 in workflow config, impl is auto-included on rounds 4, 8, 12...
 
 # First run with manual login (if Oracle not authenticated)
 apr run <N> --login --wait
@@ -78,6 +84,13 @@ apr run <N> --dry-run
 # Render prompt for manual paste
 apr run <N> --render --output /tmp/prompt.md
 ```
+
+### How Documents Are Sent
+
+APR pastes document contents **inline** (not as file attachments). This is more reliable:
+- No "duplicate file" errors from ChatGPT
+- No silent upload failures
+- Works consistently for documents up to ~200KB
 
 ### View and Compare Rounds
 ```bash
@@ -163,10 +176,11 @@ The APR workflow is configured in `.apr/workflows/fcp.yaml`:
 - **Documents**: README.md, FCP_Specification_V2.md, docs/fcp_model_connectors_rust.md
 - **Model**: GPT Pro 5.2 Thinking (Extended Reasoning)
 - **Output**: `.apr/rounds/fcp/`
+- **impl_every_n**: 4 (auto-include implementation every 4th round)
 
 ## Tips
 
-1. **Include implementation every 3-4 rounds** - Keeps spec grounded in reality
+1. **impl_every_n handles periodic inclusion** - With `impl_every_n: 4`, rounds 4, 8, 12... auto-include implementation
 2. **Don't skip harmonization** - Changes should flow through all docs
 3. **Watch for convergence** - Use `apr stats` to see if changes are dampening
 4. **Target 15-20 rounds** - For complex protocols, more iterations = better spec

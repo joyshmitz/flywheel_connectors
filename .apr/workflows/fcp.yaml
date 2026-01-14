@@ -12,6 +12,7 @@ oracle:
 
 rounds:
   output_dir: .apr/rounds/fcp
+  impl_every_n: 4  # Auto-include implementation every 4th round
 
 template: |
   First, read this README:
