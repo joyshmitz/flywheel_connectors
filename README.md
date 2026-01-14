@@ -119,6 +119,7 @@ FCP addresses these through:
 | **MeshNode** | A device participating in the FCP mesh |
 | **Capability** | An authorized operation with cryptographic proof; grant_object_ids enable mechanical verification |
 | **Role** | Named bundle of capabilities (RoleObject) for simplified policy administration |
+| **ResourceObject** | Zone-bound handle for external resources (files, repos, APIs) enabling auditable access control |
 | **Connector** | A sandboxed binary or WASI module that bridges external services to FCP |
 | **Receipt** | Signed proof of operation execution for idempotency |
 | **Revocation** | First-class object that invalidates tokens, keys, or devices |
@@ -135,7 +136,7 @@ FCP uses five distinct cryptographic key roles:
 | **Node Issuance Key** | Ed25519 | Per-device; mints capability tokens (separately revocable) |
 | **Zone Encryption Key** | ChaCha20-Poly1305 | Per-zone symmetric key; encrypts zone data via AEAD |
 
-Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailscale node ID to all three node key types. Issuance keys are separately revocable so token minting can be disabled without affecting other node functions.
+Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailscale node ID to all three node key types plus their Key IDs (KIDs) for rotation tracking. Issuance keys are separately revocable so token minting can be disabled without affecting other node functions.
 
 **Threshold Owner Key (Recommended):** The owner key produces standard Ed25519 signatures, but implementations SHOULD use FROST (k-of-n threshold signing) so no single device ever holds the complete owner private key. This provides catastrophic compromise resistance and loss tolerance.
 
@@ -190,10 +191,15 @@ Every piece of data carries provenance tracking:
 |-------|---------|
 | `origin_zone` | Where data originated |
 | `current_zone` | Updated on every zone crossing |
+| `integrity_label` | Numeric integrity level (higher = more trusted source) |
+| `confidentiality_label` | Numeric confidentiality level (higher = more sensitive) |
+| `label_adjustments` | Proof-carrying label changes (elevation, declassification) with ApprovalToken references |
 | `taint` | Compositional flags (PUBLIC_INPUT, EXTERNAL_INPUT, PROMPT_SURFACE, etc.) |
-| `taint_reductions` | Proof-carrying reductions (e.g., URL scan cleared UNVERIFIED_LINK) |
+| `taint_reductions` | Proof-carrying reductions via SanitizerReceipt references |
 
-**Taint Reduction**: Instead of taint only ever accumulating (which leads to "approve everything" fatigue), specific taints can be cleared when you have a verifiable attestation from a sanitizer capability (URL scanner, malware scanner, schema validator).
+**Security-Critical Merge Rule**: When combining data from multiple sources, the result inherits `MIN(integrity)` and `MAX(confidentiality)`. This ensures compromised inputs can't elevate trust and sensitive outputs can't be inadvertently exposed.
+
+**Taint Reduction**: Instead of taint only ever accumulating (which leads to "approve everything" fatigue), specific taints can be cleared when you have a verifiable `SanitizerReceipt` from a sanitizer capability (URL scanner, malware scanner, schema validator). The receipt is a first-class mesh object that proves the sanitization happened.
 
 ### Defense-in-Depth
 
@@ -276,7 +282,13 @@ High-throughput symbol delivery uses per-session authentication (not per-frame s
 
 **Crypto Suite Negotiation**: Initiator proposes supported suites; responder selects. Suite1 uses HMAC-SHA256 (broad compatibility), Suite2 uses BLAKE3 (performance). This avoids Poly1305 single-use constraints while enabling future algorithm agility.
 
+**Session Rekey Triggers**: Sessions automatically rekey after configurable thresholds—frames (default: 1B), elapsed time (default: 24h), or cumulative bytes (default: 1 TiB)—to bound key exposure and avoid pathological long-lived sessions.
+
 This amortizes Ed25519 signature cost over many frames while preserving cryptographic attribution and preventing nonce reuse across senders.
+
+### Control Plane Framing (FCPC)
+
+While FCPS handles high-throughput symbol delivery, FCPC provides reliable, ordered, backpressured framing for control-plane objects (invoke, response, receipts, approvals, audit events). FCPC uses the session's negotiated `k_ctx` symmetric key for AEAD encryption/authentication, enabling secure control messages without per-message Ed25519 signatures.
 
 ---
 
@@ -550,6 +562,11 @@ First-class revocation objects can invalidate:
 
 Revocations are owner-signed and enforced before every operation.
 
+**Revocation Freshness Policy**: Tiered behavior for offline/degraded scenarios:
+- **Strict**: Requires fresh revocation check or abort (default for Risky/Dangerous operations)
+- **Warn**: Log warning but proceed if cached revocation list is within max_age
+- **BestEffort**: Use stale cache if offline, log degraded state
+
 ### Admission Control
 
 Nodes enforce per-peer resource budgets to prevent DoS:
@@ -698,6 +715,7 @@ flywheel_connectors/
 │   ├── fcp-manifest/      # Manifest parsing and validation
 │   ├── fcp-sandbox/       # OS sandbox integration (seccomp, seatbelt, AppContainer)
 │   ├── fcp-sdk/           # SDK for building connectors
+│   ├── fcp-conformance/   # Interop tests, golden vectors, property tests, fuzz harness
 │   └── fcp-cli/           # CLI tools (fcp install, fcp doctor, etc.)
 │
 ├── connectors/            # Individual connector implementations
