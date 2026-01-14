@@ -513,7 +513,7 @@ impl MeshNode {
     fn check_admission(&self, peer: &TailscaleNodeId, bytes: u64) -> Result<(), AdmissionError> {
         let budget = self.peer_budgets.get_or_default(peer);
         budget.check_bytes(bytes)?;
-        budget.check_symbols(1)?;
+        budget.check_rate_limits()?;
         Ok(())
     }
 }
@@ -653,6 +653,19 @@ pub struct ZoneKeyManifest {
     pub ratchet: Option<ZoneRatchetPolicy>,
     pub wrapped_keys: Vec<WrappedZoneKey>,
     pub signature: Signature,
+}
+
+pub enum ZoneKeyAlgorithm {
+    ChaCha20Poly1305,
+    XChaCha20Poly1305,
+}
+
+pub struct WrappedZoneKey {
+    pub node_id: TailscaleNodeId,
+    /// Which node_enc_pubkey was used (supports node key rotation)
+    pub node_enc_kid: [u8; 8],
+    /// Sealed box containing the 32-byte zone symmetric key
+    pub sealed_key: Vec<u8>,
 }
 
 pub struct WrappedObjectIdKey {
