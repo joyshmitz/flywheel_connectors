@@ -706,6 +706,17 @@ pub struct ZoneSecurityProfile {
     /// Maximum epoch duration in seconds (bounds exposure window)
     pub max_epoch_secs: u64,
 }
+
+impl Default for ZoneSecurityProfile {
+    fn default() -> Self {
+        Self {
+            zone_id: ZoneId::private(),
+            key_mode: ZoneKeyMode::ManifestDistributed,
+            require_pcs: false,
+            max_epoch_secs: 86400, // 24 hours
+        }
+    }
+}
 ```
 
 ---
