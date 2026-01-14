@@ -114,7 +114,7 @@ FCP addresses these through:
 |------|------------|
 | **Symbol** | A RaptorQ-encoded fragment; any K' symbols reconstruct the original |
 | **Object** | Content-addressed data with ObjectHeader (refs, retention, provenance) |
-| **Zone** | A cryptographic namespace with HKDF-derived encryption key |
+| **Zone** | A cryptographic namespace with its own symmetric encryption key |
 | **Epoch** | A logical time unit; no ordering within, ordering between |
 | **MeshNode** | A device participating in the FCP mesh |
 | **Capability** | An authorized operation with cryptographic proof; grant_object_ids enable mechanical verification |
@@ -154,7 +154,7 @@ These are **hard requirements** that FCP enforces mechanically:
 
 ## Zone Architecture
 
-Zones are **cryptographic boundaries**, not labels. Each zone has its own encryption key derived from the owner's secret key using HKDF with domain separation.
+Zones are **cryptographic boundaries**, not labels. Each zone has its own randomly generated symmetric encryption key, distributed to eligible nodes via owner-signed `ZoneKeyManifest` objects. HKDF is used for subkey derivation (e.g., per-sender subkeys), not for deriving zone keys from owner secret material.
 
 ### Zone Hierarchy with Tailscale Mapping
 
@@ -198,7 +198,7 @@ Every piece of data carries provenance tracking:
 
 ```
 Layer 1: Tailscale ACLs     → Network-level isolation
-Layer 2: Zone Encryption    → Cryptographic isolation (HKDF-derived keys)
+Layer 2: Zone Encryption    → Cryptographic isolation (per-zone symmetric keys)
 Layer 3: Policy Objects     → Authority isolation
 Layer 4: Capability Signing → Operation isolation (node-signed tokens)
 Layer 5: Revocation Check   → Continuous validity enforcement

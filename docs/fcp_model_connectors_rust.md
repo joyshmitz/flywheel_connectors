@@ -680,6 +680,32 @@ pub struct ZoneRatchetPolicy {
     pub overlap_secs: u64,
     pub retain_epochs: u32,
 }
+
+/// Zone key distribution mode (NORMATIVE when MLS supported)
+///
+/// Zone keys are **randomly generated** symmetric keys, NOT derived from owner secret material.
+/// HKDF is used for **subkey derivation** (per-sender subkeys), not for deriving zone keys.
+pub enum ZoneKeyMode {
+    /// Baseline: symmetric keys distributed via owner-signed manifests
+    /// Keys are randomly generated and sealed to each node's X25519 key
+    ManifestDistributed,
+
+    /// Optional upgrade: MLS/TreeKEM group key agreement for post-compromise security
+    /// Epoch secrets rotate on membership changes
+    MlsTreeKem,
+}
+
+/// Zone security profile (NORMATIVE when present)
+///
+/// Controls zone key distribution mode and post-compromise security requirements.
+pub struct ZoneSecurityProfile {
+    pub zone_id: ZoneId,
+    pub key_mode: ZoneKeyMode,
+    /// Require PCS for this zone (default true for z:owner if MLS enabled)
+    pub require_pcs: bool,
+    /// Maximum epoch duration in seconds (bounds exposure window)
+    pub max_epoch_secs: u64,
+}
 ```
 
 ---

@@ -1248,10 +1248,15 @@ impl ApprovalToken {
 }
 
 /// Zone encryption key (NORMATIVE)
+///
+/// Zone keys are **randomly generated** symmetric keys, NOT derived from owner secret material.
+/// HKDF is used for **subkey derivation** (per-sender subkeys, epoch subkeys), not for
+/// deriving the zone key itself.
 pub struct ZoneKey {
     pub zone_id: ZoneId,
     pub key_id: [u8; 8],
-    pub symmetric_key: [u8; 32],  // ChaCha20-Poly1305
+    /// Randomly generated 256-bit symmetric key for ChaCha20-Poly1305 AEAD
+    pub symmetric_key: [u8; 32],
     pub created_at: u64,
     pub expires_at: Option<u64>,
 }
@@ -1259,11 +1264,13 @@ pub struct ZoneKey {
 impl ZoneKey {
     /// Zone keys are provisioned via ZoneKeyManifest objects (NORMATIVE).
     /// Nodes MUST NOT require access to owner secret key material to encrypt/decrypt zone data.
+    /// The owner key signs manifests (authorization), but does NOT act as an online KDF root.
     ///
     /// This enables:
     /// - True key rotation (new key_id without changing owner key)
     /// - Per-node key distribution (sealed to each node's X25519 key)
     /// - Operational key management without owner key exposure
+    /// - Clean separation: owner key for attestation/revocation, zone keys for encryption
 
     /// Encrypt data with this zone key
     pub fn encrypt(&self, plaintext: &[u8], nonce: &[u8; 12], aad: &[u8]) -> (Vec<u8>, [u8; 16]) {
@@ -1504,6 +1511,60 @@ Port-gating provides defense-in-depth without overreaching:
 - ACL allows traffic **only** between nodes tagged for that zone on those ports
 - Funnel/public ingress is restricted to low-trust zones' ports only
 - The real security (integrity, confidentiality, taint, authority) is enforced cryptographically
+
+### 5.5 Zone Group Key Agreement (RECOMMENDED for z:owner, z:private)
+
+FCP V2 supports an optional group key agreement mode for zones using MLS-style TreeKEM.
+When enabled, zone membership changes produce a new epoch of group secrets with post-compromise security (PCS).
+
+**Why this matters:**
+- **Post-compromise security (PCS):** After removal/commit, an attacker who stole past keys loses access to future traffic
+- **Asynchronous membership changes:** Fits the mesh/offline story—devices don't need to be online simultaneously
+- **Strongest guarantees for z:owner:** Where you want maximum protection
+
+**NORMATIVE:**
+- Implementations MAY omit MLS support, but if supported it MUST be selectable per-zone.
+- When MLS is enabled for a zone, `ZoneKeyManifest` objects distribute **epoch secrets** (or MLS commit secrets), not long-lived static symmetric zone keys.
+- The baseline `ManifestDistributed` mode remains the default for all zones.
+
+```rust
+/// Zone key distribution mode (NORMATIVE when MLS supported)
+pub enum ZoneKeyMode {
+    /// Baseline: symmetric keys distributed via owner-signed manifests
+    /// Keys are randomly generated and sealed to each node's X25519 key
+    ManifestDistributed,
+
+    /// Optional upgrade: MLS/TreeKEM group key agreement for post-compromise security
+    /// Epoch secrets rotate on membership changes
+    MlsTreeKem,
+}
+
+/// Zone security profile (NORMATIVE when present)
+pub struct ZoneSecurityProfile {
+    pub zone_id: ZoneId,
+    pub key_mode: ZoneKeyMode,
+    /// Require PCS for this zone (default true for z:owner if MLS enabled)
+    pub require_pcs: bool,
+    /// Maximum epoch duration (bounds exposure window)
+    pub max_epoch_secs: u64,
+}
+
+impl Default for ZoneSecurityProfile {
+    fn default() -> Self {
+        Self {
+            zone_id: ZoneId::private(),
+            key_mode: ZoneKeyMode::ManifestDistributed,
+            require_pcs: false,
+            max_epoch_secs: 86400, // 24 hours
+        }
+    }
+}
+```
+
+**Migration Path:**
+- Zones start with `ManifestDistributed` (current behavior)
+- Owner can upgrade to `MlsTreeKem` for sensitive zones
+- Downgrade requires explicit owner action and re-sealing all zone data
 
 ---
 
