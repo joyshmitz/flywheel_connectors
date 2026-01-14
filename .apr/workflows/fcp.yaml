@@ -7,8 +7,8 @@ documents:
   implementation: docs/fcp_model_connectors_rust.md
 
 oracle:
-  model: "5.2 Thinking"
-  thinking_time: heavy
+  model: "5.2 Pro"
+  thinking_time: extended
 
 rounds:
   output_dir: .apr/rounds/fcp
