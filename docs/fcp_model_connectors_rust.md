@@ -45,7 +45,7 @@
 17. Observability and Audit
     - 17.1 Metrics (NORMATIVE)
     - 17.2 Structured Logs
-    - 17.3 Audit Chain (AuditEvent, AuditHead, ZoneFrontier)
+    - 17.3 Audit Chain (AuditEvent, AuditHead, ZoneCheckpoint)
 18. Connector Archetypes (V2) and Patterns
 19. Rust Connector Skeleton (SDK-aligned)
 20. Conformance Checklist (Connector)
@@ -233,6 +233,10 @@ singleton_writer = true  # Legacy: equivalent to model = "singleton_writer"
 [connector.state]
 # "stateless" | "singleton_writer" | "crdt"
 model = "singleton_writer"
+# NORMATIVE: State schema versioning for safe upgrades
+state_schema_version = "1"
+# Optional migration hint (command or script reference)
+# migration_hint = "telegram/state_migrate_v0_to_v1"
 # For CRDT models:
 # crdt_type = "lww_map"
 # snapshot_every_updates = 5000
@@ -307,7 +311,7 @@ same `prev` (competing seq), nodes MUST treat this as a safety incident:
 | `decode_status` | Any -> Any | Feedback: received/needed symbols |
 | `symbol_ack` | Any -> Any | Stop condition for delivery |
 
-**FCPS Frame Format (90-byte header):**
+**FCPS Frame Format (114-byte header):**
 
 ```
 Bytes 0-3:    Magic (0x46 0x43 0x50 0x53 = "FCPS")
@@ -320,9 +324,10 @@ Bytes 48-49:  Symbol Size (u16 LE, default 1024)
 Bytes 50-57:  Zone Key ID (8 bytes, for rotation)
 Bytes 58-89:  Zone ID hash (32 bytes, BLAKE3; see ZoneIdHash)
 Bytes 90-97:  Epoch ID (u64 LE)
-Bytes 98-105: Frame Seq (u64 LE, per-sender monotonic counter)
-Bytes 106+:   Symbol payloads (concatenated)
-Final 8:      Checksum (XXH3-64)
+Bytes 98-105: Sender Instance ID (u64 LE, reboot-safety for deterministic nonces)
+Bytes 106-113: Frame Seq (u64 LE, per-sender monotonic counter)
+Bytes 114+:   Symbol payloads (concatenated)
+NOTE: No separate checksum. Integrity provided by per-symbol AEAD tags + per-frame session MAC.
 ```
 
 **Symbol Envelope (NORMATIVE):**
@@ -346,6 +351,8 @@ pub struct SymbolEnvelope {
     pub epoch_id: EpochId,
     /// Sender node id (NORMATIVE for per-sender subkeys)
     pub source_id: TailscaleNodeId,
+    /// Sender instance ID (NORMATIVE for reboot safety - deterministic nonces)
+    pub sender_instance_id: u64,
     /// Per-sender monotonic frame sequence (NORMATIVE)
     pub frame_seq: u64,
     /// AEAD authentication tag
@@ -937,8 +944,26 @@ pub enum ApprovalScope {
     Execution {
         connector_id: ConnectorId,
         method_pattern: String,
-        input_constraints: Option<String>,
+        /// NORMATIVE: For Interactive approvals on Risky/Dangerous ops, this MUST be set
+        request_object_id: Option<ObjectId>,
+        /// NORMATIVE: BLAKE3 hash of canonical input bytes (schema-prefixed CBOR)
+        input_hash: Option<[u8; 32]>,
+        /// Typed constraints (interop-safe); replaces free-form string
+        input_constraints: Vec<InputConstraint>,
     },
+}
+
+/// Input constraint (NORMATIVE)
+/// JSON Pointer (RFC 6901) only; JSONPath/regex are forbidden for interop stability.
+pub struct InputConstraint {
+    pub json_pointer: String,
+    pub op: ConstraintOp,
+    pub value: Value,
+}
+
+/// Constraint operators for input validation
+pub enum ConstraintOp {
+    Eq, Neq, In, NotIn, Prefix, Suffix, Contains,
 }
 
 impl ApprovalToken {
@@ -1308,6 +1333,10 @@ pub struct NetworkConstraints {
     pub require_sni: bool,
     /// Optional SPKI pins (base64-encoded SHA256 of SubjectPublicKeyInfo)
     pub spki_pins: Vec<String>,
+    /// Deny IP literals unless explicitly allowed (NORMATIVE default: true)
+    pub deny_ip_literals: bool,
+    /// Hostnames MUST be canonicalized (lowercase, IDNA2008, no trailing dot) (NORMATIVE default: true)
+    pub require_host_canonicalization: bool,
 }
 ```
 
@@ -1365,6 +1394,22 @@ pub struct EgressHttpRequest {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     /// If set, proxy injects this credential (NORMATIVE)
+    pub credential: Option<CredentialId>,
+}
+
+/// General egress request (NORMATIVE) - supports HTTP and raw TCP
+pub enum EgressRequest {
+    Http(EgressHttpRequest),
+    TcpConnect(EgressTcpConnectRequest),
+}
+
+/// TCP connect request for database/queue connectors (NORMATIVE)
+pub struct EgressTcpConnectRequest {
+    pub host: String,
+    pub port: u16,
+    pub use_tls: bool,
+    pub sni: Option<String>,
+    pub spki_pins: Vec<String>,
     pub credential: Option<CredentialId>,
 }
 ```
@@ -1560,8 +1605,16 @@ pub struct ResourceObject {
     pub uri: String,
     /// External resource type
     pub resource_type: String,
+    /// External resource integrity level (NORMATIVE for information flow)
+    pub resource_integrity_level: u8,
+    /// External resource confidentiality level (NORMATIVE for information flow)
+    pub resource_confidentiality_level: u8,
+    /// Resource taint flags for external resource classification
+    pub resource_taint: TaintFlags,
     /// Additional metadata (JSON)
     pub metadata: Option<Value>,
+    /// Connector signature over resource metadata
+    pub signature: Signature,
 }
 
 /// Simulate request for preflight checks (NORMATIVE)
@@ -1729,6 +1782,9 @@ Map connector operations to MCP-compatible tools with:
 [manifest]
 format = "fcp-connector-manifest"
 schema_version = "2.0"
+min_mesh_version = "2.0.0"              # NORMATIVE: minimum compatible mesh version
+min_protocol = "fcp2-sym"               # NORMATIVE: required protocol features
+interface_hash = "blake3:..."           # NORMATIVE: hash of API surface (ops + schemas + caps)
 
 [connector]
 id = "fcp.telegram"
@@ -1908,6 +1964,19 @@ pub enum RegistrySource {
     Remote { url: Url, trusted_keys: Vec<Ed25519PublicKey> },
     SelfHosted { url: Url, trusted_keys: Vec<Ed25519PublicKey> },
     MeshMirror { zone: ZoneId, index_object_id: ObjectId },
+}
+
+/// Optional registry security profile (NORMATIVE when configured)
+///
+/// Provides additional protections against distribution attacks:
+/// - TUF (The Update Framework) prevents freeze/rollback and mix-and-match attacks
+/// - Sigstore/cosign adds supply-chain provenance verification
+pub struct RegistrySecurityProfile {
+    /// If present, registry clients MUST enforce TUF snapshot/timestamp semantics.
+    /// The referenced object contains TUF root metadata pinned in z:owner.
+    pub tuf_root_object_id: Option<ObjectId>,
+    /// If true, verify Sigstore/cosign signatures in addition to publisher/registry keys.
+    pub require_sigstore: bool,
 }
 ```
 
@@ -2386,20 +2455,28 @@ pub struct AuditHead {
     pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
 }
 
-/// Frontier checkpoint for fast sync (NORMATIVE)
+/// Zone checkpoint for fast sync (NORMATIVE)
 ///
-/// Compact checkpoint of zone state for efficient synchronization.
-/// Nodes can compare frontiers to quickly determine staleness.
-pub struct ZoneFrontier {
+/// Quorum-signed checkpoint of zone state for efficient synchronization.
+/// Nodes can compare checkpoints to quickly determine staleness.
+/// Acts as the single GC root (so reachability GC is well-defined).
+pub struct ZoneCheckpoint {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
+    /// Enforceable heads (NORMATIVE):
     pub rev_head: ObjectId,
     pub rev_seq: u64,
     pub audit_head: ObjectId,
     pub audit_seq: u64,
+    /// Policy/config heads (NORMATIVE):
+    pub zone_definition_head: ObjectId,
+    pub zone_policy_head: ObjectId,
+    pub active_zone_key_manifest: ObjectId,
+    /// Monotonic checkpoint sequence (NORMATIVE; per-zone)
+    pub checkpoint_seq: u64,
     pub as_of_epoch: EpochId,
-    /// Signature by executing node
-    pub signature: Signature,
+    /// Quorum-signed (Byzantine-resilient under n/f model)
+    pub quorum_signatures: Vec<QuorumSignature>,
 }
 ```
 
