@@ -114,11 +114,28 @@ pub enum ConnectorArchetype {
 /// Connector runtime format (NORMATIVE)
 pub enum ConnectorFormat {
     /// Native executable (ELF/Mach-O/PE)
+    /// Requires OS-level sandboxing (seccomp, landlock, AppArmor).
     Native,
-    /// WASI module (WASM) executed under a WASI runtime with hostcalls gated by capabilities
+    /// WASI module (WASM) executed under a WASI runtime with hostcalls gated by capabilities.
     /// Provides portable, capability-based sandbox consistent across OSes.
+    /// RECOMMENDED for high-risk connectors (financial, credential-handling, external API).
     Wasi,
 }
+
+/// WASI Format Guidance (NORMATIVE for risk classification):
+///
+/// Connectors handling SafetyTier::Dangerous operations or high-value secrets
+/// SHOULD use WASI format unless performance requirements preclude it.
+///
+/// Benefits:
+/// - Memory isolation: WASM linear memory prevents buffer overflow exploits
+/// - Capability-gated hostcalls: All syscalls are explicit capability grants
+/// - Cross-platform consistency: Same binary, same sandbox semantics everywhere
+///
+/// WASI Runtime Requirements (NORMATIVE):
+/// - Runtime MUST implement WASI preview2 or later
+/// - Network operations MUST be gated by NetworkConstraints
+/// - File operations MUST be scoped to granted directory capabilities
 ```
 
 Connector lifecycle:
@@ -319,15 +336,19 @@ impl ZoneKey {
     /// sender_key = HKDF-SHA256(
     ///     ikm = zone_symmetric_key,
     ///     salt = zone_key_id,
-    ///     info = "FCP2-SENDER-KEY-V1" || sender_node_id
+    ///     info = "FCP2-SENDER-KEY-V1" || sender_node_id || sender_instance_id_le
     /// )
-    pub fn derive_sender_subkey(&self, sender: &TailscaleNodeId) -> [u8; 32];
+    /// The sender_instance_id ensures that if a sender reboots and resets frame_seq,
+    /// it will derive a fresh subkey, preventing nonce reuse across reboots.
+    pub fn derive_sender_subkey(&self, sender: &TailscaleNodeId, sender_instance_id: u64) -> [u8; 32];
 }
 ```
 
 **Why per-sender subkeys + deterministic nonces:**
 - 64-bit random nonces have birthday collision risk over long-running systems with many senders
 - Per-sender subkeys eliminate cross-sender nonce collision (keys differ per sender)
+- `sender_instance_id` (random u64 at startup) makes subkeys reboot-safe: if a sender restarts
+  and frame_seq resets to 0, the new instance_id yields a different subkey, preventing nonce reuse
 - Deterministic `frame_seq` avoids RNG dependence and is testable
 - No per-frame random generation overhead
 
@@ -408,10 +429,13 @@ pub struct MeshSessionHello {
     pub from: TailscaleNodeId,
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
+    /// Random nonce for replay protection (NORMATIVE)
+    pub nonce: [u8; 16],
     pub timestamp: u64,
     /// Supported crypto suites (ordered by preference)
     pub suites: Vec<SessionCryptoSuite>,
-    /// Node signature over transcript
+    /// Node signature over transcript (NORMATIVE)
+    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey || nonce || timestamp || suites
     pub signature: Signature,
 }
 
@@ -420,11 +444,15 @@ pub struct MeshSessionAck {
     pub from: TailscaleNodeId,
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
+    /// Random nonce for replay protection (NORMATIVE)
+    pub nonce: [u8; 16],
     pub session_id: [u8; 16],
     /// Selected crypto suite
     pub suite: SessionCryptoSuite,
     pub timestamp: u64,
-    /// Node signature over transcript
+    /// Node signature over full handshake transcript (NORMATIVE)
+    /// transcript = "FCP2-ACK-V1" || from || to || eph_pubkey || nonce || session_id ||
+    ///              suite || timestamp || hello.eph_pubkey || hello.nonce
     pub signature: Signature,
 }
 
@@ -433,8 +461,10 @@ pub struct MeshSessionAck {
 /// prk = HKDF-SHA256(
 ///     ikm = ECDH(initiator_eph, responder_eph),
 ///     salt = session_id,
-///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
+///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id ||
+///            hello_nonce || ack_nonce
 /// )
+/// Including both nonces binds derived keys to this specific handshake.
 ///
 /// keys = HKDF-Expand(prk, info="FCP2-SESSION-KEYS-V1", L=96) split as:
 /// - k_mac_i2r (32 bytes): MAC key for initiator → responder
@@ -649,8 +679,8 @@ pub struct ZoneKeyManifest {
     /// ObjectIdKey material for this zone (NORMATIVE)
     pub object_id_key_id: [u8; 8],
     pub wrapped_object_id_keys: Vec<WrappedObjectIdKey>,
-    /// Optional epoch ratchet policy (NORMATIVE when present)
-    pub ratchet: Option<ZoneRatchetPolicy>,
+    /// Optional rekey policy for zone key rotation and past secrecy
+    pub rekey_policy: Option<ZoneRekeyPolicy>,
     pub wrapped_keys: Vec<WrappedZoneKey>,
     pub signature: Signature,
 }
@@ -674,11 +704,17 @@ pub struct WrappedObjectIdKey {
     pub sealed_key: Vec<u8>,
 }
 
-/// Epoch ratchet policy for past secrecy (NORMATIVE when present)
-pub struct ZoneRatchetPolicy {
-    pub enabled: bool,
+/// Zone rekey policy for rotation and past secrecy (NORMATIVE when present)
+pub struct ZoneRekeyPolicy {
+    /// If true, nodes MUST derive and delete epoch keys per policy
+    pub epoch_ratchet_enabled: bool,
+    /// Number of seconds of overlap to tolerate clock skew and delayed frames
     pub overlap_secs: u64,
+    /// Max epochs to retain for delayed/offline peers (bounded memory)
     pub retain_epochs: u32,
+    /// If true, automatically rotate zone_key and rewrap to current members when
+    /// any node is removed from the zone
+    pub rewrap_on_membership_change: bool,
 }
 
 /// Zone key distribution mode (NORMATIVE when MLS supported)
@@ -751,12 +787,15 @@ membership to those ports, providing defense-in-depth without encoding the full 
 ### 5.2 Unified Approval Token
 
 The unified ApprovalToken replaces separate elevation and declassification tokens with a single type.
-This simplifies: UI prompting, audit, verification code paths, and policy enforcement.
+ApprovalToken is a first-class mesh object with ObjectHeader, enabling graph-based audit trails
+and GC integration. This simplifies: UI prompting, audit, verification code paths, and policy.
 
 ```rust
 /// Unified approval token (NORMATIVE)
 pub struct ApprovalToken {
-    pub token_id: ObjectId,
+    /// Standard mesh object header (NORMATIVE)
+    /// ObjectId is derived from (header, body) per mesh object rules.
+    pub header: ObjectHeader,
     pub scope: ApprovalScope,
     /// Human-readable justification (UI + audit)
     pub justification: String,
@@ -778,6 +817,12 @@ pub enum ApprovalScope {
         from_zone: ZoneId,
         to_zone: ZoneId,
         object_ids: Vec<ObjectId>,
+    },
+    /// Scoped execution context for connector operations
+    Execution {
+        connector_id: ConnectorId,
+        method_pattern: String,
+        input_constraints: Option<String>,
     },
 }
 
@@ -805,6 +850,11 @@ impl ApprovalToken {
             }
             ApprovalScope::Declassification { from_zone, to_zone, .. } => {
                 if !trust_anchors.can_approve_declassification(&self.approved_by, from_zone, to_zone) {
+                    return Err(VerifyError::InsufficientAuthority);
+                }
+            }
+            ApprovalScope::Execution { connector_id, .. } => {
+                if !trust_anchors.can_approve_execution(&self.approved_by, connector_id) {
                     return Err(VerifyError::InsufficientAuthority);
                 }
             }
@@ -1250,6 +1300,36 @@ pub struct InvokeResponse {
     pub next_cursor: Option<String>,
     /// Receipt ObjectId (for operations with side effects)
     pub receipt: Option<ObjectId>,
+}
+
+/// Simulate request for preflight checks (NORMATIVE)
+///
+/// Allows callers to check if an operation would succeed without executing it.
+/// Connectors SHOULD implement simulate for expensive or dangerous operations.
+pub struct SimulateRequest {
+    pub id: String,
+    pub operation: OperationId,
+    pub input: Value,
+    pub capability_token: CapabilityToken,
+    /// Request cost estimate
+    pub estimate_cost: bool,
+    /// Check resource availability
+    pub check_availability: bool,
+}
+
+/// Simulate response (NORMATIVE)
+pub struct SimulateResponse {
+    pub id: String,
+    /// Would the operation succeed with current capabilities/state?
+    pub would_succeed: bool,
+    /// If would_succeed is false, why not?
+    pub failure_reason: Option<String>,
+    /// Missing capabilities needed (if any)
+    pub missing_capabilities: Vec<String>,
+    /// Estimated cost (if estimate_cost was true)
+    pub estimated_cost: Option<CostEstimate>,
+    /// Resource availability check result
+    pub availability: Option<ResourceAvailability>,
 }
 ```
 
