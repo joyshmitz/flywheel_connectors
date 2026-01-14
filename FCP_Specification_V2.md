@@ -265,8 +265,8 @@ pub struct OwnerKeyShare {
     pub header: ObjectHeader,
     pub share_id: u8,
     pub node_id: TailscaleNodeId,
-    /// Sealed to node_enc_pubkey
-    pub sealed_share: Vec<u8>,
+    /// Sealed to node_enc_pubkey using HPKE (NORMATIVE; see §3.6.1)
+    pub sealed_share: HpkeSealedBox,
     pub issued_at: u64,
     /// Owner signature over the distribution statement
     pub signature: Signature,
@@ -550,6 +550,26 @@ impl CanonicalSerializer {
 }
 ```
 
+### 3.5.1 Signature Canonicalization (NORMATIVE)
+
+For any mesh object that includes a `signature: Signature` field, verification MUST follow a single,
+deterministic procedure to prevent cross-language divergence.
+
+**Rule:**
+1. Define an "unsigned view" of the object equal to the object with its `signature` field removed
+   (and for multi-signature objects, with `quorum_signatures` removed).
+2. Serialize the unsigned view using **deterministic CBOR** (RFC 8949 canonical encoding),
+   prefixed by the SchemaHash as described in §3.5.
+3. The signature MUST be Ed25519 over those bytes.
+
+**Multi-signature ordering (NORMATIVE):**
+Vectors of signatures (e.g., `quorum_signatures: Vec<(TailscaleNodeId, Signature)>`) MUST be sorted
+lexicographically by `TailscaleNodeId` (byte order) before hashing, signing, or verifying.
+
+**Why this is required:**
+- Prevents "same semantic content, different byte encoding" bugs.
+- Prevents malleability via reordering signature arrays.
+
 ### 3.6 ObjectHeader
 
 All mesh-stored objects MUST begin with an ObjectHeader (NORMATIVE):
@@ -665,6 +685,37 @@ pub enum RetentionClass {
     Ephemeral,
 }
 ```
+
+### 3.6.1 HPKE Sealed Boxes (NORMATIVE)
+
+Whenever the spec says an object is "sealed to node_enc_pubkey", the encoding MUST use HPKE
+(RFC 9180) to avoid implementation divergence.
+
+**Baseline profile (MUST implement):**
+- KEM: DHKEM(X25519, HKDF-SHA256)
+- KDF: HKDF-SHA256
+- AEAD: ChaCha20-Poly1305
+
+```rust
+/// Standard sealed container (NORMATIVE)
+pub struct HpkeSealedBox {
+    /// RFC9180 identifiers for algorithm agility.
+    pub kem_id: u16,
+    pub kdf_id: u16,
+    pub aead_id: u16,
+    /// HPKE encapsulated key (enc)
+    pub enc: Vec<u8>,
+    /// AEAD ciphertext (includes auth tag per HPKE)
+    pub ct: Vec<u8>,
+}
+```
+
+**Associated data (NORMATIVE):**
+- Seal operations MUST include AAD that binds the sealed payload to:
+  - `zone_id_hash` (or zone_id if not available),
+  - `recipient_node_id`,
+  - `purpose` string (e.g., "FCP2-ZONE-KEY", "FCP2-OBJECTID-KEY", "FCP2-OWNER-SHARE", "FCP2-SECRET-SHARE"),
+  - and `issued_at`.
 
 ### 3.7 Garbage Collection and Pinning
 
@@ -974,9 +1025,19 @@ pub struct MeshSessionHello {
     pub timestamp: u64,
     /// Supported crypto suites (ordered by preference)
     pub suites: Vec<SessionCryptoSuite>,
+    /// Optional transport limits (NORMATIVE when present)
+    /// Used to keep FCPS frames MTU-safe and avoid fragmentation.
+    pub transport_limits: Option<TransportLimits>,
     /// Node signature over transcript (NORMATIVE)
-    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey || nonce || cookie || timestamp || suites
+    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey || nonce || cookie || timestamp || suites || transport_limits
     pub signature: Signature,
+}
+
+/// Negotiated transport limits (NORMATIVE when used)
+pub struct TransportLimits {
+    /// Maximum UDP payload bytes the sender will transmit for FCPS frames to this peer.
+    /// Default if absent: 1200.
+    pub max_datagram_bytes: u16,
 }
 
 /// Session handshake: responder → initiator
@@ -1130,6 +1191,35 @@ Symbol-native frame format:
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### 4.3.1 MTU Safety and Frame Size Limits (NORMATIVE)
+
+FCP nodes MUST avoid IP fragmentation in default configurations.
+
+**Baseline rule:**
+- Implementations MUST support sending FCPS frames that fit within a UDP payload of **≤ 1200 bytes**
+  (QUIC's widely-used minimum datagram size) without relying on path MTU discovery.
+
+**Negotiated limits (RECOMMENDED; NORMATIVE when used):**
+- During MeshSession establishment, peers MAY negotiate `max_datagram_bytes`.
+- If negotiated, senders MUST NOT exceed the negotiated limit for FCPS datagrams.
+
+**Symbol sizing rule (NORMATIVE):**
+- A sender MUST choose `symbol_size` and `symbol_count` so that:
+  `len(FCPS_header) + Σ(len(symbol_records)) + len(checksum) ≤ max_datagram_bytes`.
+- Receivers MUST reject frames exceeding their configured maximum (to prevent allocation DoS).
+
+**Interoperability defaults:**
+- `max_datagram_bytes` default: **1200**
+- `symbol_size` default: **1024**
+- Senders SHOULD default to **1 symbol per FCPS frame** unless the negotiated limit safely permits more.
+
+**Transport recommendation (RECOMMENDED):**
+- When QUIC DATAGRAM is available between peers, FCPS frames SHOULD be carried as QUIC datagrams.
+- Otherwise FCPS frames MAY be carried over UDP directly.
+
+**NORMATIVE invariant:**
+- Regardless of carrier, the FCPS on-wire frame format and authentication rules remain the same.
 
 **Per-Sender Subkeys and Deterministic Nonces (NORMATIVE):**
 
@@ -1387,7 +1477,55 @@ impl Default for ZoneTransportPolicy {
         }
     }
 }
+```
 
+### 5.2.1 ZoneDefinitionObject and ZonePolicyObject (NORMATIVE)
+
+Zones and policies MUST be representable as mesh objects so that:
+- configuration is authenticated (owner-signed),
+- distributed (symbol layer),
+- auditable (hash-linked via audit),
+- and rollback-able.
+
+```rust
+/// Owner-signed zone definition (NORMATIVE)
+pub struct ZoneDefinitionObject {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub name: String,
+    pub integrity_level: u8,
+    pub confidentiality_level: u8,
+    pub symbol_port: u16,
+    pub control_port: u16,
+    pub transport_policy: Option<ZoneTransportPolicy>,
+
+    /// Reference to the active policy object for this zone (NORMATIVE)
+    pub policy_object_id: ObjectId,
+
+    /// Optional previous ZoneDefinitionObject for history/rollback
+    pub prev: Option<ObjectId>,
+
+    /// Owner signature (see §3.5.1)
+    pub signature: Signature,
+}
+
+/// Owner-signed policy object (NORMATIVE)
+pub struct ZonePolicyObject {
+    pub header: ObjectHeader,
+    pub zone_id: ZoneId,
+    pub policy: ZonePolicy,
+    pub prev: Option<ObjectId>,
+    pub signature: Signature,
+}
+```
+
+**Runtime rule (NORMATIVE):**
+- A MeshNode MUST treat the latest pinned ZoneDefinitionObject as the canonical configuration for
+  that zone.
+- Policy evaluation MUST use the ZonePolicyObject referenced by `policy_object_id` unless the node
+  is in explicit degraded mode and logs `policy.degraded_mode`.
+
+```rust
 /// Unified approval token (NORMATIVE)
 ///
 /// Consolidates ElevationToken and DeclassificationToken into a single type.
@@ -1557,16 +1695,16 @@ pub struct WrappedZoneKey {
     pub node_id: TailscaleNodeId,
     /// Which node_enc_pubkey was used (supports node key rotation)
     pub node_enc_kid: [u8; 8],
-    /// Sealed box containing the 32-byte zone symmetric key
-    pub sealed_key: Vec<u8>,
+    /// HPKE sealed box containing the 32-byte zone symmetric key (NORMATIVE; see §3.6.1)
+    pub sealed_key: HpkeSealedBox,
 }
 
 /// Wrapped ObjectIdKey for distribution (NORMATIVE)
 pub struct WrappedObjectIdKey {
     pub node_id: TailscaleNodeId,
     pub node_enc_kid: [u8; 8],
-    /// Sealed box containing the 32-byte ObjectIdKey
-    pub sealed_key: Vec<u8>,
+    /// HPKE sealed box containing the 32-byte ObjectIdKey (NORMATIVE; see §3.6.1)
+    pub sealed_key: HpkeSealedBox,
 }
 
 /// Zone rekey policy for rotation and past secrecy (NORMATIVE when present)
@@ -2401,6 +2539,10 @@ pub struct CapabilityConstraints {
     pub idempotency_scope: Option<String>,
     /// Optional network/TLS constraints (NORMATIVE when network.outbound is used)
     pub network: Option<NetworkConstraints>,
+    /// Optional credential bindings (NORMATIVE when present)
+    /// If set, the connector may only use the listed credentials via the egress proxy.
+    /// This enables "secretless connectors" where raw secrets never enter connector memory.
+    pub credential_allow: Vec<CredentialId>,
 }
 
 /// Network/TLS constraints (NORMATIVE for sensitive connectors)
@@ -2428,7 +2570,70 @@ pub struct NetworkConstraints {
     /// Optional SPKI pins (base64-encoded SHA256 of SubjectPublicKeyInfo)
     pub spki_pins: Vec<String>,
 }
+
+/// Credential identifier (NORMATIVE)
+pub struct CredentialId(pub String); // e.g., "cred:telegram.bot_token"
+
+/// Credential object (NORMATIVE)
+/// A zone-bound, auditable handle describing how to apply a SecretObject to outbound requests.
+pub struct CredentialObject {
+    pub header: ObjectHeader,
+    pub credential_id: CredentialId,
+    pub secret_id: SecretId,
+
+    /// How to apply the credential (NORMATIVE)
+    pub apply: CredentialApply,
+
+    /// Optional host binding for defense-in-depth (NORMATIVE when present)
+    /// If present, the egress proxy MUST reject use on other hosts.
+    pub host_allow: Vec<String>,
+
+    pub created_at: u64,
+    pub signature: Signature,
+}
+
+pub enum CredentialApply {
+    /// Set an HTTP header (e.g., Authorization: Bearer <secret>)
+    HttpHeader { name: String, format: CredentialFormat },
+    /// Set query parameter (rare; discouraged)
+    QueryParam { name: String, format: CredentialFormat },
+}
+
+pub enum CredentialFormat {
+    /// Use the secret bytes as UTF-8
+    Raw,
+    /// Prefix + secret (e.g., "Bearer " + token)
+    Prefix { prefix: String },
+}
 ```
+
+### 7.3.1 Egress Proxy Credential Injection (NORMATIVE)
+
+When a connector is running under a sandbox profile that routes network access through the MeshNode
+egress proxy (Strict/Moderate), the proxy MUST support applying credentials without revealing raw
+secret material to the connector process.
+
+```rust
+pub struct EgressHttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+
+    /// Optional credential to apply (NORMATIVE when used)
+    pub credential: Option<CredentialId>,
+}
+```
+
+**Authorization rule (NORMATIVE):**
+- If `credential` is set, the egress proxy MUST:
+  1. Verify the caller's CapabilityToken and relevant grant objects.
+  2. Verify `credential` ∈ `CapabilityConstraints.credential_allow`.
+  3. Fetch and validate the referenced CredentialObject and SecretObject.
+  4. Require a valid SecretAccessToken for secret materialization, OR use a policy-driven
+     "proxy materialization" mode where the proxy itself is the only process allowed to
+     reconstruct the secret for the request.
+  5. Inject the credential only for allowed hosts and log an audit event.
 
 ### 7.4 Placement Policy
 
@@ -2993,24 +3198,26 @@ pub struct DistributedState {
     /// Current symbol distribution
     pub distribution: SymbolDistribution,
 
-    /// Minimum coverage for availability
-    pub min_coverage: f64,
+    /// Minimum coverage for availability in basis points (NORMATIVE)
+    /// 10000 = 1.0x (K symbols), 15000 = 1.5x redundancy
+    pub min_coverage_bps: u32,
 }
 
 impl DistributedState {
-    /// Current availability
-    pub fn coverage(&self) -> f64 {
+    /// Current availability in basis points
+    pub fn coverage_bps(&self) -> u32 {
         let available: HashSet<u32> = self.distribution.node_symbols
             .values()
             .flatten()
             .cloned()
             .collect();
-        available.len() as f64 / self.distribution.k as f64
+        // basis points
+        ((available.len() as u64 * 10000) / self.distribution.k as u64) as u32
     }
 
     /// Is state reconstructable?
     pub fn is_available(&self) -> bool {
-        self.coverage() >= 1.0
+        self.coverage_bps() >= 10000
     }
 }
 ```
@@ -3197,6 +3404,53 @@ FCP V2 supports two protocol modes:
 | `decode_status` | Any → Any | Feedback: how many symbols received / still needed |
 | `symbol_ack` | Any → Any | Stop condition for delivery (object reconstructed) |
 
+### 9.2.1 SymbolRequest and Bounding (NORMATIVE)
+
+Symbol retrieval is the largest DoS/amplification surface. Requests and responses MUST be explicitly
+bounded and mechanically enforceable.
+
+```rust
+/// Request symbols for an object (NORMATIVE)
+pub struct SymbolRequest {
+    pub header: ObjectHeader,
+    pub object_id: ObjectId,
+    pub zone_id: ZoneId,
+    pub zone_key_id: [u8; 8],
+
+    /// Maximum number of symbol records the requester is willing to accept (NORMATIVE)
+    pub max_symbols: u32,
+
+    /// Optional: request specific ESIs to enable targeted repair (NORMATIVE when present)
+    /// MUST be bounded by max_symbols.
+    pub want_esi: Option<Vec<u32>>,
+
+    /// Optional decode status hint (NORMATIVE when present)
+    pub decode_status: Option<DecodeStatus>,
+
+    /// Anti-replay / correlation
+    pub requested_at: u64,
+    pub requester: TailscaleNodeId,
+    pub signature: Signature,
+}
+
+/// Delivery hint for pacing and batching (NORMATIVE when used)
+pub struct SymbolDeliveryHint {
+    /// Sender should stop after this many symbols unless updated status arrives
+    pub stop_after_symbols: u32,
+    /// Preferred symbol_size (may be ignored if it violates MTU rules)
+    pub preferred_symbol_size: Option<u16>,
+}
+```
+
+**Anti-amplification rule (NORMATIVE):**
+- A responder MUST NOT send more than `max_symbols` symbols in response to a SymbolRequest.
+- A responder MUST reject unauthenticated requests unless zone policy explicitly allows them.
+- For unauthenticated requests (e.g., z:public ingress), the responder MUST enforce a stricter
+  `max_symbols_unauthenticated` cap (default: 32).
+
+**Accounting rule (NORMATIVE):**
+- Processing a SymbolRequest MUST count against PeerBudget limits (bytes + CPU + inflight decodes).
+
 ### 9.3 Control Plane Object Model (NORMATIVE)
 
 All control-plane message types MUST have a canonical CBOR object representation with SchemaId/ObjectId.
@@ -3245,7 +3499,14 @@ When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
 ### 9.4 FCPC: Control Plane Framing (NORMATIVE)
 
 FCPC provides a reliable, backpressured framing for control-plane objects (invoke/simulate/configure/response/etc).
-It is carried over a stream transport (TCP or QUIC) inside the tailnet.
+It is carried over a stream transport inside the tailnet.
+
+**Transport requirement (NORMATIVE):**
+- Implementations MUST support FCPC over QUIC streams.
+- Implementations MAY support FCPC over TCP as a fallback.
+
+**Rationale:**
+- QUIC provides multiplexing, flow control, and congestion control with fewer bespoke edge cases.
 
 **Security (NORMATIVE):**
 - FCPC messages MUST be bound to an authenticated MeshSession (see §4.2)
@@ -3661,6 +3922,15 @@ pub struct ConnectorStateObject {
     /// Canonical connector-specific state blob
     pub state_cbor: Vec<u8>,
     pub updated_at: u64,
+
+    /// Fencing evidence (NORMATIVE for SingletonWriter)
+    /// The state writer MUST include the observed lease_seq used to produce this update.
+    pub lease_seq: Option<u64>,
+
+    /// Reference to the Lease object that fenced this write (NORMATIVE for SingletonWriter)
+    /// MUST be included in ObjectHeader.refs as well (for reachability + audit).
+    pub lease_object_id: Option<ObjectId>,
+
     /// Signature by executing node
     pub signature: Signature,
 }
@@ -3687,7 +3957,12 @@ pub struct ConnectorStateDelta {
 
 For any connector declaring `singleton_writer = true` in its manifest, the MeshNode MUST ensure
 only one node writes `ConnectorStateObject` updates at a time. This is enforced using
-`ExecutionLease` over `ConnectorStateRoot.object_id` or an equivalent lease primitive.
+`Lease` (with `LeasePurpose::ConnectorStateWrite`) over `ConnectorStateRoot.object_id`.
+
+**SingletonWriter fencing rule (NORMATIVE):**
+- If `ConnectorStateModel::SingleWriter`, then:
+  - every ConnectorStateObject MUST include `lease_seq` and `lease_object_id`,
+  - and verifiers MUST reject writes whose lease_seq is stale relative to the latest known lease.
 
 ```toml
 # In connector manifest
@@ -4282,20 +4557,26 @@ This makes offline/partition behavior consistent, auditable, and configurable.
 
 ## 15. Device-Aware Execution
 
-### 15.1 Execution Leases
+### 15.1 Leases (Generic Fenced Locks)
 
-Execution leases prevent duplicate side effects and "thrash-migrate" loops:
+Leases prevent duplicate side effects, "thrash-migrate" loops, and state corruption:
 
 ```rust
-/// Execution lease (NORMATIVE)
-///
-/// Prevents duplicate execution and stabilizes computation migration.
-/// A short-lived, renewable lock that says "node X owns execution of request R until time T."
-pub struct ExecutionLease {
+/// Generic lease (NORMATIVE)
+/// A short-lived, renewable, fenced lock for a subject object.
+pub struct Lease {
     pub header: ObjectHeader,
-    /// The request/computation being leased
-    pub request_object_id: ObjectId,
-    /// Fencing token (NORMATIVE): monotonically increases per (zone_id, request_object_id)
+    /// Subject being leased (NORMATIVE)
+    /// Examples:
+    /// - InvokeRequest ObjectId (operation execution)
+    /// - ConnectorStateRoot ObjectId (singleton writer state)
+    /// - MigratableComputation ObjectId (migration)
+    pub subject_object_id: ObjectId,
+
+    /// Lease purpose (NORMATIVE)
+    pub purpose: LeasePurpose,
+
+    /// Fencing token (NORMATIVE): monotonically increases per (zone_id, subject_object_id)
     /// Used to prevent stale lease holders from executing/writing state.
     /// The highest lease_seq wins deterministically, regardless of wall-clock exp.
     pub lease_seq: u64,
@@ -4306,16 +4587,23 @@ pub struct ExecutionLease {
     /// Lease expires at (short-lived; renewable)
     pub exp: u64,
     /// Deterministic coordinator for this lease (NORMATIVE)
-    /// Selected via HRW/Rendezvous hashing over (zone_id, request_object_id).
+    /// Selected via HRW/Rendezvous hashing over (zone_id, subject_object_id).
     pub coordinator: TailscaleNodeId,
-    /// Quorum signatures (NORMATIVE for Risky/Dangerous)
+    /// Quorum signatures (NORMATIVE for Risky/Dangerous; MUST be sorted by node_id per §3.5.1)
     pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+}
+
+pub enum LeasePurpose {
+    OperationExecution,
+    ConnectorStateWrite,
+    ComputationMigration,
 }
 
 /// Lease acquisition request (NORMATIVE)
 pub struct LeaseRequest {
     pub header: ObjectHeader,
-    pub request_object_id: ObjectId,
+    pub subject_object_id: ObjectId,
+    pub purpose: LeasePurpose,
     pub desired_owner: TailscaleNodeId,
     pub requested_at: u64,
     pub exp: u64,
@@ -4558,7 +4846,10 @@ Critical objects require symbols from multiple sources:
 pub struct DiversityPolicy {
     pub min_nodes: u8,
     pub min_zones: u8,
-    pub max_node_fraction: f64,
+    /// Basis points, 0..=10000 (NORMATIVE)
+    /// Maximum fraction of symbols any single node may provide.
+    /// 5000 = 50%, 3333 = ~33%
+    pub max_node_fraction_bps: u16,
 }
 
 impl DiversityPolicy {
@@ -5211,6 +5502,28 @@ pub struct FcpError {
 
 ## 25. Implementation Phases
 
+### 25.0 Profiles (NORMATIVE for conformance targets)
+
+This spec defines two conformance profiles to enable incremental shipping.
+
+**MVP Profile (MUST implement for initial reference release):**
+- Canonical CBOR + schema hash prefix
+- COSE_Sign1 CapabilityToken with grant_object_ids verification
+- ZoneKeyManifest with HPKE sealed distribution
+- FCPC over QUIC streams
+- Egress proxy enforcing NetworkConstraints
+- OperationIntent + OperationReceipt for Risky/Dangerous
+- Revocation checking + freshness policy
+- ChunkedObjectManifest for objects above threshold
+
+**Full Profile (MAY implement; REQUIRED for "Full" conformance claim):**
+- XOR/IBLT gossip optimization
+- Advanced repair controller with SLO evaluation
+- MLS/TreeKEM option for PCS zones
+- Device-aware execution planner and migration
+- Threshold secrets with k-of-n recovery
+- Source diversity enforcement
+
 ### Phase 1: Core Mesh (MVP)
 
 - MeshNode with Tailscale discovery
@@ -5298,6 +5611,19 @@ The reference implementation MUST include fuzz targets for:
 4. **ZoneKeyManifest parsing and sealed key unwrap behavior**
 
 At least one corpus MUST include "decode DoS" adversarial inputs designed to maximize decode CPU.
+
+### 27.4 CDDL + Golden Vectors (NORMATIVE for interoperability)
+
+To ensure cross-language consistency:
+- The project MUST ship a CDDL description of NORMATIVE CBOR objects (`FCP_CDDL_V2.cddl`).
+- The project MUST ship golden byte vectors covering ObjectId derivation and signature verification.
+
+**Minimum required vectors:**
+- Canonical serialization + schema hash prefix
+- ObjectId derivation for key object classes
+- COSE_Sign1 capability token encoding/verification
+- HPKE sealed boxes (ZoneKeyManifest / ObjectIdKey distribution)
+- FCPS frame parsing (valid + invalid)
 
 ---
 
