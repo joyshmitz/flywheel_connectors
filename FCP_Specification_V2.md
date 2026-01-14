@@ -125,7 +125,14 @@ This is not a cloud alternative. This is **digital sovereignty**.
 
 ### 2.1 Axiom 1: Universal Fungibility
 
-**All data flows as RaptorQ symbols. Symbols are interchangeable.**
+**All durable mesh objects are symbol-addressable, and symbols are interchangeable.**
+
+NORMATIVE clarification:
+- Any object that is persisted, audited, cached, mirrored, or pinned MUST have a canonical
+  content-addressed representation that can be distributed as symbols.
+- Control-plane delivery MAY use FCPC streams for small messages (efficiency), but those
+  messages MUST still be representable as canonical mesh objects (SchemaHash-prefixed
+  deterministic CBOR per §3.5).
 
 ```rust
 /// The universal transmission unit (NORMATIVE)
@@ -229,8 +236,32 @@ pub struct NodeKeyAttestation {
     pub issued_at: u64,
     /// Optional expiry (None = no expiry)
     pub expires_at: Option<u64>,
+    /// Optional device posture attestation (hardware-backed key binding)
+    pub device_posture: Option<DevicePostureAttestation>,
     /// Owner signature (may be produced via threshold signing; verifiable with owner_pubkey)
     pub signature: Signature,
+}
+
+/// Hardware-backed device posture attestation (NORMATIVE)
+pub struct DevicePostureAttestation {
+    /// Type of hardware attestation
+    pub kind: DevicePostureKind,
+    /// Platform-specific attestation payload (TPM quote, Secure Enclave attestation, etc.)
+    pub payload: Vec<u8>,
+    /// When attestation was generated
+    pub issued_at: u64,
+}
+
+/// Hardware attestation types (NORMATIVE)
+pub enum DevicePostureKind {
+    /// TPM 2.0 quote (PCR values + AIK signature)
+    TpmQuote,
+    /// Apple Secure Enclave attestation
+    SecureEnclave,
+    /// Android hardware-backed keystore attestation
+    AndroidKeystore,
+    /// Platform-specific attestation type
+    Custom(String),
 }
 
 #### 2.2.1 Threshold Owner Signing (RECOMMENDED)
@@ -506,6 +537,58 @@ impl ZoneId {
 }
 ```
 
+### 3.4.2 Canonical Identifier Formats (NORMATIVE)
+
+To prevent confusion attacks and cross-implementation drift, the following identifiers MUST be:
+- **ASCII only** (no Unicode)
+- **lowercase only** (no mixed case)
+- **length ≤ 128 bytes**
+- **match regex:** `^[a-z0-9][a-z0-9._:-]*$`
+
+**Identifiers covered:**
+- `PrincipalId`
+- `ConnectorId`
+- `CapabilityId`
+- `OperationId`
+- `RoleId`
+- `SecretId`
+- `CredentialId`
+- `InstanceId`
+
+**Validation rule (NORMATIVE):**
+Implementations MUST **reject** non-canonical forms. Silent normalization is FORBIDDEN because:
+1. It creates policy bypass vectors (Unicode confusables like `ρaypal.*` vs `paypal.*`)
+2. It causes case-folding differences across languages
+3. It leads to delimiter ambiguity
+4. It breaks deterministic policy evaluation and hashing
+
+```rust
+/// Validate identifier canonicity (NORMATIVE)
+pub fn validate_canonical_id(id: &str) -> Result<(), IdValidationError> {
+    if id.len() > 128 {
+        return Err(IdValidationError::TooLong);
+    }
+    if !id.is_ascii() {
+        return Err(IdValidationError::NonAscii);
+    }
+    if id.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(IdValidationError::UppercaseNotAllowed);
+    }
+    // ^[a-z0-9][a-z0-9._:-]*$
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return Err(IdValidationError::InvalidFormat),
+    }
+    for c in chars {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == ':' || c == '-') {
+            return Err(IdValidationError::InvalidFormat);
+        }
+    }
+    Ok(())
+}
+```
+
 ### 3.5 Canonical Serialization
 
 Deterministic serialization for content addressing:
@@ -726,11 +809,11 @@ Nodes MUST implement reachability-based GC per zone (NORMATIVE):
 impl SymbolStore {
     pub fn garbage_collect(&mut self, zone_id: &ZoneId) -> GcResult {
         // 1. Compute root set
-        // NORMATIVE: ZoneFrontier is the canonical zone root pointer.
-        // Nodes MUST keep the latest ZoneFrontier pinned for each active zone.
+        // NORMATIVE: ZoneCheckpoint is the canonical zone root pointer.
+        // Nodes MUST keep the latest ZoneCheckpoint pinned for each active zone.
         let mut roots = HashSet::new();
-        if let Some(frontier) = self.get_latest_zone_frontier(zone_id) {
-            roots.insert(frontier);
+        if let Some(chk) = self.get_latest_zone_checkpoint(zone_id) {
+            roots.insert(chk);
         }
         // Include any locally pinned objects (explicit pins are always GC roots).
         roots.extend(self.get_locally_pinned_roots(zone_id));
@@ -768,45 +851,65 @@ impl SymbolStore {
 - Never evict `Pinned` objects without explicit unpin request
 - Respect `Lease` expiry times
 - Enforce per-zone quotas
-- Root set always includes: latest ZoneFrontier (pinned) + all explicitly pinned objects
+- Root set always includes: latest ZoneCheckpoint (pinned) + all explicitly pinned objects
 - **Cross-zone refs (NORMATIVE):** Cross-zone references MUST be carried in `foreign_refs`
   and MUST NOT affect GC in the foreign zone. If a foreign object must be retained, it MUST
-  be retained by that zone's own frontier/pins/leases/policy. This eliminates the complexity
+  be retained by that zone's own checkpoint/pins/leases/policy. This eliminates the complexity
   of back-ref stubs and makes per-zone GC independent.
 
-### 3.8 ZoneFrontier as the Root Pointer (NORMATIVE)
+### 3.8 ZoneCheckpoint as the Root Pointer (NORMATIVE)
 
-ZoneFrontier is the compact, signed pointer to the current "heads" that define a zone's live object graph.
+ZoneCheckpoint is the **quorum-signed** pointer to the current "heads" that define a zone's enforceable
+state AND its live object graph (GC root). Unlike a simple node-signed frontier, quorum signing provides
+Byzantine-resilient freshness under the n/f trust model (see §18).
+
 It is used for:
-- **Fast sync:** Compare frontiers to determine staleness without traversal
-- **GC root definition:** Frontier is the canonical root; everything reachable from it is live
-- **Offline repair targets:** Frontier indicates which heads must remain reconstructable
+- **Fast sync:** Compare checkpoints to determine staleness without traversal
+- **GC root definition:** Checkpoint is the canonical root; everything reachable from it is live
+- **Offline policy:** "Do we have a recent checkpoint quorum?" is a crisp degraded-mode condition
+- **Token binding:** CapabilityTokens bind to checkpoint_seq for freshness (see §7.5)
 
 ```rust
-/// Frontier checkpoint for fast sync (NORMATIVE)
+/// Quorum-signed zone checkpoint (NORMATIVE)
 ///
-/// Compact checkpoint of zone state for efficient synchronization.
-/// Nodes can compare frontiers to quickly determine staleness.
-pub struct ZoneFrontier {
+/// The canonical snapshot of a zone's enforceable state. Serves as:
+/// - GC root (defines liveness)
+/// - Freshness binding for tokens/approvals
+/// - Fast sync reference point
+pub struct ZoneCheckpoint {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
-    /// Latest revocation head
+
+    /// Enforceable heads (NORMATIVE):
     pub rev_head: ObjectId,
     pub rev_seq: u64,
-    /// Latest audit head
     pub audit_head: ObjectId,
     pub audit_seq: u64,
-    /// Current epoch
+
+    /// Policy/config heads (NORMATIVE):
+    pub zone_definition_head: ObjectId,
+    pub zone_policy_head: ObjectId,
+    pub active_zone_key_manifest: ObjectId,
+
+    /// Monotonic checkpoint sequence (NORMATIVE; per-zone)
+    /// Used for O(1) freshness checks without chain traversal.
+    pub checkpoint_seq: u64,
     pub as_of_epoch: EpochId,
-    /// Signature by executing node
-    pub signature: Signature,
+
+    /// Quorum signatures (NORMATIVE; sorted by node_id per §3.5.1)
+    /// A checkpoint is valid when it has signatures from a quorum of zone members.
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
 }
 ```
 
 **Implementation Requirements (NORMATIVE):**
-1. Store ZoneFrontier objects as normal mesh objects (content-addressed)
-2. Pin the latest frontier per zone
-3. Refuse to accept tokens/approvals referencing revocation state newer than the latest known frontier (must fetch first)
+1. Store ZoneCheckpoint objects as normal mesh objects (content-addressed)
+2. Pin the latest checkpoint per zone (this IS the GC root)
+3. A node MUST NOT accept a checkpoint whose (rev_seq, audit_seq, checkpoint_seq) regresses
+   relative to its current pinned checkpoint
+4. Tokens/approvals that bind to checkpoint_seq MUST NOT be accepted unless the verifier has
+   checkpoint_seq >= the bound value (or explicitly enters degraded mode and logs it)
+5. Checkpoints MUST be quorum-signed; the quorum threshold is defined by zone policy
 
 ---
 
@@ -1102,7 +1205,33 @@ pub struct AuthenticatedFcpsFrame {
     /// - Suite2: BLAKE3(keyed=k_mac_dir, ...) truncated to 16 bytes
     pub mac: [u8; 16],
 }
+```
 
+#### 4.2.2 FCPS Datagrams on the Wire (NORMATIVE)
+
+FCPS frames are carried inside an authenticated datagram envelope bound to a MeshSession.
+This envelope provides session-layer integrity and anti-replay for the symbol-plane.
+
+```
+FCPS_DATAGRAM (on-wire format):
+  Bytes 0-15:   session_id [16]
+  Bytes 16-23:  seq (u64 LE)
+  Bytes 24-39:  mac [16] (Suite1/Suite2; truncated to 16 bytes)
+  Bytes 40..:   fcps_frame_bytes (exact FCPS frame bytes per §4.3)
+```
+
+**MAC computation (NORMATIVE):**
+```rust
+mac = MAC(k_mac_dir, session_id || direction || seq || fcps_frame_bytes)[:16]
+```
+where `direction` is `0x00` for initiator→responder and `0x01` for responder→initiator.
+
+**MTU rule (NORMATIVE):**
+- `len(FCPS_DATAGRAM)` MUST be ≤ `max_datagram_bytes` (default: 1200).
+- The limit applies to the **full UDP payload** (envelope + frame), not just the inner FCPS frame.
+- Implementations MUST reject datagrams exceeding their configured maximum.
+
+```rust
 /// Replay protection policy (NORMATIVE defaults)
 pub struct SessionReplayPolicy {
     /// Allow limited reordering; MUST be bounded
@@ -1177,13 +1306,17 @@ Symbol-native frame format:
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
 │  Bytes 58-89:  Zone ID hash (32 bytes, BLAKE3; see §3.4)                    │
 │  Bytes 90-97:  Epoch ID (u64 LE)                                            │
-│  Bytes 98-105: Frame Seq (u64 LE, per-sender monotonic)                     │
-│  Bytes 106+:   Symbol payloads (concatenated)                               │
-│  Final 8:      Checksum (XXH3-64)                                           │
+│  Bytes 98-105: Sender Instance ID (u64 LE, reboot-safety for nonces)        │
+│  Bytes 106-113: Frame Seq (u64 LE, per-sender monotonic)                    │
+│  Bytes 114+:   Symbol payloads (concatenated)                               │
 │                                                                             │
-│  Fixed header: 106 bytes                                                    │
+│  Fixed header: 114 bytes                                                    │
 │  Each symbol: 4 (ESI) + 2 (K) + N (data) + 16 (auth_tag)                    │
 │               (nonce derived per algorithm; see derive_nonce12/24)          │
+│                                                                             │
+│  NOTE (NORMATIVE): No separate checksum. Frame integrity is guaranteed by:  │
+│    • per-symbol AEAD auth tags (content-plane)                              │
+│    • MeshSession MAC (data-plane, see §4.2)                                 │
 │                                                                             │
 │  NOTE: On-wire framing + per-symbol AEAD AAD use fixed-size ZoneIdHash      │
 │  (not variable-length zone strings). This avoids ambiguity and removes      │
@@ -1565,9 +1698,41 @@ pub enum ApprovalScope {
         connector_id: ConnectorId,
         /// Specific method or wildcard
         method_pattern: String,
-        /// Input constraints (JSON-path predicates, etc.)
-        input_constraints: Option<String>,
+        /// NORMATIVE: For Interactive approvals on Risky/Dangerous ops, this MUST be set.
+        /// Binds approval to a specific InvokeRequest mesh object to prevent approval confusion.
+        request_object_id: Option<ObjectId>,
+        /// NORMATIVE: BLAKE3 hash of canonical input bytes (schema-prefixed CBOR).
+        /// Ensures even if request ids collide, content doesn't.
+        input_hash: Option<[u8; 32]>,
+        /// Typed constraints (interop-safe)
+        /// JSON Pointer (RFC 6901) only; JSONPath/regex are forbidden for interop stability.
+        input_constraints: Vec<InputConstraint>,
     },
+}
+
+/// Input constraint for approval scopes (NORMATIVE)
+///
+/// JSON Pointer (RFC 6901) only; JSONPath/regex are forbidden for interop stability.
+/// This prevents TOCTOU and approval replay by making approval UX safer:
+/// "approve this exact thing."
+pub struct InputConstraint {
+    /// JSON Pointer per RFC 6901 (e.g., "/chat_resource/resource_uri")
+    pub json_pointer: String,
+    /// Constraint operation
+    pub op: ConstraintOp,
+    /// Value to compare against
+    pub value: Value,
+}
+
+/// Constraint operations (NORMATIVE)
+pub enum ConstraintOp {
+    Eq,
+    Neq,
+    In,
+    NotIn,
+    Prefix,
+    Suffix,
+    Contains,
 }
 
 impl ApprovalToken {
@@ -2072,6 +2237,37 @@ bitflags! {
     }
 }
 
+/// External resource classification (NORMATIVE)
+///
+/// Zone-bound handle for external resources (files, repos, APIs) enabling
+/// information-flow enforcement when writing to external systems.
+///
+/// WHY THIS EXISTS:
+/// The confidentiality model is strong inside the mesh, but many real leaks are
+/// mesh → external world (e.g., posting to Twitter, commenting on a public GitHub
+/// repo, sending email to external recipient, writing to public Discord channel).
+/// ResourceObject carries public/private classification so MeshNode can enforce
+/// declassification when writing higher-confidentiality data to lower-confidentiality
+/// external sinks.
+pub struct ResourceObject {
+    pub header: ObjectHeader,
+
+    /// Original URI (for connector-internal use)
+    pub resource_uri: String,
+
+    /// External resource classification (NORMATIVE)
+    /// Used for information-flow enforcement when writing to external systems.
+    ///
+    /// resource_integrity_level: lower = less trustworthy (Biba-style)
+    /// resource_confidentiality_level: higher = more secret (Bell-LaPadula-style)
+    pub resource_integrity_level: u8,
+    pub resource_confidentiality_level: u8,
+    pub resource_taint: TaintFlags,
+
+    /// Connector signature over resource metadata
+    pub signature: Signature,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TrustGrade {
     /// Direct owner access
@@ -2569,6 +2765,13 @@ pub struct NetworkConstraints {
     pub require_sni: bool,
     /// Optional SPKI pins (base64-encoded SHA256 of SubjectPublicKeyInfo)
     pub spki_pins: Vec<String>,
+
+    /// NORMATIVE: deny IP literals unless explicitly allowed (default: true)
+    /// Prevents bypassing hostname-based policy via direct IP addresses.
+    pub deny_ip_literals: bool,
+    /// NORMATIVE: hostnames MUST be canonicalized (lowercase, IDNA2008, no trailing dot)
+    /// Prevents SSRF bypasses via encoding tricks.
+    pub require_host_canonicalization: bool,
 }
 
 /// Credential identifier (NORMATIVE)
@@ -2735,16 +2938,18 @@ pub struct CapabilityToken {
     /// Optional attenuation applied by the issuer (MUST ONLY RESTRICT, never expand)
     pub attenuation: Option<CapabilityConstraints>,
 
-    /// The only node allowed to present this token (sender-constrained)
-    pub holder_node: TailscaleNodeId,
+    /// Sender constraint (NORMATIVE: REQUIRED for Risky/Dangerous operations)
+    /// For Safe operations, this MAY be omitted to reduce ceremony.
+    pub holder_node: Option<TailscaleNodeId>,
 
-    /// Revocation head the issuer considered (NORMATIVE)
-    /// Verifiers MUST have revocation state >= this head or fetch before acceptance.
-    pub rev_head: ObjectId,
+    /// ZoneCheckpoint the issuer considered (NORMATIVE)
+    /// Binds token freshness to the entire enforceable snapshot (revocation, policy, config).
+    /// Verifiers MUST have checkpoint_seq >= this value (or fetch/enter degraded mode).
+    pub chk_id: ObjectId,
 
-    /// Monotonic revocation sequence at rev_head (NORMATIVE)
-    /// Enables O(1) freshness checks: verifier compares rev_seq, not chain traversal.
-    pub rev_seq: u64,
+    /// Monotonic checkpoint sequence (NORMATIVE)
+    /// Enables O(1) freshness checks: verifier compares checkpoint_seq, not chain traversal.
+    pub chk_seq: u64,
 
     /// Ed25519 signature (by iss_node's issuance key)
     pub sig: [u8; 64],
@@ -2830,9 +3035,9 @@ ambiguity.
 | `1001` | `grant_object_ids` | array | Array of 32-byte ObjectIds |
 | `1002` | `caps` | map | Capability flags |
 | `1003` | `attenuation` | map | Attenuation constraints |
-| `1004` | `holder_node` | bytes | Holder's public key (optional) |
-| `1005` | `rev_head` | bytes | Revocation chain head |
-| `1006` | `rev_seq` | uint | Revocation sequence number |
+| `1004` | `holder_node` | bytes | Holder node id (optional; REQUIRED for Risky/Dangerous) |
+| `1005` | `chk_id` | bytes | ZoneCheckpoint ObjectId (32 bytes) |
+| `1006` | `chk_seq` | uint | ZoneCheckpoint monotonic sequence |
 | `1007` | `aud_binary` | bytes | Binary audience (32-byte hash) |
 
 **Deterministic CBOR Encoding (NORMATIVE):**
@@ -2863,8 +3068,8 @@ impl CapabilityToken {
         if let Some(holder) = &self.holder_node {
             claims.insert(1004, holder.as_bytes());
         }
-        claims.insert(1005, &self.rev_head);
-        claims.insert(1006, self.rev_seq);
+        claims.insert(1005, &self.chk_id);
+        claims.insert(1006, self.chk_seq);
         if let Some(aud_bin) = &self.aud_binary {
             claims.insert(1007, aud_bin);
         }
@@ -2905,8 +3110,8 @@ impl CapabilityToken {
             caps: claims.get_map(1002)?,
             attenuation: claims.get_optional_map(1003)?,
             holder_node: claims.get_optional_bytes(1004)?.map(NodeId::from_bytes).transpose()?,
-            rev_head: claims.get_bytes(1005)?,
-            rev_seq: claims.get_u64(1006)?,
+            chk_id: claims.get_bytes(1005)?,
+            chk_seq: claims.get_u64(1006)?,
             aud_binary: claims.get_optional_bytes(1007)?,
             node_iss_kid: kid,
             signature: Signature::default(), // Signature is external in COSE_Sign1
@@ -3090,9 +3295,11 @@ impl MeshNode {
         }
 
         // 2d. Enforce confidentiality downgrades (NORMATIVE)
-        // If the operation produces outputs into a zone with lower confidentiality than
-        // the data label, require a valid declassification ApprovalToken.
-        if self.operation_writes_to_lower_confidentiality(&request).await? {
+        // If the operation writes to a lower-confidentiality sink (another zone OR
+        // an external resource classified by ResourceObject), require a valid
+        // declassification ApprovalToken.
+        if self.operation_writes_to_lower_confidentiality(&request).await?
+            || self.operation_writes_to_lower_confidentiality_resource_sink(&request).await? {
             let declass = request.approval_tokens.iter()
                 .find(|t| matches!(t.scope, ApprovalScope::Declassification { .. }))
                 .ok_or(Error::DeclassificationRequired)?;
@@ -3286,7 +3493,7 @@ quarantined (unknown provenance) objects.
    primary gossip filters/IBLT state until promoted (prevents filter pollution and gossip amplification).
 
 3. **Promotion rules:** An object may be promoted from quarantine → admitted only if:
-   - It becomes reachable from the zone's pinned `ZoneFrontier`, OR
+   - It becomes reachable from the zone's pinned `ZoneCheckpoint`, OR
    - It is explicitly requested by an authenticated peer via a bounded request, OR
    - It is explicitly pinned locally by user action/policy.
 
@@ -3972,6 +4179,10 @@ singleton_writer = true  # Legacy: equivalent to model = "singleton_writer"
 [connector.state]
 # "stateless" | "singleton_writer" | "crdt"
 model = "singleton_writer"
+# NORMATIVE: State schema versioning for safe upgrades
+state_schema_version = "1"
+# Optional migration hint (command or script reference)
+# migration_hint = "telegram/state_migrate_v0_to_v1"
 # For CRDT models:
 # crdt_type = "lww_map"  # or "or_set", "g_counter", "pn_counter"
 # snapshot_every_updates = 5000
@@ -4028,6 +4239,9 @@ If `singleton_writer = true` and two different `ConnectorStateObject` share the 
 [manifest]
 format = "fcp-connector-manifest"
 schema_version = "2.0"
+min_mesh_version = "2.0.0"              # NORMATIVE: minimum compatible mesh version
+min_protocol = "fcp2-sym"               # NORMATIVE: required protocol features
+interface_hash = "blake3:..."           # NORMATIVE: hash of API surface (ops + schemas + caps)
 
 [connector]
 id = "fcp.telegram"
@@ -4066,7 +4280,7 @@ safety_tier = "risky"
 requires_approval = "policy"
 rate_limit = "60/min"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["chat_id", "text"] }
+input_schema = { type = "object", required = ["chat_resource", "text"] }  # NORMATIVE: chat_resource is a ResourceObject handle, NOT raw chat_id
 output_schema = { type = "object", required = ["message_id"] }
 network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true, spki_pins = ["base64:..."] }
 
@@ -4179,6 +4393,62 @@ impl SandboxConfig {
 - Child process spawning can be denied
 - Debugging/tracing can be denied
 
+### 11.2.1 Network Guard (Egress Proxy) (NORMATIVE)
+
+The "egress proxy" is now a general **Network Guard** supporting both HTTP and TCP connections.
+This enables connectors like `fcp.postgresql`, `fcp.redis` without requiring `network.raw_outbound`.
+
+```rust
+/// General egress request (NORMATIVE)
+///
+/// Connectors make egress requests through the Network Guard, which enforces
+/// NetworkConstraints before allowing outbound connections.
+pub enum EgressRequest {
+    /// HTTP/HTTPS request (most common)
+    Http(EgressHttpRequest),
+    /// Raw TCP connection (for databases, message queues, etc.)
+    TcpConnect(EgressTcpConnectRequest),
+}
+
+/// HTTP egress request (NORMATIVE)
+pub struct EgressHttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    /// Optional credential to apply (proxy resolves and injects)
+    pub credential: Option<CredentialId>,
+}
+
+/// TCP connect egress request (NORMATIVE)
+///
+/// Allows connectors to establish TCP connections to databases, message queues,
+/// and other non-HTTP services while still enforcing NetworkConstraints.
+pub struct EgressTcpConnectRequest {
+    /// Target hostname (MUST be canonicalized per NetworkConstraints rules)
+    pub host: String,
+    /// Target port
+    pub port: u16,
+    /// Upgrade to TLS after connect
+    pub use_tls: bool,
+    /// SNI hostname (if different from host, e.g., for proxies)
+    pub sni: Option<String>,
+    /// SPKI pins for certificate verification
+    pub spki_pins: Vec<String>,
+    /// Optional credential to apply after connection
+    pub credential: Option<CredentialId>,
+}
+```
+
+**Network Guard Enforcement (NORMATIVE):**
+1. Validate request against `NetworkConstraints` for the connector
+2. Canonicalize hostname (lowercase, IDNA2008, strip trailing dot)
+3. Reject IP literals unless `deny_ip_literals = false`
+4. Resolve DNS through policy-checked resolver
+5. Reject private ranges, localhost, tailnet unless explicitly allowed
+6. For TLS: enforce SNI match, verify SPKI pins if present
+7. Apply credential if specified (inject auth without revealing raw secret)
+
 ### 11.3 Manifest Embedding
 
 Manifests MUST be extractable without execution:
@@ -4287,6 +4557,19 @@ pub enum RegistrySource {
         zone: ZoneId,
         index_object_id: ObjectId,
     },
+}
+
+/// Optional registry security profile (NORMATIVE when configured)
+///
+/// Provides additional protections against distribution attacks:
+/// - TUF (The Update Framework) prevents freeze/rollback and mix-and-match attacks
+/// - Sigstore/cosign adds supply-chain provenance verification
+pub struct RegistrySecurityProfile {
+    /// If present, registry clients MUST enforce TUF snapshot/timestamp semantics.
+    /// The referenced object contains TUF root metadata pinned in z:owner.
+    pub tuf_root_object_id: Option<ObjectId>,
+    /// If true, verify Sigstore/cosign signatures in addition to publisher/registry keys.
+    pub require_sigstore: bool,
 }
 
 impl RegistrySource {
@@ -4537,9 +4820,9 @@ Implementations MUST define a revocation freshness policy that is enforced based
 
 ```rust
 pub struct RevocationFreshnessPolicy {
-    /// Max allowed age of the latest known ZoneFrontier before we refuse Risky/Dangerous ops
-    pub max_frontier_age_secs: u64,   // default: 300
-    /// If true, Safe ops MAY proceed in degraded mode when frontier is stale/unavailable
+    /// Max allowed age of the latest known ZoneCheckpoint before we refuse Risky/Dangerous ops
+    pub max_checkpoint_age_secs: u64,   // default: 300
+    /// If true, Safe ops MAY proceed in degraded mode when checkpoint is stale/unavailable
     pub allow_safe_ops_in_degraded_mode: bool, // default: true
     /// If true, Risky ops MAY proceed only with an interactive ApprovalToken::Execution in degraded mode
     pub allow_risky_ops_with_interactive_override: bool, // default: false
@@ -5448,18 +5731,26 @@ pub enum Decision {
 ```rust
 /// Frontier checkpoint for fast sync (NORMATIVE)
 ///
-/// Compact checkpoint of zone state for efficient synchronization.
-/// Nodes can compare frontiers to quickly determine staleness.
-pub struct ZoneFrontier {
+/// Quorum-signed checkpoint of zone state for efficient synchronization and GC roots.
+/// Nodes can compare checkpoints to quickly determine staleness.
+/// See §3.8 for the full definition with policy/config heads and quorum signatures.
+pub struct ZoneCheckpoint {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
+    /// Enforceable heads (NORMATIVE):
     pub rev_head: ObjectId,
     pub rev_seq: u64,
     pub audit_head: ObjectId,
     pub audit_seq: u64,
+    /// Policy/config heads (NORMATIVE):
+    pub zone_definition_head: ObjectId,
+    pub zone_policy_head: ObjectId,
+    pub active_zone_key_manifest: ObjectId,
+    /// Monotonic checkpoint sequence (NORMATIVE; per-zone)
+    pub checkpoint_seq: u64,
     pub as_of_epoch: EpochId,
-    /// Signature by executing node
-    pub signature: Signature,
+    /// Quorum signatures (NORMATIVE; sorted by node_id per §3.5.1)
+    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
 }
 ```
 
