@@ -640,6 +640,11 @@ impl SymbolStore {
 - Respect `Lease` expiry times
 - Enforce per-zone quotas
 - Root set always includes: latest ZoneFrontier (pinned) + all explicitly pinned objects
+- **Cross-zone ref mirroring (NORMATIVE):** When object A in zone_x holds a ref to object B
+  in zone_y, zone_y MUST maintain a mirrored "back-ref" stub. This prevents B from being
+  GC'd in zone_y even if zone_y's frontier doesn't directly reference B. The back-ref stub
+  expires when zone_x's frontier no longer transitively references A, communicated via
+  cross-zone epoch sync or explicit unref messages.
 
 ### 3.8 ZoneFrontier as the Root Pointer (NORMATIVE)
 
@@ -711,7 +716,14 @@ pub struct SymbolEnvelope {
     /// Needed because symbol encryption uses a per-sender subkey (see below).
     pub source_id: TailscaleNodeId,
 
-    /// Monotonic frame sequence chosen by source for this zone_key_id (NORMATIVE)
+    /// Sender instance identifier (NORMATIVE)
+    /// Random u64 chosen by the sender at startup for this (zone_id, zone_key_id) lifetime.
+    /// Used to make deterministic nonces reboot-safe: if frame_seq restarts after reboot,
+    /// the sender subkey changes because sender_instance_id differs.
+    pub sender_instance_id: u64,
+
+    /// Monotonic frame sequence chosen by source (NORMATIVE)
+    /// Monotonicity scope is (zone_id, zone_key_id, source_id, sender_instance_id).
     pub frame_seq: u64,
 
     /// AEAD authentication tag
@@ -719,7 +731,7 @@ pub struct SymbolEnvelope {
 
     // NOTE: Nonce is NOT stored per-symbol.
     // NORMATIVE: nonce = frame_seq_le || esi_le
-    // frame_seq is per-sender monotonic for a given (zone_id, zone_key_id).
+    // frame_seq is per-sender monotonic for a given (zone_id, zone_key_id, source_id, sender_instance_id).
 }
 
 /// Derive per-symbol nonce from frame_seq and ESI (NORMATIVE)
@@ -743,6 +755,7 @@ impl SymbolEnvelope {
         zone_key: &ZoneKey,
         epoch: EpochId,
         source_id: TailscaleNodeId,
+        sender_instance_id: u64,
         frame_seq: u64,
     ) -> Self {
         // NORMATIVE: derive nonce from frame_seq || esi_le
@@ -753,7 +766,8 @@ impl SymbolEnvelope {
 
         // NORMATIVE: encrypt under a per-sender subkey derived from the zone key.
         // This prevents nonce collision across different senders.
-        let sender_key = zone_key.derive_sender_subkey(&source_id);
+        // sender_instance_id ensures reboot-safety: new instance = new subkey.
+        let sender_key = zone_key.derive_sender_subkey(&source_id, sender_instance_id);
         let (ciphertext, auth_tag) = zone_key.encrypt_with_subkey(&sender_key, plaintext, &nonce, &aad);
 
         Self {
@@ -765,6 +779,7 @@ impl SymbolEnvelope {
             zone_key_id: zone_key.key_id,
             epoch_id: epoch,
             source_id,
+            sender_instance_id,
             frame_seq,
             auth_tag,
         }
@@ -792,8 +807,8 @@ impl SymbolEnvelope {
             self.epoch_id
         );
 
-        // NORMATIVE: decrypt using per-sender subkey
-        let sender_key = zone_key.derive_sender_subkey(&self.source_id);
+        // NORMATIVE: decrypt using per-sender subkey (includes sender_instance_id)
+        let sender_key = zone_key.derive_sender_subkey(&self.source_id, self.sender_instance_id);
         zone_key.decrypt_with_subkey(&sender_key, &self.data, &nonce, &self.auth_tag, &aad)
     }
 
@@ -852,10 +867,14 @@ pub struct MeshSessionHello {
     pub from: TailscaleNodeId,
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
+    /// Random nonce for replay protection (NORMATIVE)
+    /// Binds this handshake to a specific session attempt.
+    pub nonce: [u8; 16],
     pub timestamp: u64,
     /// Supported crypto suites (ordered by preference)
     pub suites: Vec<SessionCryptoSuite>,
-    /// Node signature over transcript
+    /// Node signature over transcript (NORMATIVE)
+    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey || nonce || timestamp || suites
     pub signature: Signature,
 }
 
@@ -864,11 +883,16 @@ pub struct MeshSessionAck {
     pub from: TailscaleNodeId,
     pub to: TailscaleNodeId,
     pub eph_pubkey: X25519PublicKey,
+    /// Random nonce for replay protection (NORMATIVE)
+    /// Combined with hello_nonce, prevents session confusion attacks.
+    pub nonce: [u8; 16],
     pub session_id: [u8; 16],
     /// Selected crypto suite
     pub suite: SessionCryptoSuite,
     pub timestamp: u64,
-    /// Node signature over transcript
+    /// Node signature over full handshake transcript (NORMATIVE)
+    /// transcript = "FCP2-ACK-V1" || from || to || eph_pubkey || nonce || session_id ||
+    ///              suite || timestamp || hello.eph_pubkey || hello.nonce
     pub signature: Signature,
 }
 
@@ -877,8 +901,11 @@ pub struct MeshSessionAck {
 /// prk = HKDF-SHA256(
 ///     ikm = ECDH(initiator_eph, responder_eph),
 ///     salt = session_id,
-///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
+///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id ||
+///            hello_nonce || ack_nonce
 /// )
+/// Including both nonces in the info string binds the derived keys to this
+/// specific handshake, preventing session splicing attacks.
 ///
 /// keys = HKDF-Expand(prk, info="FCP2-SESSION-KEYS-V1", L=96) split as:
 /// - k_mac_i2r (32 bytes): MAC key for initiator → responder
@@ -970,15 +997,19 @@ impl ZoneKey {
     /// sender_key = HKDF-SHA256(
     ///     ikm = zone_symmetric_key,
     ///     salt = zone_key_id,
-    ///     info = "FCP2-SENDER-KEY-V1" || sender_node_id
+    ///     info = "FCP2-SENDER-KEY-V1" || sender_node_id || sender_instance_id_le
     /// )
-    pub fn derive_sender_subkey(&self, sender: &TailscaleNodeId) -> [u8; 32];
+    /// The sender_instance_id ensures that if a sender reboots and resets frame_seq,
+    /// it will derive a fresh subkey, preventing nonce reuse across reboots.
+    pub fn derive_sender_subkey(&self, sender: &TailscaleNodeId, sender_instance_id: u64) -> [u8; 32];
 }
 ```
 
 **Why per-sender subkeys + deterministic nonces:**
 - 64-bit random nonces have birthday collision risk over long-running systems with many senders
 - Per-sender subkeys eliminate cross-sender nonce collision (keys differ per sender)
+- `sender_instance_id` (random u64 at startup) makes subkeys reboot-safe: if a sender restarts
+  and frame_seq resets to 0, the new instance_id yields a different subkey, preventing nonce reuse
 - Deterministic `frame_seq` avoids RNG dependence and is testable
 - No per-frame random generation overhead
 
@@ -1187,9 +1218,13 @@ pub struct Zone {
 /// Unified approval token (NORMATIVE)
 ///
 /// Consolidates ElevationToken and DeclassificationToken into a single type.
+/// ApprovalToken is a first-class mesh object with ObjectHeader, enabling
+/// graph-based audit trails and GC integration.
 /// Simplifies: UI prompting, audit, verification code paths, policy.
 pub struct ApprovalToken {
-    pub token_id: ObjectId,
+    /// Standard mesh object header (NORMATIVE)
+    /// ObjectId is derived from (header, body) per mesh object rules.
+    pub header: ObjectHeader,
     pub scope: ApprovalScope,
     /// Human-readable justification (UI + audit)
     pub justification: String,
@@ -1211,6 +1246,16 @@ pub enum ApprovalScope {
         from_zone: ZoneId,
         to_zone: ZoneId,
         object_ids: Vec<ObjectId>,
+    },
+    /// Scoped execution context for connector operations
+    /// Allows granular, time-bounded execution approval without permanent elevation
+    Execution {
+        /// Connector or method being approved
+        connector_id: ConnectorId,
+        /// Specific method or wildcard
+        method_pattern: String,
+        /// Input constraints (JSON-path predicates, etc.)
+        input_constraints: Option<String>,
     },
 }
 
@@ -1238,6 +1283,11 @@ impl ApprovalToken {
             }
             ApprovalScope::Declassification { from_zone, to_zone, .. } => {
                 if !trust_anchors.can_approve_declassification(&self.approved_by, from_zone, to_zone) {
+                    return Err(VerifyError::InsufficientAuthority);
+                }
+            }
+            ApprovalScope::Execution { connector_id, .. } => {
+                if !trust_anchors.can_approve_execution(&self.approved_by, connector_id) {
                     return Err(VerifyError::InsufficientAuthority);
                 }
             }
@@ -1316,8 +1366,8 @@ pub struct ZoneKeyManifest {
     pub object_id_key_id: [u8; 8],
     pub wrapped_object_id_keys: Vec<WrappedObjectIdKey>,
 
-    /// Optional ratchet policy for epoch keys (past secrecy)
-    pub ratchet: Option<ZoneRatchetPolicy>,
+    /// Optional rekey policy for zone key rotation and past secrecy
+    pub rekey_policy: Option<ZoneRekeyPolicy>,
 
     /// Sealed key material per node
     pub wrapped_keys: Vec<WrappedZoneKey>,
@@ -1345,19 +1395,24 @@ pub struct WrappedObjectIdKey {
     pub sealed_key: Vec<u8>,
 }
 
-/// Epoch ratchet policy for past secrecy (NORMATIVE when present)
+/// Zone rekey policy for rotation and past secrecy (NORMATIVE when present)
 ///
-/// If enabled, nodes MUST derive an epoch key, use it, then delete it after the
-/// epoch window. Past epochs become undecryptable after deletion (past secrecy).
-/// This is not full post-compromise security (for that you'd need MLS/TreeKEM),
-/// but it's a significant improvement with modest complexity.
-pub struct ZoneRatchetPolicy {
+/// Controls zone key rotation semantics. If epoch ratcheting is enabled, nodes MUST
+/// derive epoch keys, use them, then delete them after the epoch window, making
+/// past epochs undecryptable (past secrecy). This is not full post-compromise
+/// security (for that you'd need MLS/TreeKEM), but a significant improvement
+/// with modest complexity.
+pub struct ZoneRekeyPolicy {
     /// If true, nodes MUST derive and delete epoch keys per policy
-    pub enabled: bool,
+    pub epoch_ratchet_enabled: bool,
     /// Number of seconds of overlap to tolerate clock skew and delayed frames
     pub overlap_secs: u64,
     /// Max epochs to retain for delayed/offline peers (bounded memory)
     pub retain_epochs: u32,
+    /// If true, automatically rotate zone_key and rewrap to current members when
+    /// any node is removed from the zone. Prevents removed nodes from decrypting
+    /// future traffic without requiring MLS-style tree ratchets.
+    pub rewrap_on_membership_change: bool,
 }
 
 /// Local keyring for zone keys (NORMATIVE)
@@ -1816,9 +1871,13 @@ fcp.*                    Protocol/meta operations
 
 network.*                Network operations
 ├── network.egress       Outbound access via MeshNode egress proxy (DEFAULT in strict/moderate sandboxes)
-├── network.raw_outbound:* Direct sockets (RARE; permissive sandbox only)
-├── network.inbound:*    Listen for connections
+├── network.raw_outbound Direct sockets (RARE; permissive sandbox only)
+├── network.inbound      Listen for connections
 └── network.dns          DNS resolution (explicit capability; policy surface)
+
+NOTE: Host restrictions are NOT encoded in capability IDs (e.g., NOT "network.raw_outbound:api.stripe.com").
+Instead, use NetworkConstraints on CapabilityObject/CapabilityConstraints to specify allowed hosts,
+ports, and TLS requirements. This makes policies composable and auditable.
 
 network.tls.*            TLS identity constraints (NORMATIVE for sensitive connectors)
 ├── network.tls.sni       Enforce SNI hostname match
@@ -2188,6 +2247,81 @@ If a node's issuance key is compromised, it can only mint tokens that reference
 existing CapabilityObjects—it cannot create authority out of thin air. This is the
 core of "explicit authority" and makes the system auditable.
 
+### 7.6 Role Objects (Capability Bundles)
+
+Roles are named bundles of capabilities that simplify policy administration.
+Rather than granting individual capabilities, administrators grant roles.
+
+```rust
+/// Role definition - named capability bundle (NORMATIVE)
+pub struct RoleObject {
+    pub header: ObjectHeader,
+
+    /// Role identifier (e.g., "reader", "admin", "finance-reviewer")
+    pub role_id: RoleId,
+
+    /// Human-readable name
+    pub name: String,
+
+    /// Description of what this role provides
+    pub description: String,
+
+    /// Capabilities granted by this role
+    pub grants: Vec<RoleGrant>,
+
+    /// Roles this role inherits from (additive composition)
+    pub inherits: Vec<RoleId>,
+
+    /// Zone this role is defined in
+    pub zone_id: ZoneId,
+
+    /// Valid time range
+    pub valid_from: u64,
+    pub valid_until: u64,
+
+    /// Signature from zone owner
+    pub signature: Signature,
+}
+
+pub struct RoleGrant {
+    /// Capability being granted
+    pub capability_id: CapabilityId,
+    /// Optional constraints applied when granting through this role
+    pub constraints: Option<CapabilityConstraints>,
+}
+
+/// Role assignment - binds a role to a principal (NORMATIVE)
+pub struct RoleAssignment {
+    pub header: ObjectHeader,
+
+    /// Role being assigned
+    pub role_object_id: ObjectId,
+
+    /// Principal receiving the role
+    pub grantee: PrincipalId,
+
+    /// Optional attenuation (MUST ONLY RESTRICT, never expand)
+    pub attenuation: Option<CapabilityConstraints>,
+
+    /// Valid time range
+    pub valid_from: u64,
+    pub valid_until: u64,
+
+    /// Signature from role manager (zone owner or delegate)
+    pub signature: Signature,
+}
+```
+
+**Role Inheritance Rules (NORMATIVE):**
+- Role inheritance is purely additive (union of capabilities)
+- Circular inheritance is forbidden; role graph MUST be a DAG
+- Attenuation on RoleAssignment applies to ALL capabilities from the role (including inherited)
+- When resolving capabilities for a principal, traverse all assigned roles and compute the union
+
+**Role vs Direct CapabilityObject:**
+- Use RoleObject when: granting common bundles, simplifying administration, policy standardization
+- Use CapabilityObject when: one-off grants, fine-grained constraints, temporary access
+
 ---
 
 ## 8. Mesh Architecture
@@ -2479,6 +2613,8 @@ FCP V2 supports two protocol modes:
 | `handshake_ack` | Connector → Hub | Confirm connection |
 | `introspect` | Hub → Connector | Query operations |
 | `configure` | Hub → Connector | Apply configuration |
+| `simulate` | Hub → Connector | Preflight check without execution |
+| `simulate_response` | Connector → Hub | Preflight result (capability check, cost estimate) |
 | `invoke` | Hub → Connector | Execute operation |
 | `response` | Connector → Hub | Operation result |
 | `subscribe` | Hub → Connector | Subscribe to events |
@@ -2505,6 +2641,7 @@ This makes all operations auditable, replayable, and content-addressed.
 | secret access | symbol_ack |
 | revocations | introspect |
 | audit events/heads | configure |
+| | simulate, simulate_response |
 
 ```rust
 /// Control plane object wrapper (NORMATIVE)
@@ -2592,6 +2729,62 @@ pub struct InvokeResponse {
     pub next_cursor: Option<String>,
     /// Receipt ObjectId (for operations with side effects)
     pub receipt: Option<ObjectId>,
+}
+
+/// Simulate request for preflight checks (NORMATIVE)
+///
+/// Allows callers to check if an operation would succeed (capability check,
+/// resource availability, cost estimation) without executing it. Connectors
+/// SHOULD implement simulate for expensive or dangerous operations.
+pub struct SimulateRequest {
+    pub id: String,
+    pub operation: OperationId,
+    pub input: Value,
+    pub capability_token: CapabilityToken,
+    /// Optional: request cost estimate
+    pub estimate_cost: bool,
+    /// Optional: check resource availability
+    pub check_availability: bool,
+}
+
+/// Simulate response (NORMATIVE)
+pub struct SimulateResponse {
+    pub id: String,
+    /// Would the operation succeed with current capabilities/state?
+    pub would_succeed: bool,
+    /// If would_succeed is false, why not?
+    pub failure_reason: Option<String>,
+    /// Missing capabilities needed (if any)
+    pub missing_capabilities: Vec<String>,
+    /// Estimated cost (if estimate_cost was true)
+    pub estimated_cost: Option<CostEstimate>,
+    /// Resource availability check result
+    pub availability: Option<ResourceAvailability>,
+}
+
+/// Cost estimate for simulation (NORMATIVE when present)
+pub struct CostEstimate {
+    /// Estimated API credits/tokens
+    pub api_credits: Option<u64>,
+    /// Estimated execution time in milliseconds
+    pub estimated_duration_ms: Option<u64>,
+    /// Estimated bytes transferred
+    pub estimated_bytes: Option<u64>,
+    /// Currency cost estimate (if applicable)
+    pub currency: Option<CurrencyCost>,
+}
+
+pub struct CurrencyCost {
+    pub amount_cents: u64,
+    pub currency_code: String, // e.g., "USD"
+}
+
+pub struct ResourceAvailability {
+    pub available: bool,
+    /// Rate limit headroom
+    pub rate_limit_remaining: Option<u32>,
+    /// When rate limit resets (if near limit)
+    pub rate_limit_reset_at: Option<u64>,
 }
 
 /// Operation receipt object (NORMATIVE)
@@ -2726,11 +2919,35 @@ pub enum ConnectorArchetype {
 /// Connector runtime format (NORMATIVE)
 pub enum ConnectorFormat {
     /// Native executable (ELF/Mach-O/PE)
+    /// Requires OS-level sandboxing (seccomp, landlock, AppArmor).
     Native,
-    /// WASI module (WASM) executed under a WASI runtime with hostcalls gated by capabilities
+    /// WASI module (WASM) executed under a WASI runtime with hostcalls gated by capabilities.
     /// Provides portable, capability-based sandbox consistent across OSes.
+    /// RECOMMENDED for high-risk connectors (financial, credential-handling, external API).
     Wasi,
 }
+
+/// WASI Format Guidance (NORMATIVE for risk classification):
+///
+/// Connectors handling SafetyTier::Dangerous operations or high-value secrets
+/// SHOULD use WASI format unless performance requirements preclude it.
+///
+/// Benefits:
+/// - Memory isolation: WASM linear memory prevents buffer overflow exploits
+/// - Capability-gated hostcalls: All syscalls are explicit capability grants
+/// - Cross-platform consistency: Same binary, same sandbox semantics everywhere
+/// - Deterministic execution: Easier testing and audit
+///
+/// When to prefer Native:
+/// - GPU-accelerated workloads (ML inference)
+/// - High-throughput data processing (>1GB/s)
+/// - Connectors requiring OS-specific features unavailable via WASI
+///
+/// WASI Runtime Requirements (NORMATIVE):
+/// - Runtime MUST implement WASI preview2 or later
+/// - Network operations MUST be gated by NetworkConstraints
+/// - File operations MUST be scoped to granted directory capabilities
+/// - Clock operations MUST be deterministic or explicitly granted
 ```
 
 ### 10.2 Connector Lifecycle
