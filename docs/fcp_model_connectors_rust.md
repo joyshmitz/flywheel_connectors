@@ -402,6 +402,22 @@ When `FrameFlags::CONTROL_PLANE` is set, receivers MUST:
 4. Verify schema
 5. Store the object if retention class is Required; otherwise MAY discard after processing
 
+**FCPC Control Plane Framing (NORMATIVE):**
+
+While FCPS handles high-throughput symbol delivery, FCPC provides reliable, ordered, backpressured framing for control-plane objects. FCPC uses the session's negotiated `k_ctx` symmetric key for AEAD encryption/authentication:
+
+```rust
+/// FCPC frame (control plane) (NORMATIVE)
+pub struct FcpcFrame {
+    pub seq: u64,           // Monotonic for ordering and ack
+    pub ack: Option<u64>,   // Piggyback ack for received frames
+    pub payload: Vec<u8>,   // AEAD-encrypted control plane object
+    pub tag: [u8; 16],      // ChaCha20-Poly1305 tag (k_ctx, nonce=seq)
+}
+```
+
+This enables secure invoke/response/receipt exchanges without per-message Ed25519 signatures.
+
 ### 3.5 Session Authentication (NORMATIVE)
 
 Ed25519 signatures per data-plane frame are too expensive when frames are near MTU (often ~1 symbol/frame).
@@ -487,9 +503,13 @@ pub struct AuthenticatedFcpsFrame {
 /// Replay protection policy (NORMATIVE defaults)
 pub struct SessionReplayPolicy {
     /// Allow limited reordering; MUST be bounded
-    pub max_reorder_window: u64,   // default: 128
+    pub max_reorder_window: u64,       // default: 128
     /// Rekey periodically for operational hygiene and suite agility
-    pub rekey_after_frames: u64,   // default: 1_000_000_000
+    pub rekey_after_frames: u64,       // default: 1_000_000_000
+    /// Rekey after elapsed time to avoid pathological long-lived sessions
+    pub rekey_after_seconds: u64,      // default: 86400 (24 hours)
+    /// Rekey after cumulative bytes to bound key exposure
+    pub rekey_after_bytes: u64,        // default: 1_099_511_627_776 (1 TiB)
 }
 ```
 
@@ -642,21 +662,47 @@ pub struct ObjectHeader {
     pub zone_id: ZoneId,
     pub created_at: u64,
     pub provenance: Provenance,
+    /// Same-zone refs (participate in GC reachability)
     pub refs: Vec<ObjectId>,
+    /// Cross-zone refs (audit/provenance only, no GC effect)
+    pub foreign_refs: Vec<ObjectId>,
     pub ttl_secs: Option<u64>,
     /// Optional placement policy for symbol distribution (NORMATIVE when present)
     pub placement: Option<ObjectPlacementPolicy>,
 }
 
 /// Object placement policy (NORMATIVE when used)
+///
+/// Uses fixed-point basis points (bps) instead of floating-point to avoid
+/// float parsing differences across languages and policy comparison bugs.
 pub struct ObjectPlacementPolicy {
     pub min_nodes: u8,
-    pub max_node_fraction: f64,
-    pub preferred_devices: Vec<String>,
-    pub excluded_devices: Vec<String>,
-    pub target_coverage: f64,
+    /// Maximum fraction of symbols any single node may hold (0..=10000 bps)
+    pub max_node_fraction_bps: u16,
+    /// Preferred device selectors (typed to prevent implementation divergence)
+    pub preferred_devices: Vec<DeviceSelector>,
+    /// Hard exclusions (typed to prevent implementation divergence)
+    pub excluded_devices: Vec<DeviceSelector>,
+    /// Target coverage ratio in basis points (10000 = 1.0x, 15000 = 1.5x)
+    pub target_coverage_bps: u32,
+}
+
+/// Typed device selector for placement policies (NORMATIVE)
+pub enum DeviceSelector {
+    /// Match devices by tag (e.g., Tag("fcp-private"))
+    Tag(String),
+    /// Match devices by class (e.g., Class("desktop"))
+    Class(String),
+    /// Match specific node by Tailscale ID
+    NodeId(NodeId),
+    /// Match by zone membership
+    Zone(ZoneId),
+    /// Match devices with specific capability
+    HasCapability(String),
 }
 ```
+
+**GC Invariant (NORMATIVE):** Objects reachable via `refs` from any GC root are retained. `foreign_refs` do NOT create GC edges—they enable cross-zone provenance and audit trails without coupling zone lifecycles.
 
 Retention is node-local storage metadata and is not part of the content-addressed header.
 Mesh nodes periodically evaluate symbol coverage against `ObjectPlacementPolicy` and perform
@@ -893,21 +939,34 @@ pub struct Provenance {
     pub origin_zone: ZoneId,
     /// Current zone (updated on every zone crossing)
     pub current_zone: ZoneId,
-    pub origin_integrity: u8,
-    pub origin_confidentiality: u8,
+    /// Integrity level (higher = more trusted source)
+    pub integrity_label: u8,
+    /// Confidentiality level (higher = more sensitive)
+    pub confidentiality_label: u8,
+    /// Proof-carrying label adjustments (elevation, declassification)
+    pub label_adjustments: Vec<LabelAdjustment>,
     pub origin_principal: Option<PrincipalId>,
     /// Taint flags (compositional: merged via OR across inputs)
     pub taint: TaintFlags,
-    /// Taint reductions, each justified by a verifiable attestation (NORMATIVE)
+    /// Taint reductions, each justified by a SanitizerReceipt (NORMATIVE)
     /// Allows specific taints to be cleared with proof (e.g., URL scan, malware check)
     pub taint_reductions: Vec<TaintReduction>,
     pub zone_crossings: Vec<ZoneCrossing>,
     pub created_at: u64,
 }
 
+/// Proof-carrying label adjustment (NORMATIVE)
+#[derive(Clone)]
+pub enum LabelAdjustment {
+    /// Human-approved integrity elevation (e.g., reviewed content)
+    IntegrityElevated { to: u8, by_approval: ObjectId, applied_at: u64 },
+    /// Human-approved declassification (lower secrecy)
+    ConfidentialityDeclassified { to: u8, by_approval: ObjectId, applied_at: u64 },
+}
+
 /// Proof-carrying taint reduction (NORMATIVE)
 ///
-/// Allows clearing specific taints when you can point to a verifiable attestation.
+/// Allows clearing specific taints when you can point to a verifiable SanitizerReceipt.
 /// Examples:
 /// - URL scanning cleared UNVERIFIED_LINK
 /// - Malware scan cleared UNVERIFIED_LINK
@@ -916,10 +975,30 @@ pub struct Provenance {
 pub struct TaintReduction {
     /// Which taints are cleared
     pub clears: TaintFlags,
-    /// Attestation/receipt ObjectId that justifies the reduction
-    pub by_attestation: ObjectId,
+    /// SanitizerReceipt ObjectId that justifies the reduction
+    pub by_receipt: ObjectId,
     /// When the reduction was applied
     pub applied_at: u64,
+}
+
+/// Machine-verifiable proof of sanitization (NORMATIVE)
+///
+/// Turns "I trust this connector did the right thing" into "I can verify
+/// this connector ran, with what inputs, using what version."
+pub struct SanitizerReceipt {
+    pub header: ObjectHeader,
+    /// Which sanitizer capability was invoked
+    pub sanitizer_id: CapabilityId,
+    /// Input object(s) that were scanned
+    pub input_object_ids: Vec<ObjectId>,
+    /// Sanitizer connector version (for CVE tracking)
+    pub sanitizer_version: String,
+    /// Which taints this receipt clears
+    pub clears: TaintFlags,
+    /// When the sanitization occurred
+    pub sanitized_at: u64,
+    /// Sanitizer node signature
+    pub signature: Signature,
 }
 
 bitflags! {
@@ -943,6 +1022,28 @@ pub struct ZoneCrossing {
 }
 
 impl Provenance {
+    /// Effective integrity after applying adjustments (NORMATIVE)
+    pub fn effective_integrity(&self) -> u8 {
+        let mut v = self.integrity_label;
+        for a in &self.label_adjustments {
+            if let LabelAdjustment::IntegrityElevated { to, .. } = a {
+                v = v.max(*to);
+            }
+        }
+        v
+    }
+
+    /// Effective confidentiality after applying adjustments (NORMATIVE)
+    pub fn effective_confidentiality(&self) -> u8 {
+        let mut v = self.confidentiality_label;
+        for a in &self.label_adjustments {
+            if let LabelAdjustment::ConfidentialityDeclassified { to, .. } = a {
+                v = v.min(*to);
+            }
+        }
+        v
+    }
+
     /// Effective taint after applying reductions (NORMATIVE)
     ///
     /// Taint reductions allow specific taints to be cleared with proof.
@@ -953,6 +1054,24 @@ impl Provenance {
             t.remove(r.clears);
         }
         t
+    }
+
+    /// Merge provenances from multiple inputs (NORMATIVE, SECURITY-CRITICAL)
+    ///
+    /// INVARIANT: MIN(integrity), MAX(confidentiality)
+    /// This ensures compromised inputs cannot elevate trust and
+    /// sensitive outputs cannot be inadvertently exposed.
+    pub fn merge(inputs: &[Provenance]) -> Provenance {
+        let mut out = inputs[0].clone();
+        out.integrity_label = inputs.iter().map(|p| p.effective_integrity()).min().unwrap_or(0);
+        out.confidentiality_label = inputs.iter().map(|p| p.effective_confidentiality()).max().unwrap_or(0);
+        for p in inputs.iter().skip(1) {
+            out.taint |= p.taint;
+            out.label_adjustments.extend(p.label_adjustments.clone());
+            out.taint_reductions.extend(p.taint_reductions.clone());
+            out.zone_crossings.extend(p.zone_crossings.clone());
+        }
+        out
     }
 }
 ```
@@ -1296,10 +1415,25 @@ impl InvokeRequest {
 pub struct InvokeResponse {
     pub id: String,
     pub result: Value,
-    pub resource_uris: Vec<String>,
+    /// Resource handles returned (zone-bound, auditable)
+    pub resource_object_ids: Vec<ObjectId>,
     pub next_cursor: Option<String>,
     /// Receipt ObjectId (for operations with side effects)
     pub receipt: Option<ObjectId>,
+}
+
+/// Zone-bound external resource handle (NORMATIVE)
+///
+/// Replaces free-form URI strings with zone-bound, auditable mesh objects.
+/// Enables access control and audit trails for external resources.
+pub struct ResourceObject {
+    pub header: ObjectHeader,
+    /// Original external URI (for human readability)
+    pub uri: String,
+    /// External resource type
+    pub resource_type: String,
+    /// Additional metadata (JSON)
+    pub metadata: Option<Value>,
 }
 
 /// Simulate request for preflight checks (NORMATIVE)
@@ -1351,7 +1485,8 @@ pub struct OperationReceipt {
     pub request_object_id: ObjectId,
     pub idempotency_key: Option<String>,
     pub outcome_object_ids: Vec<ObjectId>,
-    pub resource_uris: Vec<String>,
+    /// Resource handles produced (zone-bound, auditable)
+    pub resource_object_ids: Vec<ObjectId>,
     pub executed_at: u64,
     pub executed_by: TailscaleNodeId,
     pub signature: Signature,
@@ -1850,6 +1985,22 @@ impl RevocationRegistry {
 4. Before using zone keys
 5. On connector startup
 
+**Revocation Freshness Policy (NORMATIVE):**
+
+Tiered behavior for offline/degraded scenarios when revocation checks cannot reach the network:
+
+```rust
+/// Policy for handling revocation checks when offline/degraded (NORMATIVE)
+pub enum RevocationFreshnessPolicy {
+    /// Require fresh revocation check or abort (default for Risky/Dangerous)
+    Strict,
+    /// Log warning but proceed if cached list is within max_age
+    Warn { max_age_seconds: u64 },
+    /// Use stale cache if offline, log degraded state
+    BestEffort,
+}
+```
+
 ---
 
 ## 16. Device-Aware Execution and Execution Leases
@@ -2252,6 +2403,16 @@ Connector MUST:
 
 **Observability (NORMATIVE when present):**
 - Propagate `TraceContext` from `InvokeRequest` to `AuditEvent` for end-to-end tracing.
+
+**Fuzzing and Adversarial Tests (NORMATIVE for reference implementation):**
+
+The `fcp-conformance` crate MUST include fuzz targets for:
+1. FCPS frame parsing (invalid lengths, malformed symbol counts, checksum edge cases)
+2. Session handshake transcript verification (replay, splicing, nonce reuse)
+3. CapabilityToken verification (`grant_object_ids` inconsistencies, revocation staleness)
+4. ZoneKeyManifest parsing and sealed key unwrap behavior
+
+At least one corpus MUST include "decode DoS" adversarial inputs designed to maximize decode CPU.
 
 ---
 
