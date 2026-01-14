@@ -227,4 +227,5 @@ rm -f .apr/.locks/fcp_round_<N>.lock
 |-------|--------|-------------|
 | 1 | Complete | Initial refinements |
 | 2 | Complete | sender_instance_id, ZoneRekeyPolicy, ApprovalToken, session nonces, GC mirroring, simulate, RoleObject, NetworkConstraints, WASI |
-| 3 | Pending | - |
+| 3 | Complete | RFC2119, Provenance MIN/MAX merge, SanitizerReceipt, basis points, KIDs, foreign_refs, FCPC framing, ResourceObject, RevocationFreshnessPolicy, fuzzing |
+| 4 | Pending | - |
