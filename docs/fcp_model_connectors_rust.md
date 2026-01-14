@@ -5,7 +5,7 @@
 > Purpose: Provide a Rust-focused connector guide aligned exactly to FCP Specification V2.
 > Version: 2.0.0
 > Status: Draft
-> Last Updated: 2026-01-12
+> Last Updated: 2026-01-14
 > License: MIT
 > Canonical Spec: FCP_Specification_V2.md
 
@@ -158,12 +158,32 @@ This enables:
 - **Deterministic migration semantics**: State is explicit, not implicit in process memory
 
 ```rust
+/// Connector state model (NORMATIVE)
+pub enum ConnectorStateModel {
+    /// No mesh-persisted state required
+    Stateless,
+    /// Exactly one writer enforced via ExecutionLease
+    SingletonWriter,
+    /// Multi-writer state using CRDT deltas + periodic snapshots
+    Crdt { crdt_type: CrdtType },
+}
+
+/// CRDT type for multi-writer state (NORMATIVE)
+pub enum CrdtType {
+    LwwMap,      // Last-write-wins map
+    OrSet,       // Observed-remove set
+    GCounter,    // Grow-only counter
+    PnCounter,   // PN-Counter
+}
+
 /// Stable root for connector state (NORMATIVE)
 pub struct ConnectorStateRoot {
     pub header: ObjectHeader,
     pub connector_id: ConnectorId,
     pub instance_id: Option<InstanceId>,
     pub zone_id: ZoneId,
+    /// State model for this connector (NORMATIVE)
+    pub model: ConnectorStateModel,
     /// Latest ConnectorStateObject (or None if no state yet)
     pub head: Option<ObjectId>,
 }
@@ -183,6 +203,20 @@ pub struct ConnectorStateObject {
     /// Signature by executing node
     pub signature: Signature,
 }
+
+/// CRDT delta update (NORMATIVE when ConnectorStateModel::Crdt)
+pub struct ConnectorStateDelta {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    pub crdt_type: CrdtType,
+    /// Delta payload (canonical CBOR; type depends on crdt_type)
+    pub delta_cbor: Vec<u8>,
+    pub applied_at: u64,
+    pub applied_by: TailscaleNodeId,
+    pub signature: Signature,
+}
 ```
 
 **Single-Writer Semantics (NORMATIVE):**
@@ -194,7 +228,15 @@ only one node writes `ConnectorStateObject` updates at a time. This is enforced 
 ```toml
 # In connector manifest
 [connector]
-singleton_writer = true  # Only one node can write state at a time
+singleton_writer = true  # Legacy: equivalent to model = "singleton_writer"
+
+[connector.state]
+# "stateless" | "singleton_writer" | "crdt"
+model = "singleton_writer"
+# For CRDT models:
+# crdt_type = "lww_map"
+# snapshot_every_updates = 5000
+# snapshot_every_bytes = 1048576
 ```
 
 This prevents:
@@ -276,10 +318,10 @@ Bytes 12-15:  Total Payload Length (u32 LE)
 Bytes 16-47:  Object ID (32 bytes)
 Bytes 48-49:  Symbol Size (u16 LE, default 1024)
 Bytes 50-57:  Zone Key ID (8 bytes, for rotation)
-Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)
-Bytes 74-81:  Epoch ID (u64 LE)
-Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic counter)
-Bytes 90+:    Symbol payloads (concatenated)
+Bytes 58-89:  Zone ID hash (32 bytes, BLAKE3; see ZoneIdHash)
+Bytes 90-97:  Epoch ID (u64 LE)
+Bytes 98-105: Frame Seq (u64 LE, per-sender monotonic counter)
+Bytes 106+:   Symbol payloads (concatenated)
 Final 8:      Checksum (XXH3-64)
 ```
 
@@ -320,13 +362,23 @@ Each sender MUST maintain a monotonic `frame_seq` per (zone_id, zone_key_id) and
 Combined with per-sender subkeys derived from the zone key, this eliminates nonce-collision risk:
 
 ```rust
-/// Derive per-symbol nonce from frame_seq and ESI (NORMATIVE)
-/// nonce = frame_seq_le[0..8] || esi_le[0..4]
-/// Combined with per-sender subkeys, this eliminates nonce-collision risk across senders.
-fn derive_nonce(frame_seq: u64, esi: u32) -> [u8; 12] {
+/// Derive AEAD nonce deterministically (NORMATIVE).
+///
+/// - ChaCha20-Poly1305 (12-byte): nonce12 = frame_seq_le || esi_le
+/// - XChaCha20-Poly1305 (24-byte): nonce24 = sender_instance_id_le || frame_seq_le || esi_le || 0u32
+fn derive_nonce12(frame_seq: u64, esi: u32) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[0..8].copy_from_slice(&frame_seq.to_le_bytes());
     nonce[8..12].copy_from_slice(&esi.to_le_bytes());
+    nonce
+}
+
+fn derive_nonce24(sender_instance_id: u64, frame_seq: u64, esi: u32) -> [u8; 24] {
+    let mut nonce = [0u8; 24];
+    nonce[0..8].copy_from_slice(&sender_instance_id.to_le_bytes());
+    nonce[8..16].copy_from_slice(&frame_seq.to_le_bytes());
+    nonce[16..20].copy_from_slice(&esi.to_le_bytes());
+    nonce[20..24].copy_from_slice(&0u32.to_le_bytes());
     nonce
 }
 
