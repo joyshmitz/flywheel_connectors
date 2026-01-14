@@ -457,10 +457,36 @@ Cryptographic namespace identifier:
 
 ```rust
 /// Zone identifier (NORMATIVE)
+///
+/// NORMATIVE: ZoneId strings MUST be:
+/// - UTF-8
+/// - <= 64 bytes
+/// - restricted to ASCII `[a-z0-9:_-]` for cross-implementation stability
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ZoneId(String);
 
+/// Fixed-size ZoneId hash (NORMATIVE)
+/// Used for:
+/// - FCPS/FCPC constant-size framing
+/// - AEAD associated data (AAD) to avoid variable-length DoS footguns
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ZoneIdHash([u8; 32]);
+
+impl ZoneIdHash {
+    pub fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+}
+
 impl ZoneId {
+    /// Raw bytes of canonical ZoneId string (NORMATIVE)
+    pub fn as_bytes(&self) -> &[u8] { self.0.as_bytes() }
+
+    /// Fixed-size hash of ZoneId (NORMATIVE)
+    pub fn hash(&self) -> ZoneIdHash {
+        let mut h = blake3::Hasher::new();
+        h.update(b"FCP2-ZONE-ID-V1");
+        h.update(self.as_bytes());
+        ZoneIdHash(*h.finalize().as_bytes())
+    }
     /// Standard zones (NORMATIVE)
     pub fn owner() -> Self { Self("z:owner".into()) }
     pub fn private() -> Self { Self("z:private".into()) }
@@ -785,14 +811,23 @@ pub struct SymbolEnvelope {
     // frame_seq is per-sender monotonic for a given (zone_id, zone_key_id, source_id, sender_instance_id).
 }
 
-/// Derive per-symbol nonce from frame_seq and ESI (NORMATIVE)
+/// Derive AEAD nonce deterministically (NORMATIVE).
 ///
-/// nonce = frame_seq_le[0..8] || esi_le[0..4]
-/// Combined with per-sender subkeys, this eliminates nonce-collision risk across senders.
-fn derive_nonce(frame_seq: u64, esi: u32) -> [u8; 12] {
+/// - ChaCha20-Poly1305 (12-byte): nonce12 = frame_seq_le || esi_le
+/// - XChaCha20-Poly1305 (24-byte): nonce24 = sender_instance_id_le || frame_seq_le || esi_le || 0u32
+fn derive_nonce12(frame_seq: u64, esi: u32) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[0..8].copy_from_slice(&frame_seq.to_le_bytes());
     nonce[8..12].copy_from_slice(&esi.to_le_bytes());
+    nonce
+}
+
+fn derive_nonce24(sender_instance_id: u64, frame_seq: u64, esi: u32) -> [u8; 24] {
+    let mut nonce = [0u8; 24];
+    nonce[0..8].copy_from_slice(&sender_instance_id.to_le_bytes());
+    nonce[8..16].copy_from_slice(&frame_seq.to_le_bytes());
+    nonce[16..20].copy_from_slice(&esi.to_le_bytes());
+    nonce[20..24].copy_from_slice(&0u32.to_le_bytes());
     nonce
 }
 
@@ -809,17 +844,21 @@ impl SymbolEnvelope {
         sender_instance_id: u64,
         frame_seq: u64,
     ) -> Self {
-        // NORMATIVE: derive nonce from frame_seq || esi_le
-        let nonce = derive_nonce(frame_seq, esi);
-
         // Associated data binds symbol to context INCLUDING key_id for rotation safety
         let aad = Self::build_aad(&object_id, esi, k, &zone_key.zone_id, zone_key.key_id, epoch);
 
-        // NORMATIVE: encrypt under a per-sender subkey derived from the zone key.
-        // This prevents nonce collision across different senders.
-        // sender_instance_id ensures reboot-safety: new instance = new subkey.
+        // NORMATIVE: encrypt under per-sender subkey + algorithm-specific deterministic nonce
         let sender_key = zone_key.derive_sender_subkey(&source_id, sender_instance_id);
-        let (ciphertext, auth_tag) = zone_key.encrypt_with_subkey(&sender_key, plaintext, &nonce, &aad);
+        let (ciphertext, auth_tag) = match zone_key.algorithm {
+            ZoneKeyAlgorithm::ChaCha20Poly1305 => {
+                let nonce = derive_nonce12(frame_seq, esi);
+                zone_key.encrypt_with_subkey(&sender_key, plaintext, &nonce, &aad)
+            }
+            ZoneKeyAlgorithm::XChaCha20Poly1305 => {
+                let nonce = derive_nonce24(sender_instance_id, frame_seq, esi);
+                zone_key.encrypt_with_subkey(&sender_key, plaintext, &nonce, &aad)
+            }
+        };
 
         Self {
             object_id,
@@ -846,9 +885,6 @@ impl SymbolEnvelope {
             });
         }
 
-        // NORMATIVE: derive nonce from frame_seq || esi_le
-        let nonce = derive_nonce(self.frame_seq, self.esi);
-
         let aad = Self::build_aad(
             &self.object_id,
             self.esi,
@@ -858,9 +894,18 @@ impl SymbolEnvelope {
             self.epoch_id
         );
 
-        // NORMATIVE: decrypt using per-sender subkey (includes sender_instance_id)
+        // NORMATIVE: decrypt using per-sender subkey with algorithm-specific nonce
         let sender_key = zone_key.derive_sender_subkey(&self.source_id, self.sender_instance_id);
-        zone_key.decrypt_with_subkey(&sender_key, &self.data, &nonce, &self.auth_tag, &aad)
+        match zone_key.algorithm {
+            ZoneKeyAlgorithm::ChaCha20Poly1305 => {
+                let nonce = derive_nonce12(self.frame_seq, self.esi);
+                zone_key.decrypt_with_subkey(&sender_key, &self.data, &nonce, &self.auth_tag, &aad)
+            }
+            ZoneKeyAlgorithm::XChaCha20Poly1305 => {
+                let nonce = derive_nonce24(self.sender_instance_id, self.frame_seq, self.esi);
+                zone_key.decrypt_with_subkey(&sender_key, &self.data, &nonce, &self.auth_tag, &aad)
+            }
+        }
     }
 
     fn build_aad(
@@ -871,11 +916,12 @@ impl SymbolEnvelope {
         zone_key_id: [u8; 8],
         epoch: EpochId,
     ) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(72);
+        let mut aad = Vec::with_capacity(96);
         aad.extend_from_slice(object_id.as_bytes());
         aad.extend_from_slice(&esi.to_le_bytes());
         aad.extend_from_slice(&k.to_le_bytes());
-        aad.extend_from_slice(zone_id.as_bytes());
+        // NORMATIVE: fixed-size zone hash avoids variable-length AAD ambiguity/DoS
+        aad.extend_from_slice(zone_id.hash().as_bytes());
         aad.extend_from_slice(&zone_key_id);  // Binds AAD to specific key version
         aad.extend_from_slice(&epoch.0.to_le_bytes());
         aad
@@ -921,11 +967,15 @@ pub struct MeshSessionHello {
     /// Random nonce for replay protection (NORMATIVE)
     /// Binds this handshake to a specific session attempt.
     pub nonce: [u8; 16],
+    /// Optional stateless cookie (NORMATIVE when responder requires it)
+    /// Prevents responder resource-exhaustion by deferring expensive work
+    /// (signature verification, ECDH) until cookie is validated.
+    pub cookie: Option<[u8; 32]>,
     pub timestamp: u64,
     /// Supported crypto suites (ordered by preference)
     pub suites: Vec<SessionCryptoSuite>,
     /// Node signature over transcript (NORMATIVE)
-    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey || nonce || timestamp || suites
+    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey || nonce || cookie || timestamp || suites
     pub signature: Signature,
 }
 
@@ -945,6 +995,22 @@ pub struct MeshSessionAck {
     /// transcript = "FCP2-ACK-V1" || from || to || eph_pubkey || nonce || session_id ||
     ///              suite || timestamp || hello.eph_pubkey || hello.nonce
     pub signature: Signature,
+}
+
+/// Stateless cookie challenge (NORMATIVE when used)
+///
+/// Responder can send this WITHOUT allocating session state or verifying
+/// the hello signature. This prevents resource exhaustion from handshake
+/// floods (similar to DTLS/QUIC HelloRetryRequest pattern).
+pub struct MeshSessionHelloRetry {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    /// Stateless cookie computed by responder (NORMATIVE):
+    /// cookie = HMAC(cookie_key, from || to || hello.eph_pubkey || hello.nonce || hello.timestamp)[:32]
+    /// The cookie_key SHOULD be rotated periodically (e.g., every 60 seconds)
+    /// with a grace window for in-flight handshakes.
+    pub cookie: [u8; 32],
+    pub timestamp: u64,
 }
 
 /// Session key derivation (NORMATIVE)
@@ -988,6 +1054,27 @@ pub struct SessionReplayPolicy {
     pub rekey_after_bytes: u64,        // default: 1_099_511_627_776 (1 TiB)
 }
 
+/// Time skew handling policy (NORMATIVE)
+///
+/// Clock drift is inevitable (mobile devices, VMs paused, etc.).
+/// This policy defines tolerances for timestamp validation.
+pub struct TimePolicy {
+    /// Maximum tolerated clock skew when validating iat/exp
+    /// and handshake timestamps (default: 120 seconds)
+    pub max_skew_secs: u64,
+    /// Whether to log skew events for operational visibility (default: true)
+    pub log_skew_events: bool,
+}
+
+impl Default for TimePolicy {
+    fn default() -> Self {
+        Self {
+            max_skew_secs: 120,
+            log_skew_events: true,
+        }
+    }
+}
+
 /// Legacy signed frame (for bootstrap/degraded mode)
 pub struct SignedFcpsFrame {
     pub frame: FcpsFrame,
@@ -1027,15 +1114,19 @@ Symbol-native frame format:
 │  Bytes 16-47:  Object ID (32 bytes)                                         │
 │  Bytes 48-49:  Symbol Size (u16 LE, default 1024)                           │
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
-│  Bytes 58-73:  Zone ID hash (16 bytes, truncated SHA256)                    │
-│  Bytes 74-81:  Epoch ID (u64 LE)                                            │
-│  Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic)                     │
-│  Bytes 90+:    Symbol payloads (concatenated)                               │
+│  Bytes 58-89:  Zone ID hash (32 bytes, BLAKE3; see §3.4)                    │
+│  Bytes 90-97:  Epoch ID (u64 LE)                                            │
+│  Bytes 98-105: Frame Seq (u64 LE, per-sender monotonic)                     │
+│  Bytes 106+:   Symbol payloads (concatenated)                               │
 │  Final 8:      Checksum (XXH3-64)                                           │
 │                                                                             │
-│  Fixed header: 90 bytes                                                     │
+│  Fixed header: 106 bytes                                                    │
 │  Each symbol: 4 (ESI) + 2 (K) + N (data) + 16 (auth_tag)                    │
-│               (nonce derived from frame_seq_le || esi_le, NOT stored)       │
+│               (nonce derived per algorithm; see derive_nonce12/24)          │
+│                                                                             │
+│  NOTE: On-wire framing + per-symbol AEAD AAD use fixed-size ZoneIdHash      │
+│  (not variable-length zone strings). This avoids ambiguity and removes      │
+│  a DoS footgun where a malicious peer could force large AADs.               │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1268,6 +1359,33 @@ pub struct Zone {
 
     /// UDP/TCP port for gossip/control-plane objects in this zone (NORMATIVE for port-gating)
     pub control_port: u16,
+
+    /// Transport policy for this zone (NORMATIVE when present)
+    /// Keeps "DERP allowed?" and "Funnel allowed?" out of hard-coded tables.
+    pub transport_policy: Option<ZoneTransportPolicy>,
+}
+
+/// Zone transport policy (NORMATIVE)
+///
+/// Controls which Tailscale transport mechanisms are permitted for this zone.
+/// Makes transport selection policy-driven rather than hard-coded by zone class.
+pub struct ZoneTransportPolicy {
+    /// Allow DERP relay when direct paths fail
+    pub allow_derp: bool,
+    /// Allow Tailscale Funnel (public ingress)
+    pub allow_funnel: bool,
+    /// Allow LAN broadcast for local discovery
+    pub allow_lan_broadcast: bool,
+}
+
+impl Default for ZoneTransportPolicy {
+    fn default() -> Self {
+        Self {
+            allow_derp: true,
+            allow_funnel: false,
+            allow_lan_broadcast: true,
+        }
+    }
 }
 
 /// Unified approval token (NORMATIVE)
@@ -1360,7 +1478,8 @@ impl ApprovalToken {
 pub struct ZoneKey {
     pub zone_id: ZoneId,
     pub key_id: [u8; 8],
-    /// Randomly generated 256-bit symmetric key for ChaCha20-Poly1305 AEAD
+    pub algorithm: ZoneKeyAlgorithm,
+    /// Randomly generated 256-bit symmetric key for AEAD
     pub symmetric_key: [u8; 32],
     pub created_at: u64,
     pub expires_at: Option<u64>,
@@ -1468,6 +1587,10 @@ pub struct ZoneRekeyPolicy {
     /// any node is removed from the zone. Prevents removed nodes from decrypting
     /// future traffic without requiring MLS-style tree ratchets.
     pub rewrap_on_membership_change: bool,
+    /// If true, rotate ObjectIdKey on membership change (privacy hardening)
+    /// A removed member can otherwise use retained ObjectIdKey for dictionary
+    /// attacks or correlation on low-entropy objects.
+    pub rotate_object_id_key_on_membership_change: bool,
 }
 
 /// Local keyring for zone keys (NORMATIVE)
@@ -1492,8 +1615,16 @@ impl ZoneKeyRing {
 
 ```rust
 /// Zone access policy (NORMATIVE)
+///
+/// Pattern Syntax (NORMATIVE):
+/// - Glob only (regex is forbidden for interop stability)
+/// - `*` matches any sequence of characters
+/// - `?` matches exactly one character
+/// - ASCII case-sensitive match
+/// - Pattern length MUST be <= 128 bytes
+/// - Examples: "user@*", "connector:slack-*", "cap:read:*"
 pub struct ZonePolicy {
-    /// Allowed principal patterns
+    /// Allowed principal patterns (glob syntax)
     pub principals_allow: Vec<String>,
 
     /// Denied principal patterns (overrides allow)
@@ -1532,6 +1663,14 @@ impl ZonePolicy {
         // Step 2: Check connector
         if self.matches_any(&self.connectors_deny, &request.connector) {
             return PolicyDecision::Deny("Connector denied by policy");
+        }
+        // NORMATIVE: Enforce connector allowlist if specified
+        if !self.connectors_allow.is_empty()
+            && !self.matches_any(&self.connectors_allow, &request.connector)
+        {
+            if self.default_deny {
+                return PolicyDecision::Deny("Connector not in allow list");
+            }
         }
 
         // Step 3: Check capability
@@ -1593,16 +1732,10 @@ impl AclGenerator {
             });
         }
 
-        // Deny rules for explicit blocks
-        for zone in &self.zones {
-            for blocked in &zone.policy.connectors_deny {
-                acl.acls.push(AclRule {
-                    action: "deny".into(),
-                    src: vec![zone.tailscale_tag.clone()],
-                    dst: vec![blocked.clone()],
-                });
-            }
-        }
+        // NORMATIVE: Connector allow/deny is enforced by FCP policy + capabilities,
+        // not by Tailscale ACLs. Tailscale provides port-gating defense-in-depth only.
+        // Connector patterns (e.g., "connector:slack-*") are not valid Tailscale ACL
+        // destinations and MUST NOT be used in generated ACLs.
 
         acl
     }
@@ -2425,9 +2558,17 @@ impl CapabilityToken {
 
     /// Verify token validity (NORMATIVE)
     pub fn verify(&self, trust_anchors: &TrustAnchors) -> Result<(), TokenError> {
-        // Check expiry
-        if current_timestamp() > self.exp {
+        let now = current_timestamp();
+        let skew = trust_anchors.time_policy().max_skew_secs;
+
+        // Check expiry (with skew tolerance)
+        if now > self.exp.saturating_add(skew) {
             return Err(TokenError::Expired);
+        }
+
+        // Reject tokens issued too far in the future (with skew tolerance)
+        if self.iat > now.saturating_add(skew) {
+            return Err(TokenError::IssuedInFuture);
         }
 
         // Verify signature using node issuance pubkey (NOT signing key, NOT zone key)
@@ -2447,6 +2588,124 @@ impl CapabilityToken {
         trust_anchors.verify_token_grants(self)?;
 
         Ok(())
+    }
+}
+```
+
+#### 7.5.1 Token Encoding: CWT Claims in COSE_Sign1 (NORMATIVE)
+
+To reduce cross-language signature/canonicalization divergence, CapabilityToken MUST be serialized
+as a COSE_Sign1 structure whose payload is a deterministic CBOR map following CWT conventions
+(RFC 8392). This ensures interoperability across implementations and eliminates JSON canonicalization
+ambiguity.
+
+**COSE Protected Headers:**
+
+| Header | Value | Description |
+|--------|-------|-------------|
+| `alg` (1) | `-8` (EdDSA) | Signature algorithm |
+| `kid` (4) | 8 bytes | `node_iss_kid` or stable KID encoding |
+
+**CWT Registered Claims (payload map):**
+
+| Claim Key | CWT Name | FCP Field | Description |
+|-----------|----------|-----------|-------------|
+| `1` | iss | `iss_zone` | Issuing zone identifier |
+| `2` | sub | `sub` | Subject (holder node or identity) |
+| `3` | aud | `aud` | Audience (target zone or service) |
+| `4` | exp | `exp` | Expiration time (Unix timestamp) |
+| `6` | iat | `iat` | Issued-at time (Unix timestamp) |
+| `7` | cti | `jti` | Token ID (16-byte UUID) |
+
+**FCP Private Claims (payload map):**
+
+| Claim Key | FCP Field | Type | Description |
+|-----------|-----------|------|-------------|
+| `1000` | `iss_node` | bytes | Issuing node's public key |
+| `1001` | `grant_object_ids` | array | Array of 32-byte ObjectIds |
+| `1002` | `caps` | map | Capability flags |
+| `1003` | `attenuation` | map | Attenuation constraints |
+| `1004` | `holder_node` | bytes | Holder's public key (optional) |
+| `1005` | `rev_head` | bytes | Revocation chain head |
+| `1006` | `rev_seq` | uint | Revocation sequence number |
+| `1007` | `aud_binary` | bytes | Binary audience (32-byte hash) |
+
+**Deterministic CBOR Encoding (NORMATIVE):**
+
+- Map keys MUST be sorted in ascending numeric order
+- Integers MUST use the minimal encoding
+- Implementations MUST NOT include keys with null/undefined values
+- All byte strings MUST be definite-length encoded
+
+```rust
+/// Serialize CapabilityToken to CWT/COSE_Sign1 (NORMATIVE)
+impl CapabilityToken {
+    pub fn to_cwt(&self, signing_key: &SigningKey) -> Result<Vec<u8>, TokenError> {
+        // Build CWT claims map (sorted by key)
+        let mut claims = CborMap::new();
+        claims.insert(1, self.iss_zone.as_bytes());           // iss
+        claims.insert(2, &self.sub);                          // sub
+        claims.insert(3, &self.aud);                          // aud
+        claims.insert(4, self.exp);                           // exp
+        claims.insert(6, self.iat);                           // iat
+        claims.insert(7, &self.jti);                          // cti
+        claims.insert(1000, self.iss_node.as_bytes());
+        claims.insert(1001, &self.grant_object_ids);
+        claims.insert(1002, &self.caps);
+        if let Some(att) = &self.attenuation {
+            claims.insert(1003, att);
+        }
+        if let Some(holder) = &self.holder_node {
+            claims.insert(1004, holder.as_bytes());
+        }
+        claims.insert(1005, &self.rev_head);
+        claims.insert(1006, self.rev_seq);
+        if let Some(aud_bin) = &self.aud_binary {
+            claims.insert(1007, aud_bin);
+        }
+
+        // Build COSE_Sign1: [protected, unprotected, payload, signature]
+        let protected = CborMap::from([
+            (1, -8i8),                                        // alg = EdDSA
+            (4, &self.node_iss_kid),                          // kid
+        ]);
+        let payload = claims.to_deterministic_cbor();
+        let sig_structure = build_sig_structure(&protected, &payload);
+        let signature = signing_key.sign(&sig_structure);
+
+        Ok(cose_sign1_encode(&protected, &payload, &signature))
+    }
+
+    pub fn from_cwt(cwt_bytes: &[u8], verifier: &impl TokenVerifier) -> Result<Self, TokenError> {
+        let (protected, payload, signature) = cose_sign1_decode(cwt_bytes)?;
+
+        // Extract kid from protected headers
+        let kid: [u8; 8] = protected.get(4)?;
+
+        // Verify signature before parsing claims
+        let sig_structure = build_sig_structure(&protected, &payload);
+        verifier.verify_signature(&kid, &sig_structure, &signature)?;
+
+        // Parse CWT claims
+        let claims = CborMap::from_bytes(&payload)?;
+        Ok(Self {
+            iss_zone: ZoneId::new(claims.get_bytes(1)?),
+            sub: claims.get_string(2)?,
+            aud: claims.get_string(3)?,
+            exp: claims.get_u64(4)?,
+            iat: claims.get_u64(6)?,
+            jti: claims.get_bytes(7)?,
+            iss_node: NodeId::from_bytes(claims.get_bytes(1000)?)?,
+            grant_object_ids: claims.get_array(1001)?,
+            caps: claims.get_map(1002)?,
+            attenuation: claims.get_optional_map(1003)?,
+            holder_node: claims.get_optional_bytes(1004)?.map(NodeId::from_bytes).transpose()?,
+            rev_head: claims.get_bytes(1005)?,
+            rev_seq: claims.get_u64(1006)?,
+            aud_binary: claims.get_optional_bytes(1007)?,
+            node_iss_kid: kid,
+            signature: Signature::default(), // Signature is external in COSE_Sign1
+        })
     }
 }
 ```
@@ -2805,6 +3064,105 @@ MeshNodes MUST NOT send more than `N` symbols in response to a request unless th
 
 This prevents reflection/amplification attacks where an attacker spoofs requests to flood victims.
 
+#### 8.4.1 Unreferenced Object Quarantine (NORMATIVE)
+
+To prevent disk/memory exhaustion from injected, unreferenced ObjectIds, MeshNodes MUST implement
+an object admission pipeline that distinguishes between admitted (verified reachable) objects and
+quarantined (unknown provenance) objects.
+
+**Admission Pipeline Stages:**
+
+1. **Quarantine by default:** Symbols for unknown/unreferenced ObjectIds MUST be stored in a bounded
+   quarantine store with `RetentionClass::Ephemeral` and strict per-peer + per-zone quotas.
+
+2. **No global gossip for quarantined objects:** Quarantined ObjectIds MUST NOT be inserted into the
+   primary gossip filters/IBLT state until promoted (prevents filter pollution and gossip amplification).
+
+3. **Promotion rules:** An object may be promoted from quarantine → admitted only if:
+   - It becomes reachable from the zone's pinned `ZoneFrontier`, OR
+   - It is explicitly requested by an authenticated peer via a bounded request, OR
+   - It is explicitly pinned locally by user action/policy.
+
+4. **Schema-gated promotion:** Promotion MUST require successful reconstruction of the object header/body
+   and schema verification (prevents "garbage admitted as real objects").
+
+```rust
+/// Object admission classification (NORMATIVE)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ObjectAdmissionClass {
+    /// Unknown provenance, bounded retention, not gossiped
+    Quarantined,
+    /// Verified reachable, normal retention, gossiped
+    Admitted,
+}
+
+/// Object admission policy (NORMATIVE)
+pub struct ObjectAdmissionPolicy {
+    /// Maximum quarantine storage per zone (default: 256MB)
+    pub max_quarantine_bytes_per_zone: u64,
+    /// Maximum quarantined objects per zone (default: 100,000)
+    pub max_quarantine_objects_per_zone: u32,
+    /// TTL for quarantined objects before eviction (default: 3600s)
+    pub quarantine_ttl_secs: u64,
+    /// Whether to require schema validation on promotion (default: true)
+    pub require_schema_validation: bool,
+}
+
+impl Default for ObjectAdmissionPolicy {
+    fn default() -> Self {
+        Self {
+            max_quarantine_bytes_per_zone: 256 * 1024 * 1024, // 256MB
+            max_quarantine_objects_per_zone: 100_000,
+            quarantine_ttl_secs: 3600,
+            require_schema_validation: true,
+        }
+    }
+}
+
+impl MeshNode {
+    /// Attempt to promote object from quarantine (NORMATIVE)
+    pub fn try_promote(&self, object_id: &ObjectId) -> Result<(), AdmissionError> {
+        let obj = self.quarantine.get(object_id)?;
+
+        // Check reachability from zone frontier
+        if self.is_reachable_from_frontier(object_id) {
+            return self.promote_to_admitted(object_id);
+        }
+
+        // Check if explicitly pinned
+        if self.local_pins.contains(object_id) {
+            return self.promote_to_admitted(object_id);
+        }
+
+        Err(AdmissionError::NotReachable)
+    }
+
+    fn promote_to_admitted(&self, object_id: &ObjectId) -> Result<(), AdmissionError> {
+        let policy = self.admission_policy();
+
+        // Schema validation on promotion
+        if policy.require_schema_validation {
+            let obj = self.quarantine.get(object_id)?;
+            obj.validate_schema(&self.schema_registry)?;
+        }
+
+        // Move to admitted store and add to gossip
+        self.quarantine.remove(object_id)?;
+        self.symbol_store.promote(object_id)?;
+        self.gossip.announce_object(object_id).await;
+
+        Ok(())
+    }
+}
+```
+
+**Eviction Policy (NORMATIVE):**
+
+When quarantine limits are reached, objects MUST be evicted in the following order:
+1. Oldest by `received_at` timestamp
+2. Lowest peer reputation score
+3. Largest by byte size
+
 ---
 
 ## 9. Wire Protocol
@@ -3096,6 +3454,9 @@ pub struct OperationIntent {
     pub idempotency_key: Option<String>,
     pub planned_at: u64,
     pub planned_by: TailscaleNodeId,
+    /// Lease fencing token observed/used for this intent (NORMATIVE for Risky/Dangerous)
+    /// Connectors/state writers can reject stale lease holders by comparing lease_seq.
+    pub lease_seq: Option<u64>,
     /// Optional upstream idempotency handle (e.g., Stripe idempotency key)
     pub upstream_idempotency: Option<String>,
     pub signature: Signature,
@@ -3104,8 +3465,9 @@ pub struct OperationIntent {
 
 **Execution Rule for Strict/Risky/Dangerous Operations (NORMATIVE):**
 1. MeshNode MUST store OperationIntent (Required retention) BEFORE invoking the connector operation
-2. OperationReceipt MUST reference the OperationIntent via `ObjectHeader.refs`
-3. On crash recovery, check for intents without corresponding receipts to detect incomplete operations
+2. OperationIntent MUST reference the ExecutionLease via `ObjectHeader.refs` (for Risky/Dangerous)
+3. OperationReceipt MUST reference the OperationIntent via `ObjectHeader.refs`
+4. On crash recovery, check for intents without corresponding receipts to detect incomplete operations
 
 **Idempotency Enforcement:**
 - On retry with same `idempotency_key`, mesh returns prior receipt instead of re-executing (for Strict)
@@ -3253,12 +3615,36 @@ This enables:
 - **Deterministic migration semantics**: State is explicit, not implicit in process memory
 
 ```rust
+/// Connector state model (NORMATIVE)
+pub enum ConnectorStateModel {
+    /// No mesh-persisted state required
+    Stateless,
+    /// Exactly one writer enforced via ExecutionLease
+    SingletonWriter,
+    /// Multi-writer state using CRDT deltas + periodic snapshots
+    Crdt { crdt_type: CrdtType },
+}
+
+/// CRDT type for multi-writer state (NORMATIVE)
+pub enum CrdtType {
+    /// Last-write-wins map (requires a clock/seq policy)
+    LwwMap,
+    /// Observed-remove set
+    OrSet,
+    /// Grow-only counter
+    GCounter,
+    /// PN-Counter (positive-negative counter)
+    PnCounter,
+}
+
 /// Stable root for connector state (NORMATIVE)
 pub struct ConnectorStateRoot {
     pub header: ObjectHeader,
     pub connector_id: ConnectorId,
     pub instance_id: Option<InstanceId>,
     pub zone_id: ZoneId,
+    /// State model for this connector (NORMATIVE)
+    pub model: ConnectorStateModel,
     /// Latest ConnectorStateObject (or None if no state yet)
     pub head: Option<ObjectId>,
 }
@@ -3278,6 +3664,23 @@ pub struct ConnectorStateObject {
     /// Signature by executing node
     pub signature: Signature,
 }
+
+/// CRDT delta update (NORMATIVE when ConnectorStateModel::Crdt)
+///
+/// Multi-writer connectors use deltas instead of full state updates.
+/// Deltas are merged using CRDT semantics to produce a consistent view.
+pub struct ConnectorStateDelta {
+    pub header: ObjectHeader,
+    pub connector_id: ConnectorId,
+    pub instance_id: Option<InstanceId>,
+    pub zone_id: ZoneId,
+    pub crdt_type: CrdtType,
+    /// Delta payload (canonical CBOR; type depends on crdt_type)
+    pub delta_cbor: Vec<u8>,
+    pub applied_at: u64,
+    pub applied_by: TailscaleNodeId,
+    pub signature: Signature,
+}
 ```
 
 **Single-Writer Semantics (NORMATIVE):**
@@ -3289,7 +3692,15 @@ only one node writes `ConnectorStateObject` updates at a time. This is enforced 
 ```toml
 # In connector manifest
 [connector]
-singleton_writer = true  # Only one node can write state at a time
+singleton_writer = true  # Legacy: equivalent to model = "singleton_writer"
+
+[connector.state]
+# "stateless" | "singleton_writer" | "crdt"
+model = "singleton_writer"
+# For CRDT models:
+# crdt_type = "lww_map"  # or "or_set", "g_counter", "pn_counter"
+# snapshot_every_updates = 5000
+# snapshot_every_bytes = 1048576
 ```
 
 This prevents:
@@ -3663,6 +4074,10 @@ pub enum AttestationType {
     InToto,
     /// Reproducible build attestation
     ReproducibleBuild,
+    /// SPDX or CycloneDX SBOM (policy may require one)
+    Sbom,
+    /// Vulnerability scan attestation (policy may set max severity)
+    VulnerabilityScan,
     /// Code review attestation
     CodeReview,
     /// Custom attestation type
@@ -3677,6 +4092,12 @@ pub struct SupplyChainPolicy {
     pub require_attestation_types: Vec<AttestationType>,
     /// Minimum SLSA level (0-4)
     pub min_slsa_level: u8,
+    /// Require an SBOM attestation (SPDX or CycloneDX)
+    pub require_sbom: bool,
+    /// Maximum allowed vulnerability severity for required scan attestations
+    /// If set, VulnerabilityScan attestation is required and must not exceed this severity.
+    /// Values: "none", "low", "medium", "high", "critical" (None = no check)
+    pub max_allowed_vuln_severity: Option<String>,
     /// Trusted builder identities
     pub trusted_builders: Vec<String>,
     /// Trusted publisher key fingerprints
@@ -3874,6 +4295,10 @@ pub struct ExecutionLease {
     pub header: ObjectHeader,
     /// The request/computation being leased
     pub request_object_id: ObjectId,
+    /// Fencing token (NORMATIVE): monotonically increases per (zone_id, request_object_id)
+    /// Used to prevent stale lease holders from executing/writing state.
+    /// The highest lease_seq wins deterministically, regardless of wall-clock exp.
+    pub lease_seq: u64,
     /// Which node currently owns execution
     pub owner_node: TailscaleNodeId,
     /// Lease issued at
@@ -4691,6 +5116,45 @@ pub struct AuditHead {
 Nodes MUST refuse to advance AuditHead if quorum is not satisfied, unless in explicit degraded mode.
 
 ```rust
+/// Decision receipt (NORMATIVE)
+///
+/// Captures "why allowed/denied" in a mechanically verifiable, content-addressed form.
+/// Essential for explainability: users and developers can answer "Why was this denied?"
+/// without guessing or disabling security.
+pub struct DecisionReceipt {
+    pub header: ObjectHeader,
+    /// The request being evaluated
+    pub request_object_id: ObjectId,
+    /// Decision outcome
+    pub decision: Decision,
+    /// Stable, enumerable reason code (NORMATIVE)
+    /// Examples: "taint.public_input_dangerous", "revocation.stale_frontier",
+    ///           "capability.insufficient", "zone_policy.connector_denied"
+    pub reason_code: String,
+    /// Human-readable explanation (optional)
+    pub message: Option<String>,
+    /// ObjectIds that justify the decision (cap token, grants, approvals, frontier, rev head, etc.)
+    pub evidence: Vec<ObjectId>,
+    pub decided_at: u64,
+    pub decided_by: TailscaleNodeId,
+    pub signature: Signature,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Deny,
+}
+```
+
+**DecisionReceipt Emission Rules (NORMATIVE):**
+
+- MeshNodes MUST emit a DecisionReceipt for all denied Risky/Dangerous operations
+- MeshNodes SHOULD emit DecisionReceipts for allowed Risky/Dangerous operations when `audit_level >= High`
+- DecisionReceipts are stored with `RetentionClass::Lease` (default 30 days) or as configured by zone policy
+- The `fcp explain` CLI command can render DecisionReceipts for debugging
+
+```rust
 /// Frontier checkpoint for fast sync (NORMATIVE)
 ///
 /// Compact checkpoint of zone state for efficient synchronization.
@@ -4848,7 +5312,8 @@ See FCP_Specification_V1.md Appendix I for the complete FZPF JSON Schema.
 ```rust
 pub struct RaptorQConfig {
     pub symbol_size: u16,        // Default: 1024
-    pub repair_ratio: f32,       // Default: 0.05
+    /// Repair ratio in basis points (NORMATIVE): 500 = 5%
+    pub repair_ratio_bps: u16,   // Default: 500
     pub max_object_size: u32,    // Default: 64MB
     pub decode_timeout: Duration, // Default: 30s
     /// If object size exceeds this threshold, it MUST use ChunkedObjectManifest
