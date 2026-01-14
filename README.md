@@ -29,7 +29,7 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 
 | Axiom | Principle |
 |-------|-----------|
-| **Universal Fungibility** | All data flows as RaptorQ symbols. Any K' symbols reconstruct the original. No symbol is special. |
+| **Universal Fungibility** | All durable mesh objects are symbol-addressable: any K' symbols reconstruct the canonical object bytes. Control-plane messages MAY travel over FCPC streams for efficiency, but the canonical representation is still a content-addressed mesh object. |
 | **Authenticated Mesh** | Tailscale IS the transport AND the identity layer. Every node has unforgeable WireGuard keys. |
 | **Explicit Authority** | No ambient authority. All capabilities flow from owner key through cryptographic chains. |
 
@@ -125,6 +125,7 @@ FCP addresses these through:
 | **Capability** | An authorized operation with cryptographic proof; grant_object_ids enable mechanical verification |
 | **Role** | Named bundle of capabilities (RoleObject) for simplified policy administration |
 | **ResourceObject** | Zone-bound handle for external resources (files, repos, APIs) enabling auditable access control |
+| **Resource Visibility** | ResourceObjects carry public/private classification; MeshNode enforces declassification when writing higher-confidentiality data to lower-confidentiality external resources |
 | **Connector** | A sandboxed binary or WASI module that bridges external services to FCP |
 | **Receipt** | Signed proof of operation execution for idempotency |
 | **Revocation** | First-class object that invalidates tokens, keys, or devices |
@@ -264,13 +265,15 @@ Symbol Approach:
 │  Bytes 16-47:  Object ID (32 bytes)                                         │
 │  Bytes 48-49:  Symbol Size (u16 LE, default 1024)                           │
 │  Bytes 50-57:  Zone Key ID (8 bytes, for rotation)                          │
-│  Bytes 58-73:  Zone ID hash (16 bytes)                                      │
-│  Bytes 74-81:  Epoch ID (u64 LE)                                            │
-│  Bytes 82-89:  Frame Seq (u64 LE, per-sender monotonic counter)             │
-│  Bytes 90+:    Symbol payloads (encrypted, concatenated)                    │
-│  Final 8:      Checksum (XXH3-64)                                           │
+│  Bytes 58-89:  Zone ID hash (32 bytes, BLAKE3; fixed-size)                  │
+│  Bytes 90-97:  Epoch ID (u64 LE)                                            │
+│  Bytes 98-105: Sender Instance ID (u64 LE, reboot-safety)                   │
+│  Bytes 106-113: Frame Seq (u64 LE, per-sender monotonic counter)            │
+│  Bytes 114+:   Symbol payloads (encrypted, concatenated)                    │
 │                                                                             │
-│  Fixed header: 90 bytes                                                     │
+│  Fixed header: 114 bytes                                                    │
+│  NOTE: No separate checksum. Integrity provided by per-symbol AEAD tags     │
+│        and per-frame session MAC (AuthenticatedFcpsFrame).                  │
 │  Per-symbol nonce: derived as frame_seq || esi_le (deterministic)           │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -329,7 +332,7 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 │  │  • Zone keyrings for deterministic key selection by zone_key_id     │    │
 │  │  • Trust anchors (owner key, attested node keys)                    │    │
 │  │  • Monotonic seq numbers for O(1) freshness checks                  │    │
-│  │  • ZoneFrontier checkpoints for fast sync                           │    │
+│  │  • ZoneCheckpoint checkpoints for fast sync                           │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -389,9 +392,11 @@ New devices join the mesh through owner-signed enrollment:
 
 1. Device joins Tailscale tailnet
 2. Owner issues `DeviceEnrollment` object (signed)
-3. Owner issues `NodeKeyAttestation` binding node to signing key
+3. Owner issues `NodeKeyAttestation` binding node to signing key (optionally with `DevicePostureAttestation` for hardware-backed key requirements)
 4. Device receives enrollment via mesh gossip
 5. Other nodes accept the new device as peer
+
+Sensitive zones (e.g., z:owner) may require hardware-backed keys via `DevicePostureAttestation` (TPM, Secure Enclave, Android Keystore) to prevent software-only device compromise from accessing high-value secrets.
 
 Device removal triggers revocation + zone key rotation + secret resharing.
 
@@ -597,7 +602,7 @@ AuditEvent_1 → AuditEvent_2 → AuditEvent_3 → ... → AuditHead
      ↑              ↑              ↑                   ↑
   signed         signed         signed         quorum-signed
 
-ZoneFrontier {
+ZoneCheckpoint {
   rev_head, rev_seq      → Revocation chain state
   audit_head, audit_seq  → Audit chain state
 }
@@ -605,7 +610,7 @@ ZoneFrontier {
 
 - Events are hash-linked (tamper-evident) with monotonic seq for O(1) freshness checks
 - AuditHead checkpoints are quorum-signed (n-f nodes)
-- ZoneFrontier enables fast sync without chain traversal
+- ZoneCheckpoint enables fast sync without chain traversal
 - Fork detection triggers alerts
 - Required events: secret access, risky operations, approvals, zone transitions
 - **TraceContext propagation**: W3C-compatible trace_id/span_id flow through InvokeRequest and AuditEvent for end-to-end distributed tracing
@@ -683,6 +688,10 @@ Owner policy can enforce:
 - `min_slsa_level = 2`
 - `trusted_builders = ["github-actions", "internal-ci"]`
 
+**Optional Enhanced Security:** Registries can use a `RegistrySecurityProfile` with:
+- **TUF root pinning** (prevents freeze/rollback and mix-and-match attacks)
+- **Sigstore/cosign verification** (adds supply-chain provenance beyond publisher keys)
+
 ---
 
 ## Performance Targets
@@ -701,6 +710,28 @@ Owner policy can enforce:
 ### Benchmarks
 
 The reference implementation ships a `fcp bench` suite that produces machine-readable results (JSON) for regression tracking.
+
+---
+
+## Ops & Debugging
+
+FCP is designed to be *operable* without disabling security. The CLI exposes the core safety/availability loops:
+
+```bash
+# Explain why an operation was denied (DecisionReceipt-backed)
+fcp explain --request <objectid>
+
+# Show revocation/checkpoint freshness and degraded mode state
+fcp doctor --zone z:private
+
+# Show offline availability SLOs and symbol coverage by placement policy
+fcp repair status --zone z:work
+
+# Tail audit events (per zone) with trace correlation
+fcp audit tail --zone z:owner
+```
+
+Key principle: **if you can't explain a denial or quantify offline availability, the system isn't finished.**
 
 ---
 
