@@ -118,7 +118,8 @@ FCP addresses these through:
 | **Epoch** | A logical time unit; no ordering within, ordering between |
 | **MeshNode** | A device participating in the FCP mesh |
 | **Capability** | An authorized operation with cryptographic proof; grant_object_ids enable mechanical verification |
-| **Connector** | A sandboxed binary that bridges external services to FCP |
+| **Role** | Named bundle of capabilities (RoleObject) for simplified policy administration |
+| **Connector** | A sandboxed binary or WASI module that bridges external services to FCP |
 | **Receipt** | Signed proof of operation execution for idempotency |
 | **Revocation** | First-class object that invalidates tokens, keys, or devices |
 
@@ -154,7 +155,7 @@ These are **hard requirements** that FCP enforces mechanically:
 
 ## Zone Architecture
 
-Zones are **cryptographic boundaries**, not labels. Each zone has its own randomly generated symmetric encryption key, distributed to eligible nodes via owner-signed `ZoneKeyManifest` objects. HKDF is used for subkey derivation (e.g., per-sender subkeys), not for deriving zone keys from owner secret material.
+Zones are **cryptographic boundaries**, not labels. Each zone has its own randomly generated symmetric encryption key, distributed to eligible nodes via owner-signed `ZoneKeyManifest` objects. HKDF is used for subkey derivation (e.g., per-sender subkeys incorporating sender_instance_id for reboot safety), not for deriving zone keys from owner secret material.
 
 ### Zone Hierarchy with Tailscale Mapping
 
@@ -268,9 +269,9 @@ Symbol Approach:
 
 High-throughput symbol delivery uses per-session authentication (not per-frame signatures):
 
-1. **Handshake**: X25519 ECDH authenticated by attested node signing keys, with crypto suite negotiation
-2. **Session keys**: HKDF-derived directional MAC keys (k_mac_i2r, k_mac_r2i) from ECDH shared secret
-3. **Per-sender subkeys**: Each sender derives a unique subkey via HKDF to eliminate cross-sender nonce collision risk
+1. **Handshake**: X25519 ECDH authenticated by attested node signing keys, with per-party nonces for replay protection and crypto suite negotiation
+2. **Session keys**: HKDF-derived directional MAC keys (k_mac_i2r, k_mac_r2i) from ECDH shared secret, bound to both handshake nonces
+3. **Per-sender subkeys**: Each sender derives a unique subkey via HKDF including sender_instance_id, eliminating cross-sender and cross-reboot nonce collision risk
 4. **Per-frame MAC**: HMAC-SHA256 or BLAKE3 (negotiated) with per-sender monotonic frame_seq for anti-replay
 
 **Crypto Suite Negotiation**: Initiator proposes supported suites; responder selects. Suite1 uses HMAC-SHA256 (broad compatibility), Suite2 uses BLAKE3 (performance). This avoids Poly1305 single-use constraints while enabling future algorithm agility.
@@ -422,7 +423,11 @@ Every FCP connector is a single executable with embedded metadata:
 
 ### Sandbox Enforcement
 
-Connectors run in OS-level sandboxes (seccomp/seatbelt/AppContainer):
+Connectors support two sandbox models:
+
+**Native (ELF/Mach-O/PE)**: OS-level sandboxes (seccomp/seatbelt/AppContainer)
+
+**WASI (WebAssembly)**: WASM-based isolation with capability-gated hostcalls. Recommended for high-risk connectors (financial, credential-handling) due to memory isolation and cross-platform consistency.
 
 | Constraint | Purpose |
 |------------|---------|
@@ -433,6 +438,7 @@ Connectors run in OS-level sandboxes (seccomp/seatbelt/AppContainer):
 | FS writable paths | Explicit state directory |
 | deny_exec | Prevent child process spawning |
 | deny_ptrace | Prevent debugging/tracing |
+| NetworkConstraints | Explicit host/port/TLS requirements |
 
 ### Connector State
 
