@@ -37,7 +37,7 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
 | **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
-| **Capability Tokens** | Provable authority with grant_object_ids linking to issuing attestations; mechanically verifiable chains |
+| **Capability Tokens (CWT/COSE)** | Provable authority with grant_object_ids; tokens are canonically CBOR-encoded and COSE-signed for interoperability |
 | **Threshold Owner Key** | FROST signing so no single device holds the complete owner private key |
 | **Threshold Secrets** | Shamir secret sharing with k-of-n across devices—never complete anywhere |
 | **Computation Migration** | Operations execute on the optimal device automatically |
@@ -45,7 +45,7 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 | **Tamper-Evident Audit** | Hash-linked audit chain with monotonic seq and quorum-signed checkpoints |
 | **Revocation** | First-class revocation objects with O(1) freshness checks |
 | **Egress Proxy** | Connector network access via capability-gated proxy with CIDR deny defaults |
-| **Supply Chain Attestations** | in-toto/SLSA provenance verification, transparency logging |
+| **Supply Chain Attestations** | in-toto/SLSA provenance + SBOM + vulnerability-scan attestations, transparency logging |
 
 ### Quick Example
 
@@ -313,6 +313,7 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Symbol Store                                                        │    │
 │  │  • Local symbol storage with node-local retention classes            │    │
+│  │  • Quarantine store for unreferenced objects (bounded; not gossiped) │    │
 │  │  • XOR filters + IBLT for efficient gossip reconciliation           │    │
 │  │  • Reachability-based garbage collection                             │    │
 │  │  • ObjectPlacementPolicy enforcement for availability SLOs          │    │
@@ -329,7 +330,8 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  Connector State Manager                                             │    │
 │  │  • Externalized connector state as mesh objects                     │    │
-│  │  • Single-writer semantics via execution leases                     │    │
+│  │  • Single-writer semantics via execution leases with fencing tokens │    │
+│  │  • Multi-writer CRDT support (LWW-Map, OR-Set, counters)            │    │
 │  │  • Safe failover and migration for stateful connectors              │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
@@ -368,11 +370,13 @@ Every device is a MeshNode—collectively, they ARE the Hub.
 ### Transport Priority
 
 ```
-Priority 1: Tailscale Direct (same LAN)     - <1ms, z:owner OK
-Priority 2: Tailscale Mesh (NAT traversal)  - 10-100ms, z:owner OK
-Priority 3: Tailscale DERP Relay            - 50-200ms, z:private and below
-Priority 4: Tailscale Funnel (public)       - Variable, z:community/public only
+Priority 1: Tailscale Direct (same LAN)
+Priority 2: Tailscale Mesh (NAT traversal)
+Priority 3: Tailscale DERP Relay            (policy-controlled per zone)
+Priority 4: Tailscale Funnel (public)       (policy-controlled; low-trust zones only by default)
 ```
+
+Zones configure transport policy via `ZoneTransportPolicy` to control DERP/Funnel availability.
 
 ### Device Enrollment
 
@@ -678,14 +682,20 @@ Owner policy can enforce:
 
 ## Performance Targets
 
-| Metric | Target | Enforcement |
-|--------|--------|-------------|
-| Cold start | < 50ms | Binary preloading |
-| Message latency | < 1ms | Zero-copy IPC |
+| Metric | Target (p50/p99) | How Measured |
+|--------|------------------|--------------|
+| Cold start (connector activate) | < 100ms / < 500ms | `fcp bench connector-activate` |
+| Local invoke latency (same node) | < 2ms / < 10ms | `fcp bench invoke-local` |
+| Tailnet invoke latency (LAN) | < 20ms / < 100ms | `fcp bench invoke-mesh --path=direct` |
+| Tailnet invoke latency (DERP) | < 150ms / < 500ms | `fcp bench invoke-mesh --path=derp` |
+| Symbol reconstruction (1MB) | < 50ms / < 250ms | `fcp bench raptorq --size=1mb` |
+| Secret reconstruction (k-of-n) | < 150ms / < 750ms | `fcp bench secrets --k=3 --n=5` |
 | Memory overhead | < 10MB per connector | Sandbox limits |
 | CPU overhead | < 1% idle | Event-driven architecture |
-| Symbol reconstruction | < 10ms for 1MB object | Optimized RaptorQ |
-| Secret reconstruction | < 100ms | Parallel share collection |
+
+### Benchmarks
+
+The reference implementation ships a `fcp bench` suite that produces machine-readable results (JSON) for regression tracking.
 
 ---
 
@@ -716,7 +726,7 @@ flywheel_connectors/
 │   ├── fcp-sandbox/       # OS sandbox integration (seccomp, seatbelt, AppContainer)
 │   ├── fcp-sdk/           # SDK for building connectors
 │   ├── fcp-conformance/   # Interop tests, golden vectors, property tests, fuzz harness
-│   └── fcp-cli/           # CLI tools (fcp install, fcp doctor, etc.)
+│   └── fcp-cli/           # CLI tools (fcp install, fcp doctor, fcp explain, fcp bench, etc.)
 │
 ├── connectors/            # Individual connector implementations
 │   ├── twitter/
