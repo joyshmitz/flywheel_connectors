@@ -162,7 +162,7 @@ This enables:
 pub enum ConnectorStateModel {
     /// No mesh-persisted state required
     Stateless,
-    /// Exactly one writer enforced via ExecutionLease
+    /// Exactly one writer enforced via Lease (ConnectorStateWrite purpose)
     SingletonWriter,
     /// Multi-writer state using CRDT deltas + periodic snapshots
     Crdt { crdt_type: CrdtType },
@@ -223,7 +223,7 @@ pub struct ConnectorStateDelta {
 
 For any connector declaring `singleton_writer = true` in its manifest, the MeshNode MUST ensure
 only one node writes `ConnectorStateObject` updates at a time. This is enforced using
-`ExecutionLease` over `ConnectorStateRoot.object_id` or an equivalent lease primitive.
+`Lease` (with `LeasePurpose::ConnectorStateWrite`) over `ConnectorStateRoot.object_id`.
 
 ```toml
 # In connector manifest
@@ -788,18 +788,35 @@ pub enum ZoneKeyAlgorithm {
     XChaCha20Poly1305,
 }
 
+/// HPKE sealed box per RFC 9180 (NORMATIVE; see FCP Specification §3.6.1)
+///
+/// All wrapped keys in FCP use HPKE single-shot seal with AAD = canonical CBOR of
+/// context (e.g., the containing struct without sealed_key). This provides
+/// algorithm agility and explicit algorithm identifiers for future-proofing.
+pub struct HpkeSealedBox {
+    /// RFC 9180 identifiers for algorithm agility
+    pub kem_id: u16,  // e.g., 0x0020 for X25519
+    pub kdf_id: u16,  // e.g., 0x0001 for HKDF-SHA256
+    pub aead_id: u16, // e.g., 0x0001 for AES-128-GCM
+    /// HPKE encapsulated key (enc)
+    pub enc: Vec<u8>,
+    /// AEAD ciphertext (includes auth tag per HPKE)
+    pub ct: Vec<u8>,
+}
+
 pub struct WrappedZoneKey {
     pub node_id: TailscaleNodeId,
     /// Which node_enc_pubkey was used (supports node key rotation)
     pub node_enc_kid: [u8; 8],
-    /// Sealed box containing the 32-byte zone symmetric key
-    pub sealed_key: Vec<u8>,
+    /// HPKE sealed box containing the 32-byte zone symmetric key (NORMATIVE; see §3.6.1)
+    pub sealed_key: HpkeSealedBox,
 }
 
 pub struct WrappedObjectIdKey {
     pub node_id: TailscaleNodeId,
     pub node_enc_kid: [u8; 8],
-    pub sealed_key: Vec<u8>,
+    /// HPKE sealed box containing the 32-byte ObjectIdKey (NORMATIVE; see §3.6.1)
+    pub sealed_key: HpkeSealedBox,
 }
 
 /// Zone rekey policy for rotation and past secrecy (NORMATIVE when present)
@@ -1261,6 +1278,10 @@ pub struct CapabilityConstraints {
     pub max_bytes: Option<u64>,
     pub idempotency_scope: Option<String>,
     pub network: Option<NetworkConstraints>,
+    /// Optional credential bindings (NORMATIVE when present)
+    /// If set, the connector may only use the listed credentials via the egress proxy.
+    /// Enables "secretless connectors" where raw secrets never enter connector memory.
+    pub credential_allow: Vec<CredentialId>,
 }
 
 /// Network/TLS constraints (NORMATIVE for sensitive connectors)
@@ -1302,6 +1323,61 @@ Network capabilities are implemented by a MeshNode-owned **egress proxy** enforc
 
 Network/TLS constraints are NORMATIVE for sensitive connectors and include host/port
 allow-lists, SNI enforcement, CIDR deny-lists, and optional SPKI pins.
+
+**Egress Proxy Credential Injection (NORMATIVE):**
+
+The egress proxy supports "secretless connectors" where raw API keys/tokens never enter
+connector memory. Instead, credentials are injected by the proxy at the network boundary:
+
+```rust
+/// Credential identifier (NORMATIVE)
+pub struct CredentialId(pub String); // e.g., "cred:telegram.bot_token"
+
+/// Credential object (NORMATIVE)
+/// A zone-bound, auditable handle describing how to apply a SecretObject to outbound requests.
+pub struct CredentialObject {
+    pub header: ObjectHeader,
+    pub credential_id: CredentialId,
+    pub secret_id: SecretId,
+    pub apply: CredentialApply,
+    /// Optional host binding for defense-in-depth (NORMATIVE when present)
+    pub host_allow: Vec<String>,
+    pub created_at: u64,
+    pub signature: Signature,
+}
+
+pub enum CredentialApply {
+    /// Set an HTTP header (e.g., Authorization: Bearer <secret>)
+    HttpHeader { name: String, format: CredentialFormat },
+    /// Set query parameter (rare; discouraged)
+    QueryParam { name: String, format: CredentialFormat },
+}
+
+pub enum CredentialFormat {
+    Raw,                          // Use secret bytes as UTF-8
+    Prefix { prefix: String },    // Prefix + secret (e.g., "Bearer " + token)
+}
+
+/// Connector egress request with optional credential injection (NORMATIVE)
+pub struct EgressHttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// If set, proxy injects this credential (NORMATIVE)
+    pub credential: Option<CredentialId>,
+}
+```
+
+Connectors declare allowed credentials via `credential_allow` in `CapabilityConstraints` (see §6.3).
+
+When `credential` is set on an `EgressHttpRequest`, the egress proxy:
+1. Verifies `credential` ∈ `CapabilityConstraints.credential_allow`
+2. Fetches and validates the referenced `CredentialObject` and `SecretObject`
+3. Injects the credential only for allowed hosts and logs an audit event
+
+This pattern is recommended for API-heavy connectors (Telegram, Slack, etc.) to minimize
+secret exposure and simplify credential rotation.
 
 ### 6.4 Placement Policy
 
@@ -2057,36 +2133,55 @@ pub enum RevocationFreshnessPolicy {
 
 ## 16. Device-Aware Execution and Execution Leases
 
-### 16.1 Execution Leases (NORMATIVE)
+### 16.1 Leases (NORMATIVE)
 
-Execution leases prevent duplicate side effects and stabilize migration:
+Leases are a generic primitive for distributed coordination, preventing duplicate
+side effects and stabilizing migration. FCP unifies execution leases, state-write
+leases, and computation-migration leases under a single `Lease` struct with a
+`LeasePurpose` discriminant:
 
 ```rust
-/// Execution lease (NORMATIVE)
+/// Generic lease primitive (NORMATIVE; see FCP Specification §16.1)
 ///
-/// Prevents duplicate execution and stabilizes computation migration.
-/// A short-lived, renewable lock that says "node X owns execution of request R until time T."
-pub struct ExecutionLease {
+/// A short-lived, renewable lock that says "node X owns subject S for purpose P until time T."
+/// Used for: operation execution, connector state writes, computation migration.
+pub struct Lease {
     pub header: ObjectHeader,
-    /// The request/computation being leased
-    pub request_object_id: ObjectId,
-    /// Which node currently owns execution
+    /// The subject being leased (request, state object, computation)
+    pub subject_object_id: ObjectId,
+    /// What this lease authorizes
+    pub purpose: LeasePurpose,
+    /// Fencing token (NORMATIVE): monotonically increases per (zone_id, subject_object_id)
+    /// The highest lease_seq wins deterministically, regardless of wall-clock exp.
+    pub lease_seq: u64,
+    /// Which node currently owns execution/write
     pub owner_node: TailscaleNodeId,
     /// Lease issued at
     pub iat: u64,
     /// Lease expires at (short-lived; renewable)
     pub exp: u64,
     /// Deterministic coordinator for this lease (NORMATIVE)
-    /// Selected via HRW/Rendezvous hashing over (zone_id, request_object_id).
+    /// Selected via HRW/Rendezvous hashing over (zone_id, subject_object_id).
     pub coordinator: TailscaleNodeId,
     /// Quorum signatures (NORMATIVE for Risky/Dangerous)
     pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
 }
 
+/// Lease purpose discriminant (NORMATIVE)
+pub enum LeasePurpose {
+    /// Prevents duplicate execution of operations with side effects
+    OperationExecution,
+    /// Serializes writes to SingleWriter connector state
+    ConnectorStateWrite,
+    /// Coordinates computation migration between nodes
+    ComputationMigration,
+}
+
 /// Lease acquisition request (NORMATIVE)
 pub struct LeaseRequest {
     pub header: ObjectHeader,
-    pub request_object_id: ObjectId,
+    pub subject_object_id: ObjectId,
+    pub purpose: LeasePurpose,
     pub desired_owner: TailscaleNodeId,
     pub requested_at: u64,
     pub exp: u64,
