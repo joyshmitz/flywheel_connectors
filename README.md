@@ -4,6 +4,9 @@
   <img src="illustration.webp" alt="FCP - Secure connectors for AI agents with zone-based isolation and capability tokens">
 </div>
 
+> **Specification note:** `FCP_Specification_V2.md` is the *authoritative* interoperability contract.
+> This README is a high-level overview; when diagrams conflict, implement the Spec.
+
 A mesh-native protocol for secure, distributed AI assistant operations across personal device meshes — plus a growing library of production-ready Rust connectors implementing that protocol.
 
 ---
@@ -37,9 +40,11 @@ A mesh-native protocol for secure, distributed AI assistant operations across pe
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
 | **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
+| **Mesh-Stored Policy Objects** | Zone definitions + policies are owner-signed mesh objects (auditable + rollbackable) |
 | **Capability Tokens (CWT/COSE)** | Provable authority with grant_object_ids; tokens are canonically CBOR-encoded and COSE-signed for interoperability |
 | **Threshold Owner Key** | FROST signing so no single device holds the complete owner private key |
 | **Threshold Secrets** | Shamir secret sharing with k-of-n across devices—never complete anywhere |
+| **Secretless Connectors** | Egress proxy can inject credentials so connectors never see raw API keys by default |
 | **Computation Migration** | Operations execute on the optimal device automatically |
 | **Offline Access** | Measurable availability SLOs via ObjectPlacementPolicy and background repair |
 | **Tamper-Evident Audit** | Hash-linked audit chain with monotonic seq and quorum-signed checkpoints |
@@ -696,6 +701,30 @@ Owner policy can enforce:
 ### Benchmarks
 
 The reference implementation ships a `fcp bench` suite that produces machine-readable results (JSON) for regression tracking.
+
+---
+
+## Profiles and Roadmap
+
+### MVP Profile (Ship First)
+
+Delivers the core safety story ("zones + explicit authority + auditable operations") with minimal moving parts.
+
+- FCPC over QUIC for control plane
+- CapabilityToken (COSE/CWT) + grant_object_ids verification
+- ZoneKeyManifest (HPKE sealing) + per-zone encryption
+- Egress proxy with NetworkConstraints + CIDR deny defaults
+- OperationIntent + OperationReceipt for Risky/Dangerous
+- Revocation objects + freshness policy
+- Basic symbol store + object reconstruction
+
+### Full Profile (Iterate Toward)
+
+- XOR filter + IBLT gossip optimization
+- MLS/TreeKEM for post-compromise security in sensitive zones
+- Computation migration + device-aware planner
+- Advanced repair + predictive pre-staging
+- Threshold secrets with k-of-n recovery
 
 ---
 
