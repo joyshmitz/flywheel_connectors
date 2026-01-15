@@ -53,3 +53,6 @@ docs/fcp_additional_connectors_prioritized.md
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# apr runtime locks
+.apr/.locks/
