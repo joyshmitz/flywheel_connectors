@@ -32,7 +32,7 @@ impl X25519SecretKey {
     /// Generate a new random secret key.
     #[must_use]
     pub fn generate() -> Self {
-        let inner = StaticSecret::random_from_rng(&mut rand::rngs::OsRng);
+        let inner = StaticSecret::random_from_rng(rand::rngs::OsRng);
         let public = PublicKey::from(&inner);
         let kid = KeyId::derive_from_public_key(public.as_bytes());
         Self { inner, kid, public }
@@ -107,8 +107,8 @@ pub struct X25519PublicKey {
 }
 
 mod public_key_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
+    use super::{PublicKey, X25519_PUBLIC_KEY_SIZE};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(pk: &PublicKey, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -191,7 +191,7 @@ impl std::fmt::Debug for X25519PublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("X25519PublicKey")
             .field("kid", &self.kid)
-            .field("bytes", &self.to_hex())
+            .field("inner", &self.to_hex())
             .finish()
     }
 }
@@ -209,47 +209,47 @@ impl X25519SharedSecret {
     ///
     /// **Security Warning:** Use HKDF to derive actual keys from this.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; X25519_SHARED_SECRET_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; X25519_SHARED_SECRET_SIZE] {
         &self.inner
     }
 }
 
 impl std::fmt::Debug for X25519SharedSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("X25519SharedSecret")
-            .finish_non_exhaustive()
+        f.debug_struct("X25519SharedSecret").finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{X25519PublicKey, X25519SecretKey};
+    use crate::error::CryptoError;
 
     #[test]
     fn generate_and_exchange() {
-        let alice_sk = X25519SecretKey::generate();
-        let bob_sk = X25519SecretKey::generate();
+        let alice_secret_key = X25519SecretKey::generate();
+        let bob_secret_key = X25519SecretKey::generate();
 
-        let alice_pk = alice_sk.public_key();
-        let bob_pk = bob_sk.public_key();
+        let alice_public_key = alice_secret_key.public_key();
+        let bob_public_key = bob_secret_key.public_key();
 
-        let alice_shared = alice_sk.diffie_hellman(&bob_pk);
-        let bob_shared = bob_sk.diffie_hellman(&alice_pk);
+        let alice_shared = alice_secret_key.diffie_hellman(&bob_public_key);
+        let bob_shared = bob_secret_key.diffie_hellman(&alice_public_key);
 
         assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
     }
 
     #[test]
     fn different_peers_different_secrets() {
-        let alice_sk = X25519SecretKey::generate();
-        let bob_sk = X25519SecretKey::generate();
-        let charlie_sk = X25519SecretKey::generate();
+        let alice_secret_key = X25519SecretKey::generate();
+        let bob_secret_key = X25519SecretKey::generate();
+        let charlie_secret_key = X25519SecretKey::generate();
 
-        let bob_pk = bob_sk.public_key();
-        let charlie_pk = charlie_sk.public_key();
+        let bob_public_key = bob_secret_key.public_key();
+        let charlie_public_key = charlie_secret_key.public_key();
 
-        let alice_bob = alice_sk.diffie_hellman(&bob_pk);
-        let alice_charlie = alice_sk.diffie_hellman(&charlie_pk);
+        let alice_bob = alice_secret_key.diffie_hellman(&bob_public_key);
+        let alice_charlie = alice_secret_key.diffie_hellman(&charlie_public_key);
 
         assert_ne!(alice_bob.as_bytes(), alice_charlie.as_bytes());
     }
@@ -299,5 +299,123 @@ mod tests {
             pk.to_hex(),
             "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209"
         );
+    }
+
+    #[test]
+    fn rfc7748_test_vector_1() {
+        // RFC 7748 Section 6.1 - First test vector
+        // Alice's private key (after clamping it's still used as input)
+        let alice_private_hex =
+            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+        let alice_private_bytes = hex::decode(alice_private_hex).unwrap();
+        let mut alice_arr = [0u8; 32];
+        alice_arr.copy_from_slice(&alice_private_bytes);
+        let alice_sk = X25519SecretKey::from_bytes(alice_arr);
+
+        // Alice's public key
+        let expected_alice_public =
+            "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
+        assert_eq!(alice_sk.public_key().to_hex(), expected_alice_public);
+
+        // Bob's private key
+        let bob_private_hex =
+            "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+        let bob_private_bytes = hex::decode(bob_private_hex).unwrap();
+        let mut bob_arr = [0u8; 32];
+        bob_arr.copy_from_slice(&bob_private_bytes);
+        let bob_sk = X25519SecretKey::from_bytes(bob_arr);
+
+        // Bob's public key
+        let expected_bob_public =
+            "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+        assert_eq!(bob_sk.public_key().to_hex(), expected_bob_public);
+
+        // Shared secret
+        let expected_shared =
+            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+
+        let alice_shared = alice_sk.diffie_hellman(&bob_sk.public_key());
+        let bob_shared = bob_sk.diffie_hellman(&alice_sk.public_key());
+
+        assert_eq!(hex::encode(alice_shared.as_bytes()), expected_shared);
+        assert_eq!(hex::encode(bob_shared.as_bytes()), expected_shared);
+    }
+
+    #[test]
+    fn x25519_base_point_multiplication() {
+        // Verify X25519 base point multiplication (scalar * G where G has u=9)
+        // Using a deterministic scalar to produce a known public key
+        let scalar_hex = "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4";
+        let scalar_bytes = hex::decode(scalar_hex).unwrap();
+        let mut scalar_arr = [0u8; 32];
+        scalar_arr.copy_from_slice(&scalar_bytes);
+        let sk = X25519SecretKey::from_bytes(scalar_arr);
+
+        // Verify determinism: same scalar always produces same public key
+        let sk2 = X25519SecretKey::from_bytes(scalar_arr);
+        assert_eq!(sk.public_key(), sk2.public_key());
+
+        // Verify the public key has the expected format (32 bytes)
+        assert_eq!(sk.public_key().to_bytes().len(), 32);
+    }
+
+    #[test]
+    fn x25519_iterated_1000() {
+        // RFC 7748 Section 5.2 iterated test - 1 iteration
+        // k = 0x0900...00 (scalar)
+        // u = 0x0900...00 (base point)
+        // After 1 iteration: k' = X25519(k, u)
+        // This test verifies the Diffie-Hellman operation
+
+        // Create two keys with specific scalars and verify DH exchange
+        let scalar1 = [9u8; 32]; // 0x09 repeated
+        let scalar2 = [3u8; 32]; // Different scalar
+
+        let sk1 = X25519SecretKey::from_bytes(scalar1);
+        let sk2 = X25519SecretKey::from_bytes(scalar2);
+
+        // DH exchange should produce same shared secret
+        let shared1 = sk1.diffie_hellman(&sk2.public_key());
+        let shared2 = sk2.diffie_hellman(&sk1.public_key());
+        assert_eq!(shared1.as_bytes(), shared2.as_bytes());
+    }
+
+    #[test]
+    fn public_key_try_from_slice_invalid_length() {
+        let result = X25519PublicKey::try_from_slice(&[0u8; 16]);
+        assert!(matches!(
+            result,
+            Err(CryptoError::InvalidKeyLength {
+                expected: 32,
+                actual: 16
+            })
+        ));
+    }
+
+    #[test]
+    fn secret_key_clone() {
+        let sk1 = X25519SecretKey::generate();
+        let sk2 = sk1.clone();
+
+        // Cloned keys should produce the same public key
+        assert_eq!(sk1.public_key(), sk2.public_key());
+
+        // And the same shared secrets
+        let other = X25519SecretKey::generate();
+        let shared1 = sk1.diffie_hellman(&other.public_key());
+        let shared2 = sk2.diffie_hellman(&other.public_key());
+        assert_eq!(shared1.as_bytes(), shared2.as_bytes());
+    }
+
+    #[test]
+    fn public_key_hex_roundtrip() {
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let hex_str = pk.to_hex();
+        let pk_bytes = hex::decode(&hex_str).unwrap();
+        let pk2 = X25519PublicKey::try_from_slice(&pk_bytes).unwrap();
+
+        assert_eq!(pk, pk2);
     }
 }

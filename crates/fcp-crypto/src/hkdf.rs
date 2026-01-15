@@ -8,7 +8,7 @@ use sha2::Sha256;
 use zeroize::ZeroizeOnDrop;
 
 /// Maximum output key material length for HKDF-SHA256.
-/// Per RFC 5869: L <= 255 * HashLen = 255 * 32 = 8160 bytes.
+/// Per RFC 5869: L <= 255 * `HashLen` = 255 * 32 = 8160 bytes.
 pub const HKDF_MAX_OUTPUT_LENGTH: usize = 255 * 32;
 
 /// HKDF-SHA256 instance for key derivation.
@@ -24,8 +24,8 @@ impl HkdfSha256 {
     ///
     /// # Arguments
     ///
-    /// * `salt` - Optional salt value (a non-secret random value).
-    ///            If None, a zero-filled string of HashLen bytes is used.
+    /// * `salt` - Optional salt value (a non-secret random value). If `None`, a zero-filled
+    ///   string of `HashLen` bytes is used.
     /// * `ikm` - Input keying material (the secret input).
     #[must_use]
     pub fn new(salt: Option<&[u8]>, ikm: &[u8]) -> Self {
@@ -118,7 +118,7 @@ impl<const N: usize> DerivedKey<N> {
 
     /// Get the derived key bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; N] {
+    pub const fn as_bytes(&self) -> &[u8; N] {
         &self.bytes
     }
 }
@@ -304,5 +304,115 @@ mod tests {
             hex::encode(okm),
             "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
         );
+    }
+
+    #[test]
+    fn rfc5869_test_case_2() {
+        // RFC 5869 Test Case 2 - Longer inputs/outputs
+        let ikm = hex::decode(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\
+             202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f\
+             404142434445464748494a4b4c4d4e4f",
+        )
+        .unwrap();
+        let salt = hex::decode(
+            "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f\
+             808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f\
+             a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+        )
+        .unwrap();
+        let info = hex::decode(
+            "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf\
+             d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef\
+             f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        )
+        .unwrap();
+
+        let mut okm = [0u8; 82];
+        hkdf_sha256(Some(&salt), &ikm, &info, &mut okm).unwrap();
+
+        assert_eq!(
+            hex::encode(okm),
+            "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c\
+             59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71\
+             cc30c58179ec3e87c14c01d5c1f3434f1d87"
+        );
+    }
+
+    #[test]
+    fn rfc5869_test_case_3() {
+        // RFC 5869 Test Case 3 - Zero-length salt and info
+        let ikm = hex::decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b").unwrap();
+
+        let mut okm = [0u8; 42];
+        // Empty salt (None) and empty info
+        hkdf_sha256(None, &ikm, &[], &mut okm).unwrap();
+
+        assert_eq!(
+            hex::encode(okm),
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d\
+             9d201395faa4b61a96c8"
+        );
+    }
+
+    #[test]
+    fn fcp2_session_key_derivation() {
+        let shared_secret = [42u8; 32];
+        let session_id = b"session-12345";
+
+        let send_key =
+            Fcp2KeyDerivation::derive_session_key(&shared_secret, session_id, "send").unwrap();
+        let recv_key =
+            Fcp2KeyDerivation::derive_session_key(&shared_secret, session_id, "recv").unwrap();
+
+        // Different directions should produce different keys
+        assert_ne!(send_key.as_bytes(), recv_key.as_bytes());
+
+        // Same direction should be deterministic
+        let send_key2 =
+            Fcp2KeyDerivation::derive_session_key(&shared_secret, session_id, "send").unwrap();
+        assert_eq!(send_key.as_bytes(), send_key2.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_mac_key_derivation() {
+        let session_key = [42u8; 32];
+
+        let mac_key1 = Fcp2KeyDerivation::derive_mac_key(&session_key, "frame").unwrap();
+        let mac_key2 = Fcp2KeyDerivation::derive_mac_key(&session_key, "header").unwrap();
+
+        // Different purposes should produce different keys
+        assert_ne!(mac_key1.as_bytes(), mac_key2.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_objectid_key_derivation() {
+        let zone_material = [0u8; 32];
+        let zone_id = b"z:work";
+
+        let key = Fcp2KeyDerivation::derive_objectid_key(&zone_material, zone_id).unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+
+        // Should differ from zone key derivation
+        let zone_key = Fcp2KeyDerivation::derive_zone_key(&zone_material, zone_id).unwrap();
+        assert_ne!(key.as_bytes(), zone_key.as_bytes());
+    }
+
+    #[test]
+    fn derived_key_as_ref() {
+        let key = DerivedKey::<32>::derive(None, b"ikm", b"info").unwrap();
+        let bytes: &[u8] = key.as_ref();
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn hkdf_instance_multiple_expansions() {
+        let hkdf = HkdfSha256::new(Some(b"salt"), b"ikm");
+
+        let key1: [u8; 32] = hkdf.expand_to_array(b"info1").unwrap();
+        let key2: [u8; 32] = hkdf.expand_to_array(b"info2").unwrap();
+
+        // Same HKDF instance, different info → different keys
+        assert_ne!(key1, key2);
     }
 }
