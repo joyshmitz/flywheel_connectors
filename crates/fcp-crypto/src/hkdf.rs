@@ -1,0 +1,308 @@
+//! HKDF-SHA256 key derivation for FCP2.
+//!
+//! Provides HMAC-based Key Derivation Function as specified in RFC 5869.
+
+use crate::error::{CryptoError, CryptoResult};
+use hkdf::Hkdf;
+use sha2::Sha256;
+use zeroize::ZeroizeOnDrop;
+
+/// Maximum output key material length for HKDF-SHA256.
+/// Per RFC 5869: L <= 255 * HashLen = 255 * 32 = 8160 bytes.
+pub const HKDF_MAX_OUTPUT_LENGTH: usize = 255 * 32;
+
+/// HKDF-SHA256 instance for key derivation.
+///
+/// This wraps the extract-expand pattern for deriving keys from
+/// input keying material (IKM).
+pub struct HkdfSha256 {
+    prk: Hkdf<Sha256>,
+}
+
+impl HkdfSha256 {
+    /// Create a new HKDF instance from input keying material.
+    ///
+    /// # Arguments
+    ///
+    /// * `salt` - Optional salt value (a non-secret random value).
+    ///            If None, a zero-filled string of HashLen bytes is used.
+    /// * `ikm` - Input keying material (the secret input).
+    #[must_use]
+    pub fn new(salt: Option<&[u8]>, ikm: &[u8]) -> Self {
+        let prk = Hkdf::<Sha256>::new(salt, ikm);
+        Self { prk }
+    }
+
+    /// Expand the PRK to derive output keying material.
+    ///
+    /// # Arguments
+    ///
+    /// * `info` - Application-specific context/label.
+    /// * `output` - Buffer to fill with derived key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the output length exceeds `HKDF_MAX_OUTPUT_LENGTH`.
+    pub fn expand(&self, info: &[u8], output: &mut [u8]) -> CryptoResult<()> {
+        self.prk
+            .expand(info, output)
+            .map_err(|_| CryptoError::KeyDerivationFailed("HKDF expand failed".into()))
+    }
+
+    /// Expand to a fixed-size array.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if N exceeds `HKDF_MAX_OUTPUT_LENGTH`.
+    pub fn expand_to_array<const N: usize>(&self, info: &[u8]) -> CryptoResult<[u8; N]> {
+        let mut output = [0u8; N];
+        self.expand(info, &mut output)?;
+        Ok(output)
+    }
+}
+
+/// Derive a key using HKDF-SHA256 in one shot.
+///
+/// This is a convenience function that combines extract and expand.
+///
+/// # Arguments
+///
+/// * `salt` - Optional salt value.
+/// * `ikm` - Input keying material.
+/// * `info` - Application-specific context/label.
+/// * `output` - Buffer to fill with derived key material.
+///
+/// # Errors
+///
+/// Returns an error if the output length exceeds `HKDF_MAX_OUTPUT_LENGTH`.
+pub fn hkdf_sha256(
+    salt: Option<&[u8]>,
+    ikm: &[u8],
+    info: &[u8],
+    output: &mut [u8],
+) -> CryptoResult<()> {
+    let hkdf = HkdfSha256::new(salt, ikm);
+    hkdf.expand(info, output)
+}
+
+/// Derive a fixed-size key using HKDF-SHA256.
+///
+/// # Errors
+///
+/// Returns an error if N exceeds `HKDF_MAX_OUTPUT_LENGTH`.
+pub fn hkdf_sha256_array<const N: usize>(
+    salt: Option<&[u8]>,
+    ikm: &[u8],
+    info: &[u8],
+) -> CryptoResult<[u8; N]> {
+    let hkdf = HkdfSha256::new(salt, ikm);
+    hkdf.expand_to_array(info)
+}
+
+/// Derived key material with zeroize-on-drop semantics.
+#[derive(ZeroizeOnDrop)]
+pub struct DerivedKey<const N: usize> {
+    bytes: [u8; N],
+}
+
+impl<const N: usize> DerivedKey<N> {
+    /// Derive a key using HKDF-SHA256.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if N exceeds `HKDF_MAX_OUTPUT_LENGTH`.
+    pub fn derive(salt: Option<&[u8]>, ikm: &[u8], info: &[u8]) -> CryptoResult<Self> {
+        let bytes = hkdf_sha256_array(salt, ikm, info)?;
+        Ok(Self { bytes })
+    }
+
+    /// Get the derived key bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; N] {
+        &self.bytes
+    }
+}
+
+impl<const N: usize> AsRef<[u8]> for DerivedKey<N> {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl<const N: usize> std::fmt::Debug for DerivedKey<N> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DerivedKey")
+            .field("len", &N)
+            .finish_non_exhaustive()
+    }
+}
+
+/// FCP2-specific key derivation with standard domain separation.
+///
+/// Uses the pattern: `HKDF(salt, ikm, "FCP2-" || purpose || context)`.
+pub struct Fcp2KeyDerivation;
+
+impl Fcp2KeyDerivation {
+    /// Derive a zone encryption key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation fails.
+    pub fn derive_zone_key(
+        zone_key_material: &[u8],
+        zone_id: &[u8],
+    ) -> CryptoResult<DerivedKey<32>> {
+        let mut info = Vec::with_capacity(10 + zone_id.len());
+        info.extend_from_slice(b"FCP2-ZONE-KEY");
+        info.extend_from_slice(zone_id);
+        DerivedKey::derive(None, zone_key_material, &info)
+    }
+
+    /// Derive an `ObjectIdKey` for content-addressed storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation fails.
+    pub fn derive_objectid_key(
+        zone_key_material: &[u8],
+        zone_id: &[u8],
+    ) -> CryptoResult<DerivedKey<32>> {
+        let mut info = Vec::with_capacity(18 + zone_id.len());
+        info.extend_from_slice(b"FCP2-OBJECTID-KEY");
+        info.extend_from_slice(zone_id);
+        DerivedKey::derive(None, zone_key_material, &info)
+    }
+
+    /// Derive a session key from ECDH shared secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation fails.
+    pub fn derive_session_key(
+        shared_secret: &[u8],
+        session_id: &[u8],
+        direction: &str,
+    ) -> CryptoResult<DerivedKey<32>> {
+        let mut info = Vec::with_capacity(20 + session_id.len() + direction.len());
+        info.extend_from_slice(b"FCP2-SESSION-");
+        info.extend_from_slice(direction.as_bytes());
+        info.extend_from_slice(session_id);
+        DerivedKey::derive(None, shared_secret, &info)
+    }
+
+    /// Derive a MAC key for session frame authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key derivation fails.
+    pub fn derive_mac_key(session_key: &[u8], purpose: &str) -> CryptoResult<DerivedKey<32>> {
+        let mut info = Vec::with_capacity(10 + purpose.len());
+        info.extend_from_slice(b"FCP2-MAC-");
+        info.extend_from_slice(purpose.as_bytes());
+        DerivedKey::derive(None, session_key, &info)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hkdf_basic() {
+        let ikm = b"input keying material";
+        let salt = b"salt";
+        let info = b"info";
+
+        let mut output = [0u8; 32];
+        hkdf_sha256(Some(salt), ikm, info, &mut output).unwrap();
+
+        // Output should be deterministic
+        let mut output2 = [0u8; 32];
+        hkdf_sha256(Some(salt), ikm, info, &mut output2).unwrap();
+        assert_eq!(output, output2);
+    }
+
+    #[test]
+    fn hkdf_different_inputs() {
+        let mut out1 = [0u8; 32];
+        let mut out2 = [0u8; 32];
+
+        hkdf_sha256(None, b"ikm1", b"info", &mut out1).unwrap();
+        hkdf_sha256(None, b"ikm2", b"info", &mut out2).unwrap();
+
+        assert_ne!(out1, out2);
+    }
+
+    #[test]
+    fn hkdf_different_info() {
+        let mut out1 = [0u8; 32];
+        let mut out2 = [0u8; 32];
+
+        hkdf_sha256(None, b"ikm", b"info1", &mut out1).unwrap();
+        hkdf_sha256(None, b"ikm", b"info2", &mut out2).unwrap();
+
+        assert_ne!(out1, out2);
+    }
+
+    #[test]
+    fn hkdf_different_salt() {
+        let mut out1 = [0u8; 32];
+        let mut out2 = [0u8; 32];
+
+        hkdf_sha256(Some(b"salt1"), b"ikm", b"info", &mut out1).unwrap();
+        hkdf_sha256(Some(b"salt2"), b"ikm", b"info", &mut out2).unwrap();
+
+        assert_ne!(out1, out2);
+    }
+
+    #[test]
+    fn hkdf_array() {
+        let key: [u8; 32] = hkdf_sha256_array(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn derived_key() {
+        let key = DerivedKey::<32>::derive(None, b"ikm", b"info").unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn fcp2_zone_key_derivation() {
+        let zone_material = [0u8; 32];
+        let zone_id = b"z:work";
+
+        let key = Fcp2KeyDerivation::derive_zone_key(&zone_material, zone_id).unwrap();
+        assert_eq!(key.as_bytes().len(), 32);
+
+        // Should be deterministic
+        let key2 = Fcp2KeyDerivation::derive_zone_key(&zone_material, zone_id).unwrap();
+        assert_eq!(key.as_bytes(), key2.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_different_zones() {
+        let zone_material = [0u8; 32];
+
+        let key1 = Fcp2KeyDerivation::derive_zone_key(&zone_material, b"z:work").unwrap();
+        let key2 = Fcp2KeyDerivation::derive_zone_key(&zone_material, b"z:private").unwrap();
+
+        assert_ne!(key1.as_bytes(), key2.as_bytes());
+    }
+
+    #[test]
+    fn golden_vector_hkdf_sha256() {
+        // RFC 5869 Test Case 1
+        let ikm = hex::decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b").unwrap();
+        let salt = hex::decode("000102030405060708090a0b0c").unwrap();
+        let info = hex::decode("f0f1f2f3f4f5f6f7f8f9").unwrap();
+
+        let mut okm = [0u8; 42];
+        hkdf_sha256(Some(&salt), &ikm, &info, &mut okm).unwrap();
+
+        assert_eq!(
+            hex::encode(okm),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+        );
+    }
+}
