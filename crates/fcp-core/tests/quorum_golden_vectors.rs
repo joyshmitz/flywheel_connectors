@@ -71,13 +71,14 @@ fn vectors_dir() -> PathBuf {
 }
 
 /// Create a signature set with the specified number of nodes.
+#[allow(clippy::cast_possible_truncation)]
 fn create_signature_set(node_count: usize) -> SignatureSet {
     let mut set = SignatureSet::new();
     for i in 0..node_count {
         set.add(NodeSignature::new(
             NodeId::new(format!("node-{i:02}")),
             [i as u8; 64],
-            1704067200 + i as u64, // 2024-01-01 00:00:00 + offset
+            1_704_067_200 + i as u64, // 2024-01-01 00:00:00 + offset
         ));
     }
     set
@@ -103,6 +104,7 @@ struct Quorum3Of3Vector {
 
 /// Golden vector: 3-of-5 quorum.
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct Quorum3Of5Vector {
     /// Policy configuration
     zone_id: String,
@@ -287,9 +289,9 @@ fn test_generate_degraded_state_golden_vector() {
     // Create degraded state
     let state = DegradedModeState::degraded(
         DegradedModeReason::NodeFailure,
-        1704067200, // 2024-01-01 00:00:00 UTC
-        3,          // 3 nodes available
-        5,          // 5 expected
+        1_704_067_200, // 2024-01-01 00:00:00 UTC
+        3,             // 3 nodes available
+        5,             // 5 expected
     );
 
     // Build vector
@@ -297,7 +299,7 @@ fn test_generate_degraded_state_golden_vector() {
         active: state.active,
         reason: state
             .reason
-            .map_or("none".to_string(), |r| r.as_str().to_string()),
+            .map_or_else(|| "none".to_string(), |r| r.as_str().to_string()),
         entered_at: state.entered_at.unwrap_or(0),
         available_nodes: state.available_nodes,
         expected_nodes: state.expected_nodes,
