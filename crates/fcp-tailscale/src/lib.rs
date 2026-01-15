@@ -35,7 +35,7 @@ mod tag;
 
 pub use client::{LocalApiClient, MockTailscaleClient, PeerInfo, TailscaleClient, TailscaleStatus};
 pub use error::{TailscaleError, TailscaleResult};
-pub use identity::{MeshIdentity, NodeKeyAttestation, NodeKeys};
+pub use identity::{MeshIdentity, NodeId, NodeKeyAttestation, NodeKeys};
 pub use tag::{TailscaleTag, ZoneAclGenerator, ZoneAclRule, ZoneTagMapping};
 
 /// FCP Tailscale tag prefix (NORMATIVE).

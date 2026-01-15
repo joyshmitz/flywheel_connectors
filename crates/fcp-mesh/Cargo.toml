@@ -12,5 +12,22 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+blake3.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+constant_time_eq = "0.3"
+fcp-crypto = { path = "../fcp-crypto" }
+fcp-tailscale = { path = "../fcp-tailscale" }
+hex.workspace = true
+hkdf = "0.12"
+hmac = "0.12"
+rand.workspace = true
+serde.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
