@@ -68,7 +68,7 @@ pub trait RateLimiter: Send + Sync {
 
     /// Acquire a permit, waiting if necessary.
     ///
-    /// Returns the time waited, or an error if the wait would exceed max_wait.
+    /// Returns the time waited, or an error if the wait would exceed `max_wait`.
     async fn acquire(&self, max_wait: Duration) -> Result<Duration, RateLimitError>;
 
     /// Get the current remaining quota.

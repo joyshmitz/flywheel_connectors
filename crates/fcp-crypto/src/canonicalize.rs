@@ -79,10 +79,68 @@ pub fn verify_signature_order(node_ids: &[&[u8]]) -> CryptoResult<()> {
 ///
 /// Returns an error if serialization fails.
 pub fn to_deterministic_cbor<T: serde::Serialize>(value: &T) -> CryptoResult<Vec<u8>> {
+    let mut v = ciborium::value::Value::serialized(value)
+        .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
+    canonicalize_value_in_place(&mut v)?;
+    
     let mut bytes = Vec::new();
-    ciborium::into_writer(value, &mut bytes)
+    ciborium::into_writer(&v, &mut bytes)
         .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
     Ok(bytes)
+}
+
+fn canonicalize_value_in_place(v: &mut ciborium::value::Value) -> CryptoResult<()> {
+    match v {
+        ciborium::value::Value::Array(items) => {
+            for item in items {
+                canonicalize_value_in_place(item)?;
+            }
+        }
+        ciborium::value::Value::Map(entries) => canonicalize_map(entries)?,
+        ciborium::value::Value::Tag(_, boxed) => canonicalize_value_in_place(boxed)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn canonicalize_map(entries: &mut Vec<(ciborium::value::Value, ciborium::value::Value)>) -> CryptoResult<()> {
+    use std::cmp::Ordering;
+
+    let mut with_keys = Vec::with_capacity(entries.len());
+    for (mut key, mut value) in std::mem::take(entries) {
+        canonicalize_value_in_place(&mut key)?;
+        canonicalize_value_in_place(&mut value)?;
+
+        let mut key_bytes = Vec::new();
+        ciborium::into_writer(&key, &mut key_bytes)
+            .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
+
+        with_keys.push((key_bytes, key, value));
+    }
+
+    with_keys.sort_by(
+        |(a_bytes, _, _), (b_bytes, _, _)| match a_bytes.len().cmp(&b_bytes.len()) {
+            Ordering::Equal => a_bytes.cmp(b_bytes),
+            other => other,
+        },
+    );
+
+    // Check for duplicates
+    for window in with_keys.windows(2) {
+        if window[0].0 == window[1].0 {
+             return Err(CryptoError::SerializationError(format!(
+                "duplicate map key: {}",
+                hex::encode(&window[0].0)
+            )));
+        }
+    }
+
+    *entries = with_keys
+        .into_iter()
+        .map(|(_, key, value)| (key, value))
+        .collect();
+
+    Ok(())
 }
 
 /// Object that can be canonically signed.

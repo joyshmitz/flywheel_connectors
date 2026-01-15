@@ -80,13 +80,18 @@ impl HpkeSealedBox {
 /// FCP2 AAD (Additional Authenticated Data) for HPKE sealing.
 ///
 /// Binds the sealed data to its intended context per the spec.
-#[derive(Clone, Debug)]
+///
+/// Serialized as deterministic CBOR to prevent canonicalization attacks.
+#[derive(Clone, Debug, Serialize)]
 pub struct Fcp2Aad {
     /// Zone identifier (or hash).
+    #[serde(with = "serde_bytes")]
     pub zone_id: Vec<u8>,
     /// Recipient node identifier.
+    #[serde(with = "serde_bytes")]
     pub recipient_node_id: Vec<u8>,
     /// Purpose string (e.g., `purpose::ZONE_KEY`).
+    #[serde(with = "serde_bytes")]
     pub purpose: Vec<u8>,
     /// Issuance timestamp (Unix seconds).
     pub issued_at: u64,
@@ -126,19 +131,12 @@ impl Fcp2Aad {
         }
     }
 
-    /// Encode AAD to bytes for HPKE.
+    /// Encode AAD to canonical CBOR bytes.
     ///
-    /// Format: `zone_id` || `recipient_node_id` || `purpose` || `issued_at` (8 bytes LE)
+    /// This ensures a unique, non-malleable representation for the encryption context.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(
-            self.zone_id.len() + self.recipient_node_id.len() + self.purpose.len() + 8,
-        );
-        aad.extend_from_slice(&self.zone_id);
-        aad.extend_from_slice(&self.recipient_node_id);
-        aad.extend_from_slice(&self.purpose);
-        aad.extend_from_slice(&self.issued_at.to_le_bytes());
-        aad
+        crate::canonicalize::to_deterministic_cbor(self).expect("AAD serialization failed")
     }
 }
 
@@ -467,7 +465,7 @@ mod tests {
 
     #[test]
     fn aad_encode_format() {
-        // Verify the AAD encoding format
+        // Verify the AAD encoding format is canonical CBOR
         let zone_id = b"z:work";
         let node_id = b"node-123";
         let issued_at: u64 = 1_234_567_890;
@@ -475,14 +473,19 @@ mod tests {
         let aad = Fcp2Aad::for_zone_key(zone_id, node_id, issued_at);
         let encoded = aad.encode();
 
-        // Should be: zone_id || node_id || purpose || timestamp (8 bytes LE)
-        let expected_len = zone_id.len() + node_id.len() + purpose::ZONE_KEY.len() + 8;
-        assert_eq!(encoded.len(), expected_len);
+        // Should be a CBOR map with 4 elements
+        // 0xA4 = map(4)
+        assert_eq!(encoded[0], 0xA4);
 
-        // Check that timestamp is at the end in little-endian
-        let ts_bytes = &encoded[encoded.len() - 8..];
-        let decoded_ts = u64::from_le_bytes(ts_bytes.try_into().unwrap());
-        assert_eq!(decoded_ts, issued_at);
+        // Parse back to Value to verify structure
+        let value: ciborium::value::Value = ciborium::de::from_reader(&encoded[..]).unwrap();
+        let map = value.as_map().unwrap();
+        assert_eq!(map.len(), 4);
+
+        // Verify "zone_id" field is present and is a byte string
+        let (k, v) = map.iter().find(|(k, _)| k.as_text().map(|s| s == "zone_id").unwrap_or(false)).unwrap();
+        assert!(v.is_bytes()); // serde_bytes should make this a byte string
+        assert_eq!(v.as_bytes().unwrap(), zone_id);
     }
 
     #[test]
