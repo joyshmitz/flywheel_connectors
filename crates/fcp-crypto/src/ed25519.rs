@@ -188,7 +188,7 @@ impl std::fmt::Debug for Ed25519VerifyingKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ed25519VerifyingKey")
             .field("kid", &self.kid)
-            .field("bytes", &hex::encode(self.to_bytes()))
+            .field("inner", &hex::encode(self.to_bytes()))
             .finish()
     }
 }
@@ -229,8 +229,8 @@ pub struct Ed25519Signature {
 }
 
 mod signature_serde {
-    use super::*;
-    use serde::{Deserializer, Serializer};
+    use super::{SIGNATURE_SIZE, Signature};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(sig: &Signature, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -409,5 +409,148 @@ mod tests {
             hex::encode(pk.to_bytes()),
             "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
         );
+    }
+
+    #[test]
+    fn rfc8032_test_vector_1() {
+        // RFC 8032 Section 7.1 - Test 1
+        // SECRET KEY (seed):
+        let sk_bytes =
+            hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+                .unwrap();
+        let mut sk_arr = [0u8; 32];
+        sk_arr.copy_from_slice(&sk_bytes);
+        let sk = Ed25519SigningKey::from_bytes(&sk_arr).unwrap();
+
+        // PUBLIC KEY:
+        let expected_pk =
+            hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+                .unwrap();
+        assert_eq!(sk.verifying_key().to_bytes().as_slice(), expected_pk.as_slice());
+
+        // MESSAGE: empty
+        let message = b"";
+
+        // SIGNATURE:
+        let expected_sig = hex::decode(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        ).unwrap();
+
+        let sig = sk.sign(message);
+        assert_eq!(sig.to_bytes().as_slice(), expected_sig.as_slice());
+
+        // Verify round-trip
+        let pk = sk.verifying_key();
+        assert!(pk.verify(message, &sig).is_ok());
+    }
+
+    #[test]
+    fn rfc8032_test_vector_2() {
+        // RFC 8032 Section 7.1 - Test 2
+        let sk_bytes =
+            hex::decode("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+                .unwrap();
+        let mut sk_arr = [0u8; 32];
+        sk_arr.copy_from_slice(&sk_bytes);
+        let sk = Ed25519SigningKey::from_bytes(&sk_arr).unwrap();
+
+        // PUBLIC KEY:
+        let expected_pk =
+            hex::decode("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+                .unwrap();
+        assert_eq!(sk.verifying_key().to_bytes().as_slice(), expected_pk.as_slice());
+
+        // MESSAGE: single byte 0x72
+        let message = &[0x72u8];
+
+        // SIGNATURE:
+        let expected_sig = hex::decode(
+            "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+        ).unwrap();
+
+        let sig = sk.sign(message);
+        assert_eq!(sig.to_bytes().as_slice(), expected_sig.as_slice());
+
+        // Verify round-trip
+        let pk = sk.verifying_key();
+        assert!(pk.verify(message, &sig).is_ok());
+    }
+
+    #[test]
+    fn rfc8032_test_vector_3() {
+        // RFC 8032 Section 7.1 - Test 3 (two-byte message)
+        let sk_bytes =
+            hex::decode("c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7")
+                .unwrap();
+        let mut sk_arr = [0u8; 32];
+        sk_arr.copy_from_slice(&sk_bytes);
+        let sk = Ed25519SigningKey::from_bytes(&sk_arr).unwrap();
+
+        // PUBLIC KEY:
+        let expected_pk =
+            hex::decode("fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025")
+                .unwrap();
+        assert_eq!(sk.verifying_key().to_bytes().as_slice(), expected_pk.as_slice());
+
+        // MESSAGE: 0xaf82
+        let message = &[0xaf, 0x82];
+
+        // SIGNATURE:
+        let expected_sig = hex::decode(
+            "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+        ).unwrap();
+
+        let sig = sk.sign(message);
+        assert_eq!(sig.to_bytes().as_slice(), expected_sig.as_slice());
+
+        // Verify round-trip
+        let pk = sk.verifying_key();
+        assert!(pk.verify(message, &sig).is_ok());
+    }
+
+    #[test]
+    fn signature_malleability_rejection() {
+        // Ed25519 signatures must have S < L (where L is the order of the base point)
+        // This tests that we correctly verify signatures and don't accept malleable ones
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let message = b"test message";
+
+        let sig = sk.sign(message);
+
+        // Valid signature should verify
+        assert!(pk.verify(message, &sig).is_ok());
+
+        // Create an invalid signature (all 0xff bytes for S component)
+        // This should fail verification
+        let mut bad_sig_bytes = sig.to_bytes();
+        // Set the S component (last 32 bytes) to values that would make S >= L
+        bad_sig_bytes[63] = 0xff;
+        bad_sig_bytes[62] = 0xff;
+        let bad_sig = Ed25519Signature::from_bytes(&bad_sig_bytes);
+
+        // This should fail because the signature is invalid
+        assert!(pk.verify(message, &bad_sig).is_err());
+    }
+
+    #[test]
+    fn empty_message_signature() {
+        // Verify we can sign and verify empty messages
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+
+        let sig = sk.sign(b"");
+        assert!(pk.verify(b"", &sig).is_ok());
+    }
+
+    #[test]
+    fn large_message_signature() {
+        // Verify we can sign and verify large messages
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+
+        let large_message = vec![0x42u8; 10000];
+        let sig = sk.sign(&large_message);
+        assert!(pk.verify(&large_message, &sig).is_ok());
     }
 }
