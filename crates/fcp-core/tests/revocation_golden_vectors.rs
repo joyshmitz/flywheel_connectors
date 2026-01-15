@@ -20,9 +20,9 @@ use std::path::PathBuf;
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    EpochId, FreshnessFailureReason, FreshnessPolicy, NodeId, NodeSignature, ObjectHeader,
-    ObjectId, Provenance, QuorumPolicy, RevocationEvent, RevocationHead, RevocationObject,
-    RevocationRegistry, RevocationScope, RiskTier, SignatureSet, ZoneId,
+    BloomFilter, EpochId, FreshnessFailureReason, FreshnessPolicy, NodeId, NodeSignature,
+    ObjectHeader, ObjectId, Provenance, QuorumPolicy, RevocationEvent, RevocationHead,
+    RevocationObject, RevocationRegistry, RevocationScope, RiskTier, SignatureSet, ZoneId,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,12 @@ fn test_revocation(id_byte: u8, scope: RevocationScope) -> RevocationObject {
     }
 }
 
+/// Create a test revocation event.
+///
+/// NOTE: For chain linking tests, we use `revocation_id` as a stand-in for the
+/// event's own `ObjectId`. In a real system, `prev` would point to the hash of
+/// the previous event's content, but for testing we simplify by using the
+/// `revocation_object_id` value. Tests are constructed to be internally consistent.
 fn test_event(seq: u64, prev: Option<ObjectId>, revocation_id: ObjectId) -> RevocationEvent {
     RevocationEvent {
         header: test_header(),
@@ -653,7 +659,7 @@ mod adversarial {
 
     /// Attack: Scope escalation - using wrong scope type.
     ///
-    /// Scenario: Attacker revokes with Capability scope but target is an IssuerKey.
+    /// Scenario: Attacker revokes with Capability scope but target is an `IssuerKey`.
     #[test]
     fn attack_scope_escalation() {
         log_test_event(
@@ -718,8 +724,6 @@ mod adversarial {
             }),
         );
 
-        use fcp_core::BloomFilter;
-
         // Create a small bloom filter (higher false positive rate)
         let mut bf = BloomFilter::new(10, 0.3); // 30% FP rate for testing
 
@@ -759,7 +763,7 @@ mod adversarial {
         );
     }
 
-    /// Attack: Revocation flood (DoS attempt).
+    /// Attack: Revocation flood (`DoS` attempt).
     ///
     /// Scenario: Attacker tries to overwhelm registry with many revocations.
     #[test]
@@ -778,7 +782,8 @@ mod adversarial {
         // Add many revocations
         let start = std::time::Instant::now();
         for i in 0..1000u32 {
-            let mut revocation = test_revocation((i % 256) as u8, RevocationScope::Capability);
+            let id_byte = u8::try_from(i % 256).expect("id byte fits u8");
+            let mut revocation = test_revocation(id_byte, RevocationScope::Capability);
             revocation.revoked = vec![ObjectId::from_bytes({
                 let mut bytes = [0u8; 32];
                 bytes[0..4].copy_from_slice(&i.to_le_bytes());
@@ -827,6 +832,12 @@ mod chain_integrity {
     use super::*;
 
     /// Validate a chain of revocation events for integrity.
+    ///
+    /// NOTE: In this test, we use `revocation_object_id` as a stand-in for the
+    /// event's own `ObjectId` (which would be computed from hashing the event).
+    /// In a real implementation, `prev` points to the `ObjectId` of the previous
+    /// event itself, NOT its `revocation_object_id`. Our test construction
+    /// deliberately makes these equal for simplicity.
     fn validate_chain(events: &[RevocationEvent]) -> Result<(), ChainError> {
         if events.is_empty() {
             return Ok(());
@@ -857,7 +868,8 @@ mod chain_integrity {
                     });
                 }
 
-                // Prev pointer must match previous event's revocation_object_id
+                // Prev pointer must match previous event's ObjectId
+                // (We use revocation_object_id as stand-in; see function doc)
                 if event.prev != Some(prev_event.revocation_object_id) {
                     return Err(ChainError::BrokenChain {
                         seq: event.seq,
@@ -899,9 +911,11 @@ mod chain_integrity {
                 let prev = if seq == 1 {
                     None
                 } else {
-                    Some(ObjectId::from_bytes([(seq - 1) as u8; 32]))
+                    let prev_byte = u8::try_from(seq - 1).expect("prev byte fits u8");
+                    Some(ObjectId::from_bytes([prev_byte; 32]))
                 };
-                test_event(seq, prev, ObjectId::from_bytes([seq as u8; 32]))
+                let seq_byte = u8::try_from(seq).expect("seq byte fits u8");
+                test_event(seq, prev, ObjectId::from_bytes([seq_byte; 32]))
             })
             .collect();
 
@@ -1101,9 +1115,9 @@ mod quorum_verification {
 
         // Add signatures to meet quorum
         // For CriticalWrite risk tier: required = n - f = 3 - 1 = 2
-        for i in 0..2 {
-            let node_id = NodeId::new(format!("node-{}", i));
-            let sig = NodeSignature::new(node_id, [i as u8; 64], 1_700_000_000 + i as u64);
+        for i in 0u8..2 {
+            let node_id = NodeId::new(format!("node-{i}"));
+            let sig = NodeSignature::new(node_id, [i; 64], 1_700_000_000 + u64::from(i));
             head.quorum_signatures.add(sig);
         }
 
@@ -1334,7 +1348,7 @@ mod scope_enforcement {
         let mut registry = RevocationRegistry::new();
 
         for (i, scope) in scopes.iter().enumerate() {
-            let id_byte = (i + 1) as u8;
+            let id_byte = u8::try_from(i + 1).expect("id byte fits u8");
             let revocation = test_revocation(id_byte, *scope);
             registry.add_revocation(&revocation);
 
