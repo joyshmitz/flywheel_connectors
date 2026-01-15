@@ -20,5 +20,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_session"
+path = "fuzz_targets/session.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
