@@ -28,6 +28,19 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// Append a length-prefixed string to a buffer (NORMATIVE).
+///
+/// Format: `len (u16 LE) || bytes`
+///
+/// This prevents collision attacks where different (from, to) pairs
+/// could produce identical transcript prefixes (e.g., "a"+"bc" vs "ab"+"c").
+fn append_length_prefixed(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    let len = bytes.len().min(u16::MAX as usize) as u16;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(&bytes[..len as usize]);
+}
+
 /// Session crypto suite negotiation (NORMATIVE).
 ///
 /// Defines the MAC algorithm used for session frame authentication.
@@ -162,14 +175,16 @@ pub struct MeshSessionHello {
 impl MeshSessionHello {
     /// Build transcript for signing/verification (NORMATIVE).
     ///
-    /// transcript = "FCP2-HELLO-V1" || from || to || eph_pubkey ||
-    ///              nonce || cookie || timestamp || suites || transport_limits
+    /// transcript = "FCP2-HELLO-V1" || len(from) || from || len(to) || to ||
+    ///              eph_pubkey || nonce || cookie || timestamp || suites || transport_limits
+    ///
+    /// Note: NodeId strings are length-prefixed (u16 LE) to prevent collision attacks.
     #[must_use]
     pub fn build_transcript(&self) -> Vec<u8> {
         let mut t = Vec::with_capacity(256);
         t.extend_from_slice(b"FCP2-HELLO-V1");
-        t.extend_from_slice(self.from.as_str().as_bytes());
-        t.extend_from_slice(self.to.as_str().as_bytes());
+        append_length_prefixed(&mut t, self.from.as_str());
+        append_length_prefixed(&mut t, self.to.as_str());
         t.extend_from_slice(&self.eph_pubkey.to_bytes());
         t.extend_from_slice(&self.nonce);
         if let Some(cookie) = &self.cookie {
@@ -234,14 +249,17 @@ pub struct MeshSessionAck {
 impl MeshSessionAck {
     /// Build transcript for signing/verification (NORMATIVE).
     ///
-    /// transcript = "FCP2-ACK-V1" || from || to || eph_pubkey || nonce ||
-    ///              session_id || suite || timestamp || hello.eph_pubkey || hello.nonce
+    /// transcript = "FCP2-ACK-V1" || len(from) || from || len(to) || to ||
+    ///              eph_pubkey || nonce || session_id || suite || timestamp ||
+    ///              hello.eph_pubkey || hello.nonce
+    ///
+    /// Note: NodeId strings are length-prefixed (u16 LE) to prevent collision attacks.
     #[must_use]
     pub fn build_transcript(&self, hello: &MeshSessionHello) -> Vec<u8> {
         let mut t = Vec::with_capacity(256);
         t.extend_from_slice(b"FCP2-ACK-V1");
-        t.extend_from_slice(self.from.as_str().as_bytes());
-        t.extend_from_slice(self.to.as_str().as_bytes());
+        append_length_prefixed(&mut t, self.from.as_str());
+        append_length_prefixed(&mut t, self.to.as_str());
         t.extend_from_slice(&self.eph_pubkey.to_bytes());
         t.extend_from_slice(&self.nonce);
         t.extend_from_slice(&self.session_id);
@@ -287,19 +305,26 @@ pub struct MeshSessionHelloRetry {
 impl MeshSessionHelloRetry {
     /// Compute cookie for a hello (NORMATIVE).
     ///
-    /// cookie = HMAC(cookie_key, from || to || hello.eph_pubkey || hello.nonce || hello.timestamp)\[:32\]
+    /// cookie = HMAC(cookie_key, len(from) || from || len(to) || to ||
+    ///               hello.eph_pubkey || hello.nonce || hello.timestamp)\[:32\]
     ///
     /// The cookie_key SHOULD be rotated periodically (e.g., every 60 seconds)
     /// with a grace window for in-flight handshakes.
+    ///
+    /// Note: NodeId strings are length-prefixed (u16 LE) to prevent collision attacks.
     #[must_use]
     pub fn compute_cookie(cookie_key: &[u8; 32], hello: &MeshSessionHello) -> [u8; 32] {
+        // Build input with length-prefixed strings
+        let mut input = Vec::with_capacity(128);
+        append_length_prefixed(&mut input, hello.from.as_str());
+        append_length_prefixed(&mut input, hello.to.as_str());
+        input.extend_from_slice(&hello.eph_pubkey.to_bytes());
+        input.extend_from_slice(&hello.nonce);
+        input.extend_from_slice(&hello.timestamp.to_le_bytes());
+
         let mut mac =
             Hmac::<Sha256>::new_from_slice(cookie_key).expect("HMAC-SHA256 accepts any key length");
-        mac.update(hello.from.as_str().as_bytes());
-        mac.update(hello.to.as_str().as_bytes());
-        mac.update(&hello.eph_pubkey.to_bytes());
-        mac.update(&hello.nonce);
-        mac.update(&hello.timestamp.to_le_bytes());
+        mac.update(&input);
 
         let result = mac.finalize().into_bytes();
         let mut cookie = [0u8; 32];
@@ -355,8 +380,8 @@ impl SessionKeys {
     /// prk = HKDF-SHA256(
     ///     ikm = ECDH(eph_i, eph_r),
     ///     salt = session_id,
-    ///     info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id ||
-    ///            hello_nonce || ack_nonce
+    ///     info = "FCP2-SESSION-V1" || len(initiator_id) || initiator_id ||
+    ///            len(responder_id) || responder_id || hello_nonce || ack_nonce
     /// )
     ///
     /// keys = HKDF-Expand(prk, info="FCP2-SESSION-KEYS-V1", L=96) split as:
@@ -364,6 +389,8 @@ impl SessionKeys {
     /// - k_mac_r2i (32 bytes): MAC key for responder to initiator
     /// - k_ctx     (32 bytes): reserved for FCPC AEAD
     /// ```
+    ///
+    /// Note: NodeId strings are length-prefixed (u16 LE) to prevent collision attacks.
     #[must_use]
     pub fn derive(
         ecdh_shared: &[u8; 32],
@@ -373,11 +400,11 @@ impl SessionKeys {
         hello_nonce: &[u8; 16],
         ack_nonce: &[u8; 16],
     ) -> Self {
-        // Build info string for extraction
+        // Build info string for expansion (with length-prefixed NodeIds)
         let mut info = Vec::with_capacity(128);
         info.extend_from_slice(b"FCP2-SESSION-V1");
-        info.extend_from_slice(initiator_id.as_str().as_bytes());
-        info.extend_from_slice(responder_id.as_str().as_bytes());
+        append_length_prefixed(&mut info, initiator_id.as_str());
+        append_length_prefixed(&mut info, responder_id.as_str());
         info.extend_from_slice(hello_nonce);
         info.extend_from_slice(ack_nonce);
 
@@ -661,21 +688,42 @@ impl MeshSession {
     }
 
     /// Verify MAC for an incoming frame and check replay.
+    ///
+    /// SECURITY NOTE: MAC is verified BEFORE updating the replay window.
+    /// This prevents a DoS attack where an attacker burns sequence numbers
+    /// by sending garbage frames that fail MAC verification.
     #[must_use]
     pub fn verify_incoming(&mut self, seq: u64, frame_bytes: &[u8], tag: &[u8; 16]) -> bool {
-        // First check replay
-        if !self.check_recv_seq(seq) {
+        // Quick bounds check (don't compute MAC for obviously invalid seqs)
+        if seq == 0 {
             return false;
         }
-        // Then verify MAC
-        self.suite.verify_mac(
+        // Check if seq is in acceptable range before MAC computation
+        let highest = self.recv_window.highest_seq();
+        if highest > 0 {
+            let diff = highest.saturating_sub(seq);
+            if diff >= self.replay_policy.max_reorder_window || diff >= 128 {
+                return false; // Too old, reject without MAC check
+            }
+        }
+
+        // CRITICAL: Verify MAC BEFORE updating replay window
+        // This prevents DoS by sequence number exhaustion
+        let mac_valid = self.suite.verify_mac(
             self.recv_mac_key(),
             &self.session_id,
             self.recv_direction(),
             seq,
             frame_bytes,
             tag,
-        )
+        );
+
+        if !mac_valid {
+            return false;
+        }
+
+        // Only update replay window after MAC verification succeeds
+        self.check_recv_seq(seq)
     }
 
     /// Get the session ID.
@@ -756,7 +804,7 @@ mod tests {
             eph_pubkey: eph_sk.public_key(),
             nonce: [1u8; 16],
             cookie: None,
-            timestamp: 1700000000,
+            timestamp: 1_700_000_000,
             suites: vec![SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
             transport_limits: Some(TransportLimits::default()),
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
@@ -908,14 +956,14 @@ mod tests {
             nonce: [2u8; 16],
             session_id: [3u8; 16],
             suite: SessionCryptoSuite::Suite1,
-            timestamp: 1700000001,
+            timestamp: 1_700_000_001,
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
         };
 
         let transcript = ack.build_transcript(&hello);
 
         // Transcript should include hello's eph_pubkey and nonce
-        assert!(transcript.windows(16).any(|w| w == &hello.nonce));
+        assert!(transcript.windows(16).any(|w| w == hello.nonce));
     }
 
     #[test]
@@ -1085,7 +1133,7 @@ mod tests {
             keys.clone(),
             TransportLimits::default(),
             true,
-            1700000000,
+            1_700_000_000,
             SessionReplayPolicy::default(),
         );
 
@@ -1096,7 +1144,7 @@ mod tests {
             keys,
             TransportLimits::default(),
             false,
-            1700000000,
+            1_700_000_000,
             SessionReplayPolicy::default(),
         );
 
@@ -1112,6 +1160,59 @@ mod tests {
         // Tampered frame should fail
         let (seq2, mac2) = initiator.mac_outgoing(b"original");
         assert!(!responder.verify_incoming(seq2, b"tampered", &mac2));
+    }
+
+    /// Regression test: verify that failed MAC verification does NOT burn sequence numbers.
+    ///
+    /// This tests the fix for a DoS vulnerability where an attacker could exhaust
+    /// sequence numbers by sending garbage frames. The replay window should only
+    /// be updated AFTER MAC verification succeeds.
+    #[test]
+    fn test_failed_mac_does_not_burn_sequence() {
+        let keys = SessionKeys {
+            k_mac_i2r: [0x01u8; 32],
+            k_mac_r2i: [0x02u8; 32],
+            k_ctx: [0x03u8; 32],
+        };
+
+        let mut initiator = MeshSession::new(
+            [0xAAu8; 16],
+            NodeId::new("responder"),
+            SessionCryptoSuite::Suite1,
+            keys.clone(),
+            TransportLimits::default(),
+            true,
+            1_700_000_000,
+            SessionReplayPolicy::default(),
+        );
+
+        let mut responder = MeshSession::new(
+            [0xAAu8; 16],
+            NodeId::new("initiator"),
+            SessionCryptoSuite::Suite1,
+            keys,
+            TransportLimits::default(),
+            false,
+            1_700_000_000,
+            SessionReplayPolicy::default(),
+        );
+
+        // Initiator sends a legitimate frame
+        let frame = b"legitimate message";
+        let (seq, mac) = initiator.mac_outgoing(frame);
+
+        // Attacker sends garbage with the SAME sequence number but wrong MAC
+        // This should fail verification but NOT burn the sequence number
+        let garbage_mac = [0xFFu8; 16];
+        assert!(!responder.verify_incoming(seq, b"attacker garbage", &garbage_mac));
+
+        // The legitimate frame with the same sequence should STILL be accepted
+        // because the failed MAC verification should not have updated the replay window
+        assert!(
+            responder.verify_incoming(seq, frame, &mac),
+            "BUG: Failed MAC verification burned the sequence number! \
+             This is a DoS vulnerability."
+        );
     }
 
     #[test]
@@ -1136,21 +1237,21 @@ mod tests {
             keys,
             TransportLimits::default(),
             true,
-            1700000000,
+            1_700_000_000,
             policy,
         );
 
         // Initially no rekey needed
-        assert!(!session.needs_rekey(1700000000));
+        assert!(!session.needs_rekey(1_700_000_000));
 
         // Time-based rekey
-        assert!(session.needs_rekey(1700000000 + 3600));
+        assert!(session.needs_rekey(1_700_000_000 + 3600));
 
         // Frame-based rekey
         for _ in 0..100 {
             session.mac_outgoing(b"x");
         }
-        assert!(session.needs_rekey(1700000000));
+        assert!(session.needs_rekey(1_700_000_000));
     }
 
     // =========================================================================
@@ -1214,7 +1315,7 @@ mod tests {
             eph_pubkey: eph_sk.public_key(),
             nonce: [0x11u8; 16],
             cookie: None,
-            timestamp: 1700000000,
+            timestamp: 1_700_000_000,
             suites: vec![SessionCryptoSuite::Suite1],
             transport_limits: None,
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
@@ -1222,10 +1323,10 @@ mod tests {
 
         let cookie = MeshSessionHelloRetry::compute_cookie(&cookie_key, &hello);
 
-        // Golden vector for cookie computation
+        // Golden vector for cookie computation (with length-prefixed NodeIds)
         assert_eq!(
             hex::encode(cookie),
-            "bd467d038839deb8682ca654e20a483b477af32f53f22f6cdaf941439aa375bd",
+            "5527c7a1f0d071e04e8c01498bca3624733f73900b979eb5b46a990e9f9f5c04",
             "Cookie computation golden vector mismatch"
         );
     }
@@ -1248,20 +1349,20 @@ mod tests {
             &ack_nonce,
         );
 
-        // Golden vectors for key derivation
+        // Golden vectors for key derivation (with length-prefixed NodeIds)
         assert_eq!(
             hex::encode(keys.k_mac_i2r),
-            "a161f0538434649c0cfe2fd560b83dc7855fe517e4cf93e2829a62959905abcb",
+            "9faa9b6626586bd3daa2db1d266bf3a7e02c79a8adea4de7e20ee287ea3e8a96",
             "k_mac_i2r golden vector mismatch"
         );
         assert_eq!(
             hex::encode(keys.k_mac_r2i),
-            "31c01698cb91424082b86405fc724e4d0b6c228f0d7c4c847a07df75ef1c6828",
+            "3ed082079350f70e8fb4c8c57324ff22677cb35dbe9afb7bdf491f730fbe8246",
             "k_mac_r2i golden vector mismatch"
         );
         assert_eq!(
             hex::encode(keys.k_ctx),
-            "b1484ba801d1471fe9bd6b8a551d8d4753d5ca0293a233cbde1192e49e9f6fb4",
+            "bc2e558e785c336fa3ea3c011aba852c4a222580a965ef740f98dec36438e44e",
             "k_ctx golden vector mismatch"
         );
     }
@@ -1276,7 +1377,7 @@ mod tests {
             eph_pubkey: eph_sk.public_key(),
             nonce: [0x11u8; 16],
             cookie: None,
-            timestamp: 1700000000,
+            timestamp: 1_700_000_000,
             suites: vec![SessionCryptoSuite::Suite1],
             transport_limits: Some(TransportLimits {
                 max_datagram_bytes: 1200,
@@ -1286,11 +1387,11 @@ mod tests {
 
         let transcript = hello.build_transcript();
 
-        // Golden vector for hello transcript
+        // Golden vector for hello transcript (with length-prefixed NodeIds)
         assert_eq!(
             hex::encode(&transcript),
-            "464350322d48454c4c4f2d56316e6f6465416e6f6465\
-42a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209\
+            "464350322d48454c4c4f2d563105006e6f64654105006e6f646542\
+a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209\
 111111111111111111111111111111110000f1536500000000010001b004",
             "Hello transcript golden vector mismatch"
         );
@@ -1307,7 +1408,7 @@ mod tests {
             eph_pubkey: init_eph_sk.public_key(),
             nonce: [0x11u8; 16],
             cookie: None,
-            timestamp: 1700000000,
+            timestamp: 1_700_000_000,
             suites: vec![SessionCryptoSuite::Suite1],
             transport_limits: None,
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
@@ -1320,17 +1421,17 @@ mod tests {
             nonce: [0x22u8; 16],
             session_id: [0xAAu8; 16],
             suite: SessionCryptoSuite::Suite1,
-            timestamp: 1700000001,
+            timestamp: 1_700_000_001,
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
         };
 
         let transcript = ack.build_transcript(&hello);
 
-        // Golden vector for ack transcript (includes hello binding)
+        // Golden vector for ack transcript (with length-prefixed NodeIds, includes hello binding)
         assert_eq!(
             hex::encode(&transcript),
-            "464350322d41434b2d56316e6f6465426e6f6465\
-41ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59\
+            "464350322d41434b2d563105006e6f64654205006e6f646541\
+ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59\
 22222222222222222222222222222222aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
 0001f1536500000000a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209\
 11111111111111111111111111111111",
