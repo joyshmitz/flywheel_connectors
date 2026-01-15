@@ -507,7 +507,7 @@ mod tests {
 
         // Decode as raw CBOR value to inspect ordering.
         let cbor_bytes = &bytes[SCHEMA_HASH_LEN..];
-        let value: Value = ciborium::de::from_reader(&cbor_bytes[..]).unwrap();
+        let value: Value = ciborium::de::from_reader(cbor_bytes).unwrap();
 
         if let Value::Map(entries) = value {
             let keys: Vec<_> = entries
@@ -559,14 +559,14 @@ mod tests {
 
         // Manually construct a CBOR map with duplicate keys.
         // { "a": 1, "a": 2 } - this is invalid.
-        let mut cbor_bytes = Vec::new();
-        cbor_bytes.push(0xA2); // Map with 2 entries.
-        cbor_bytes.push(0x61); // Text string, length 1.
-        cbor_bytes.push(b'a');
-        cbor_bytes.push(0x01); // Integer 1.
-        cbor_bytes.push(0x61); // Text string, length 1.
-        cbor_bytes.push(b'a'); // Duplicate key "a".
-        cbor_bytes.push(0x02); // Integer 2.
+        let cbor_bytes = vec![
+            0xA2, // Map with 2 entries.
+            0x61, // Text string, length 1.
+            b'a', 0x01, // Integer 1.
+            0x61, // Text string, length 1.
+            b'a', // Duplicate key "a".
+            0x02, // Integer 2.
+        ];
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(schema.hash().as_bytes());
@@ -638,14 +638,24 @@ mod tests {
         assert!(decoded);
 
         // Unsigned integers.
-        for val in [0_u64, 1, 23, 24, 255, 256, 65535, 65536, u32::MAX as u64] {
+        for val in [
+            0_u64,
+            1,
+            23,
+            24,
+            255,
+            256,
+            65535,
+            65536,
+            u64::from(u32::MAX),
+        ] {
             let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
             let decoded: u64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
             assert_eq!(decoded, val);
         }
 
         // Signed integers.
-        for val in [0_i64, -1, -24, -25, -128, i32::MIN as i64] {
+        for val in [0_i64, -1, -24, -25, -128, i64::from(i32::MIN)] {
             let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
             let decoded: i64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
             assert_eq!(decoded, val);
@@ -924,7 +934,7 @@ mod tests {
 
         // Remaining bytes should be valid CBOR for the value.
         let cbor_bytes = &bytes[SCHEMA_HASH_LEN..];
-        let decoded: u8 = ciborium::de::from_reader(&cbor_bytes[..]).unwrap();
+        let decoded: u8 = ciborium::de::from_reader(cbor_bytes).unwrap();
         assert_eq!(decoded, value);
     }
 
@@ -975,7 +985,7 @@ mod tests {
 
         // Verify the CBOR portion has expected structure.
         let cbor_bytes = &bytes[SCHEMA_HASH_LEN..];
-        let raw: Value = ciborium::de::from_reader(&cbor_bytes[..]).unwrap();
+        let raw: Value = ciborium::de::from_reader(cbor_bytes).unwrap();
         assert!(matches!(raw, Value::Map(_)));
     }
 
