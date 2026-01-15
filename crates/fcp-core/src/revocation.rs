@@ -179,9 +179,24 @@ pub struct RevocationEvent {
 
 impl RevocationEvent {
     /// Check if this event follows another event in the chain.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The event that should precede this one
+    /// * `other_id` - The `ObjectId` of `other` (computed from its content/header)
+    ///
+    /// # Returns
+    ///
+    /// `true` if this event's `prev` points to `other_id` and this event's
+    /// sequence number is exactly one greater than `other`'s.
     #[must_use]
-    pub fn follows(&self, other: &Self) -> bool {
-        self.seq == other.seq + 1 && self.prev.as_ref() == Some(&other.revocation_object_id)
+    pub fn follows(&self, other: &Self, other_id: &ObjectId) -> bool {
+        // Use checked_add to prevent overflow when other.seq is u64::MAX
+        other
+            .seq
+            .checked_add(1)
+            .is_some_and(|next_seq| self.seq == next_seq)
+            && self.prev.as_ref() == Some(other_id)
     }
 
     /// Get the zone this event belongs to.
@@ -1069,6 +1084,10 @@ mod tests {
 
     #[test]
     fn revocation_event_follows() {
+        // The ObjectId of event1 (in a real system, this would be computed from event1's content)
+        let event1_id = ObjectId::from_bytes([10u8; 32]);
+        let event2_id = ObjectId::from_bytes([20u8; 32]);
+
         let event1 = RevocationEvent {
             header: test_header(),
             revocation_object_id: ObjectId::from_bytes([1u8; 32]),
@@ -1081,14 +1100,45 @@ mod tests {
         let event2 = RevocationEvent {
             header: test_header(),
             revocation_object_id: ObjectId::from_bytes([2u8; 32]),
-            prev: Some(ObjectId::from_bytes([1u8; 32])),
+            prev: Some(event1_id), // Points to event1's ObjectId, NOT its revocation_object_id
             seq: 2,
             occurred_at: 1_700_000_001,
             signature: [0u8; 64],
         };
 
-        assert!(event2.follows(&event1));
-        assert!(!event1.follows(&event2));
+        // event2 follows event1 (event2.prev points to event1_id, and seq is correct)
+        assert!(event2.follows(&event1, &event1_id));
+        // event1 does not follow event2 (wrong order)
+        assert!(!event1.follows(&event2, &event2_id));
+        // event2 does not follow event1 with wrong ID
+        let wrong_id = ObjectId::from_bytes([99u8; 32]);
+        assert!(!event2.follows(&event1, &wrong_id));
+    }
+
+    #[test]
+    fn revocation_event_follows_overflow_protection() {
+        let event1_id = ObjectId::from_bytes([10u8; 32]);
+
+        let event1 = RevocationEvent {
+            header: test_header(),
+            revocation_object_id: ObjectId::from_bytes([1u8; 32]),
+            prev: None,
+            seq: u64::MAX, // Maximum sequence number
+            occurred_at: 1_700_000_000,
+            signature: [0u8; 64],
+        };
+
+        let event2 = RevocationEvent {
+            header: test_header(),
+            revocation_object_id: ObjectId::from_bytes([2u8; 32]),
+            prev: Some(event1_id),
+            seq: 0, // Would be u64::MAX + 1 if it wrapped
+            occurred_at: 1_700_000_001,
+            signature: [0u8; 64],
+        };
+
+        // Should return false because u64::MAX + 1 overflows (no valid successor)
+        assert!(!event2.follows(&event1, &event1_id));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
