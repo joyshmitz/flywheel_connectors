@@ -307,6 +307,15 @@ pub struct SignatureSet {
     node_ids: BTreeSet<String>,
 }
 
+impl PartialEq for SignatureSet {
+    fn eq(&self, other: &Self) -> bool {
+        // Only compare signatures, not the node_ids cache (which is skipped in serde)
+        self.signatures == other.signatures
+    }
+}
+
+impl Eq for SignatureSet {}
+
 impl SignatureSet {
     /// Create a new empty signature set.
     #[must_use]
@@ -410,7 +419,7 @@ impl fmt::Display for DegradedModeReason {
 }
 
 /// Degraded mode state for a zone (NORMATIVE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DegradedModeState {
     /// Whether degraded mode is active.
     pub active: bool,
@@ -1568,5 +1577,274 @@ mod tests {
         let mut sorted_ids = ids.clone();
         sorted_ids.sort();
         assert_eq!(ids, sorted_ids, "Signatures should be sorted by node_id");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Golden Vector Tests (NORMATIVE)
+    // ─────────────────────────────────────────────────────────────────────────
+    // These tests verify that our serialization is deterministic and can be
+    // used to generate/validate golden vectors for interoperability testing.
+
+    /// Schema for quorum golden vectors.
+    fn quorum_schema() -> fcp_cbor::SchemaId {
+        fcp_cbor::SchemaId::new(
+            "fcp.core",
+            "QuorumGoldenVector",
+            semver::Version::new(1, 0, 0),
+        )
+    }
+
+    /// Schema for degraded state golden vectors.
+    fn degraded_state_schema() -> fcp_cbor::SchemaId {
+        fcp_cbor::SchemaId::new(
+            "fcp.core",
+            "DegradedStateGoldenVector",
+            semver::Version::new(1, 0, 0),
+        )
+    }
+
+    /// Golden vector wrapper for quorum scenarios (SignatureSet + metadata).
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct QuorumGoldenVector {
+        scenario: String,
+        eligible_nodes: u32,
+        max_faults: u32,
+        signatures: SignatureSet,
+        satisfies_risk_tier: Option<String>,
+        zone_id: String,
+    }
+
+    /// Golden vector wrapper for degraded state scenarios.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct DegradedStateGoldenVector {
+        scenario: String,
+        state: DegradedModeState,
+        policy_eligible_nodes: u32,
+        policy_max_faults: u32,
+    }
+
+    /// Helper: Create a deterministic signature for golden vectors.
+    fn deterministic_signature(node_idx: u8) -> [u8; 64] {
+        [node_idx; 64]
+    }
+
+    #[test]
+    fn test_golden_vector_quorum_3_of_3() {
+        let mut signatures = SignatureSet::new();
+        signatures.add(NodeSignature::new(
+            NodeId::new("node-alice"),
+            deterministic_signature(0x01),
+            1_704_067_200,
+        ));
+        signatures.add(NodeSignature::new(
+            NodeId::new("node-bob"),
+            deterministic_signature(0x02),
+            1_704_067_200,
+        ));
+        signatures.add(NodeSignature::new(
+            NodeId::new("node-charlie"),
+            deterministic_signature(0x03),
+            1_704_067_200,
+        ));
+
+        let vector = QuorumGoldenVector {
+            scenario: "3-node unanimous quorum (f=0)".to_string(),
+            eligible_nodes: 3,
+            max_faults: 0,
+            signatures,
+            satisfies_risk_tier: Some("critical_write".to_string()),
+            zone_id: "z:work".to_string(),
+        };
+
+        let schema = quorum_schema();
+        let bytes1 = fcp_cbor::CanonicalSerializer::serialize(&vector, &schema).unwrap();
+        let bytes2 = fcp_cbor::CanonicalSerializer::serialize(&vector, &schema).unwrap();
+        assert_eq!(bytes1, bytes2, "Serialization must be deterministic");
+
+        let decoded: QuorumGoldenVector =
+            fcp_cbor::CanonicalSerializer::deserialize(&bytes1, &schema).unwrap();
+        assert_eq!(decoded, vector);
+
+        let policy = QuorumPolicy::new(ZoneId::work(), 3, 0);
+        assert!(
+            decoded
+                .signatures
+                .satisfies_quorum(&policy, RiskTier::CriticalWrite)
+        );
+    }
+
+    #[test]
+    fn test_golden_vector_quorum_3_of_5() {
+        let mut signatures = SignatureSet::new();
+        signatures.add(NodeSignature::new(
+            NodeId::new("node-alpha"),
+            deterministic_signature(0x11),
+            1_704_067_200,
+        ));
+        signatures.add(NodeSignature::new(
+            NodeId::new("node-beta"),
+            deterministic_signature(0x12),
+            1_704_067_200,
+        ));
+        signatures.add(NodeSignature::new(
+            NodeId::new("node-gamma"),
+            deterministic_signature(0x13),
+            1_704_067_200,
+        ));
+
+        let vector = QuorumGoldenVector {
+            scenario: "5-node cluster with 3 signatures (f=1)".to_string(),
+            eligible_nodes: 5,
+            max_faults: 1,
+            signatures,
+            satisfies_risk_tier: Some("risky".to_string()),
+            zone_id: "z:work".to_string(),
+        };
+
+        let schema = quorum_schema();
+        let bytes = fcp_cbor::CanonicalSerializer::serialize(&vector, &schema).unwrap();
+        let decoded: QuorumGoldenVector =
+            fcp_cbor::CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, vector);
+
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1);
+        assert!(
+            decoded
+                .signatures
+                .satisfies_quorum(&policy, RiskTier::Risky)
+        );
+        assert!(
+            !decoded
+                .signatures
+                .satisfies_quorum(&policy, RiskTier::CriticalWrite)
+        );
+    }
+
+    #[test]
+    fn test_golden_vector_degraded_state() {
+        let state =
+            DegradedModeState::degraded(DegradedModeReason::InsufficientNodes, 1_704_067_200, 3, 5);
+
+        let vector = DegradedStateGoldenVector {
+            scenario: "5-node cluster degraded to 3 nodes".to_string(),
+            state,
+            policy_eligible_nodes: 5,
+            policy_max_faults: 1,
+        };
+
+        let schema = degraded_state_schema();
+        let bytes = fcp_cbor::CanonicalSerializer::serialize(&vector, &schema).unwrap();
+        let decoded: DegradedStateGoldenVector =
+            fcp_cbor::CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded, vector);
+
+        assert!(decoded.state.active);
+        assert_eq!(
+            decoded.state.reason,
+            Some(DegradedModeReason::InsufficientNodes)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn generate_golden_vector_files() {
+        use std::fs;
+        use std::path::Path;
+
+        let vectors_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/vectors/quorum");
+
+        fs::create_dir_all(&vectors_dir).expect("Failed to create vectors directory");
+
+        // quorum_3_of_3.cbor
+        {
+            let mut signatures = SignatureSet::new();
+            signatures.add(NodeSignature::new(
+                NodeId::new("node-alice"),
+                deterministic_signature(0x01),
+                1_704_067_200,
+            ));
+            signatures.add(NodeSignature::new(
+                NodeId::new("node-bob"),
+                deterministic_signature(0x02),
+                1_704_067_200,
+            ));
+            signatures.add(NodeSignature::new(
+                NodeId::new("node-charlie"),
+                deterministic_signature(0x03),
+                1_704_067_200,
+            ));
+
+            let vector = QuorumGoldenVector {
+                scenario: "3-node unanimous quorum (f=0)".to_string(),
+                eligible_nodes: 3,
+                max_faults: 0,
+                signatures,
+                satisfies_risk_tier: Some("critical_write".to_string()),
+                zone_id: "z:work".to_string(),
+            };
+
+            let bytes =
+                fcp_cbor::CanonicalSerializer::serialize(&vector, &quorum_schema()).unwrap();
+            fs::write(vectors_dir.join("quorum_3_of_3.cbor"), &bytes).unwrap();
+        }
+
+        // quorum_3_of_5.cbor
+        {
+            let mut signatures = SignatureSet::new();
+            signatures.add(NodeSignature::new(
+                NodeId::new("node-alpha"),
+                deterministic_signature(0x11),
+                1_704_067_200,
+            ));
+            signatures.add(NodeSignature::new(
+                NodeId::new("node-beta"),
+                deterministic_signature(0x12),
+                1_704_067_200,
+            ));
+            signatures.add(NodeSignature::new(
+                NodeId::new("node-gamma"),
+                deterministic_signature(0x13),
+                1_704_067_200,
+            ));
+
+            let vector = QuorumGoldenVector {
+                scenario: "5-node cluster with 3 signatures (f=1)".to_string(),
+                eligible_nodes: 5,
+                max_faults: 1,
+                signatures,
+                satisfies_risk_tier: Some("risky".to_string()),
+                zone_id: "z:work".to_string(),
+            };
+
+            let bytes =
+                fcp_cbor::CanonicalSerializer::serialize(&vector, &quorum_schema()).unwrap();
+            fs::write(vectors_dir.join("quorum_3_of_5.cbor"), &bytes).unwrap();
+        }
+
+        // degraded_state.cbor
+        {
+            let state = DegradedModeState::degraded(
+                DegradedModeReason::InsufficientNodes,
+                1_704_067_200,
+                3,
+                5,
+            );
+
+            let vector = DegradedStateGoldenVector {
+                scenario: "5-node cluster degraded to 3 nodes".to_string(),
+                state,
+                policy_eligible_nodes: 5,
+                policy_max_faults: 1,
+            };
+
+            let bytes = fcp_cbor::CanonicalSerializer::serialize(&vector, &degraded_state_schema())
+                .unwrap();
+            fs::write(vectors_dir.join("degraded_state.cbor"), &bytes).unwrap();
+        }
     }
 }
