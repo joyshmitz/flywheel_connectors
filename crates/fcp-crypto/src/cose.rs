@@ -1,6 +1,6 @@
 //! COSE/CWT helpers for FCP2 capability tokens.
 //!
-//! Implements COSE_Sign1 tokens with deterministic CBOR payload maps
+//! Implements `COSE_Sign1` tokens with deterministic CBOR payload maps
 //! as required for `CapabilityToken` verification.
 //!
 //! ## Security Requirements
@@ -12,7 +12,7 @@ use crate::ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use crate::error::{CryptoError, CryptoResult};
 use crate::kid::KeyId;
 use chrono::{DateTime, Utc};
-use coset::{iana, CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder};
+use coset::{CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder, iana};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -51,11 +51,29 @@ pub mod fcp2_claims {
     pub const DELEGATION_DEPTH: i64 = -65541;
     /// Parent token ID claim (for delegated tokens).
     pub const PARENT_TOKEN: i64 = -65542;
+    /// Issuing node ID claim.
+    pub const ISS_NODE: i64 = -65543;
+    /// Binary audience (ObjectId) claim.
+    pub const AUD_BINARY: i64 = -65544;
+    /// Grant Object IDs claim.
+    pub const GRANT_OBJECT_IDS: i64 = -65545;
+    /// Holder node ID claim.
+    pub const HOLDER_NODE: i64 = -65546;
+    /// Checkpoint ID claim.
+    pub const CHK_ID: i64 = -65547;
+    /// Checkpoint sequence claim.
+    pub const CHK_SEQ: i64 = -65548;
+    /// Capability constraints claim.
+    pub const CONSTRAINTS: i64 = -65549;
+    /// Granted capabilities (array of CapabilityGrant).
+    pub const GRANTS: i64 = -65550;
+    /// Instance ID claim.
+    pub const INSTANCE_ID: i64 = -65551;
 }
 
 /// CWT (CBOR Web Token) claims map.
 ///
-/// Claims are stored in a BTreeMap to ensure deterministic serialization.
+/// Claims are stored in a `BTreeMap` to ensure deterministic serialization.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CwtClaims {
     claims: BTreeMap<i64, ciborium::Value>,
@@ -143,10 +161,8 @@ impl CwtClaims {
     /// Set FCP2 zone ID claim.
     #[must_use]
     pub fn zone_id(mut self, zone_id: &str) -> Self {
-        self.claims.insert(
-            fcp2_claims::ZONE_ID,
-            ciborium::Value::Text(zone_id.into()),
-        );
+        self.claims
+            .insert(fcp2_claims::ZONE_ID, ciborium::Value::Text(zone_id.into()));
         self
     }
 
@@ -267,9 +283,8 @@ impl CwtClaims {
         let value: ciborium::Value = ciborium::from_reader(bytes)
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
 
-        let map = match value {
-            ciborium::Value::Map(m) => m,
-            _ => return Err(CryptoError::SerializationError("expected CBOR map".into())),
+        let ciborium::Value::Map(map) = value else {
+            return Err(CryptoError::SerializationError("expected CBOR map".into()));
         };
 
         let mut claims = BTreeMap::new();
@@ -280,7 +295,7 @@ impl CwtClaims {
                 _ => {
                     return Err(CryptoError::SerializationError(
                         "claim key must be integer".into(),
-                    ))
+                    ));
                 }
             };
             claims.insert(key, v);
@@ -290,13 +305,14 @@ impl CwtClaims {
     }
 }
 
-/// COSE_Sign1 token for FCP2 capabilities.
+/// `COSE_Sign1` token for FCP2 capabilities.
+#[derive(Debug, Clone)]
 pub struct CoseToken {
     inner: CoseSign1,
 }
 
 impl CoseToken {
-    /// Create and sign a new COSE_Sign1 token.
+    /// Create and sign a new `COSE_Sign1` token.
     ///
     /// # Errors
     ///
@@ -611,13 +627,7 @@ mod tests {
         let token = CoseToken::sign(&sk, &claims).unwrap();
 
         let verified = token
-            .verify_with_lookup(|k| {
-                if k == &kid {
-                    Some(pk)
-                } else {
-                    None
-                }
-            })
+            .verify_with_lookup(|k| if k == &kid { Some(pk) } else { None })
             .unwrap();
 
         assert_eq!(verified.get_issuer(), Some("test"));
@@ -630,9 +640,7 @@ mod tests {
         let future = now + Duration::hours(1);
 
         // Valid token
-        let valid_claims = CwtClaims::new()
-            .not_before(past)
-            .expiration(future);
+        let valid_claims = CwtClaims::new().not_before(past).expiration(future);
         assert!(CoseToken::validate_timing(&valid_claims, now).is_ok());
 
         // Expired token

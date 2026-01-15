@@ -21,7 +21,7 @@
 //! - [`aead`] - ChaCha20-Poly1305 and XChaCha20-Poly1305 AEAD
 //! - [`mac`] - BLAKE3 keyed MAC for session frames
 //! - [`hpke_seal`] - HPKE (RFC 9180) for sealed boxes
-//! - [`cose`] - COSE_Sign1/CWT helpers for capability tokens
+//! - [`cose`] - `COSE_Sign1/CWT` helpers for capability tokens
 //! - [`kid`] - Key identifier (KID) types
 //! - [`canonicalize`] - Signature canonicalization helpers
 //!
@@ -45,14 +45,14 @@
 //! use fcp_crypto::x25519::X25519SecretKey;
 //! use fcp_crypto::hpke_seal::{hpke_seal, hpke_open, Fcp2Aad};
 //!
-//! let recipient_sk = X25519SecretKey::generate();
-//! let recipient_pk = recipient_sk.public_key();
+//! let recipient_secret_key = X25519SecretKey::generate();
+//! let recipient_public_key = recipient_secret_key.public_key();
 //!
 //! let plaintext = b"secret zone key";
-//! let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-123", 1234567890);
+//! let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-123", 1_234_567_890);
 //!
-//! let sealed = hpke_seal(&recipient_pk, plaintext, &aad).unwrap();
-//! let opened = hpke_open(&recipient_sk, &sealed, &aad).unwrap();
+//! let sealed = hpke_seal(&recipient_public_key, plaintext, &aad).unwrap();
+//! let opened = hpke_open(&recipient_secret_key, &sealed, &aad).unwrap();
 //!
 //! assert_eq!(opened, plaintext);
 //! ```
@@ -96,15 +96,15 @@ pub mod x25519;
 
 // Re-export commonly used types at crate root
 pub use aead::{
-    chacha20_decrypt, chacha20_encrypt, xchacha20_decrypt, xchacha20_encrypt, AeadKey,
-    ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
+    AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
+    chacha20_decrypt, chacha20_encrypt, xchacha20_decrypt, xchacha20_encrypt,
 };
-pub use canonicalize::{canonical_signing_bytes, schema_hash, Signable};
+pub use canonicalize::{Signable, canonical_signing_bytes, schema_hash};
 pub use cose::{CapabilityTokenBuilder, CoseToken, CwtClaims};
 pub use ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 pub use error::{CryptoError, CryptoResult};
-pub use hkdf::{hkdf_sha256, hkdf_sha256_array, DerivedKey, Fcp2KeyDerivation, HkdfSha256};
-pub use hpke_seal::{hpke_open, hpke_seal, Fcp2Aad, HpkeSealedBox};
+pub use hkdf::{DerivedKey, Fcp2KeyDerivation, HkdfSha256, hkdf_sha256, hkdf_sha256_array};
+pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use kid::KeyId;
-pub use mac::{blake3_mac, blake3_mac_full, blake3_mac_verify, Blake3Mac, MacKey};
+pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};
 pub use x25519::{X25519PublicKey, X25519SecretKey, X25519SharedSecret};

@@ -476,8 +476,7 @@ mod tests {
         let encoded = aad.encode();
 
         // Should be: zone_id || node_id || purpose || timestamp (8 bytes LE)
-        let expected_len =
-            zone_id.len() + node_id.len() + purpose::ZONE_KEY.len() + 8;
+        let expected_len = zone_id.len() + node_id.len() + purpose::ZONE_KEY.len() + 8;
         assert_eq!(encoded.len(), expected_len);
 
         // Check that timestamp is at the end in little-endian

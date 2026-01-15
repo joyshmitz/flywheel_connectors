@@ -1,9 +1,9 @@
 //! Signature canonicalization helpers for FCP2.
 //!
 //! Provides a single signing-bytes procedure to prevent cross-implementation drift:
-//! 1. Define an "unsigned view" of an object (remove signature/quorum_signatures fields)
+//! 1. Define an "unsigned view" of an object (remove `signature`/`quorum_signatures` fields)
 //! 2. Serialize using deterministic CBOR with schema-hash prefix
-//! 3. For multi-signature vectors: sort lexicographically by node_id before hashing/signing/verifying
+//! 3. For multi-signature vectors: sort lexicographically by `node_id` before hashing/signing/verifying
 
 use crate::error::{CryptoError, CryptoResult};
 
@@ -42,7 +42,7 @@ pub fn canonical_signing_bytes(schema_id: &str, cbor_bytes: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Sort node signatures lexicographically by node_id for multi-sig verification.
+/// Sort node signatures lexicographically by `node_id` for multi-sig verification.
 ///
 /// Returns indices in sorted order.
 #[must_use]
@@ -52,7 +52,7 @@ pub fn sort_signatures_by_node_id(node_ids: &[&[u8]]) -> Vec<usize> {
     indices
 }
 
-/// Verify that signatures are properly sorted by node_id.
+/// Verify that signatures are properly sorted by `node_id`.
 ///
 /// # Errors
 ///
@@ -61,7 +61,7 @@ pub fn verify_signature_order(node_ids: &[&[u8]]) -> CryptoResult<()> {
     for window in node_ids.windows(2) {
         if window[0] >= window[1] {
             return Err(CryptoError::TokenValidationError(
-                "signatures not sorted by node_id".into(),
+                "signatures not sorted by `node_id`".into(),
             ));
         }
     }
@@ -115,7 +115,7 @@ pub trait Signable {
     }
 }
 
-/// Multi-signature entry with node_id ordering.
+/// Multi-signature entry with `node_id` ordering.
 #[derive(Clone, Debug)]
 pub struct NodeSignature {
     /// Node identifier (for sorting).
@@ -127,12 +127,12 @@ pub struct NodeSignature {
 impl NodeSignature {
     /// Create a new node signature.
     #[must_use]
-    pub fn new(node_id: Vec<u8>, signature: Vec<u8>) -> Self {
+    pub const fn new(node_id: Vec<u8>, signature: Vec<u8>) -> Self {
         Self { node_id, signature }
     }
 }
 
-/// Sort a vector of node signatures by node_id.
+/// Sort a vector of node signatures by `node_id`.
 pub fn sort_node_signatures(signatures: &mut [NodeSignature]) {
     signatures.sort_by(|a, b| a.node_id.cmp(&b.node_id));
 }
@@ -141,7 +141,7 @@ pub fn sort_node_signatures(signatures: &mut [NodeSignature]) {
 ///
 /// # Errors
 ///
-/// Returns an error if not sorted lexicographically by node_id.
+/// Returns an error if not sorted lexicographically by `node_id`.
 pub fn verify_node_signature_order(signatures: &[NodeSignature]) -> CryptoResult<()> {
     for window in signatures.windows(2) {
         if window[0].node_id >= window[1].node_id {

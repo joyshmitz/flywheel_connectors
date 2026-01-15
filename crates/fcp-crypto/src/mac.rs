@@ -25,7 +25,7 @@ pub struct MacKey {
 impl MacKey {
     /// Create from raw bytes.
     #[must_use]
-    pub fn from_bytes(bytes: [u8; MAC_KEY_SIZE]) -> Self {
+    pub const fn from_bytes(bytes: [u8; MAC_KEY_SIZE]) -> Self {
         Self { bytes }
     }
 
@@ -56,7 +56,7 @@ impl MacKey {
 
     /// Get the key bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; MAC_KEY_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; MAC_KEY_SIZE] {
         &self.bytes
     }
 }
@@ -77,7 +77,7 @@ pub struct Blake3Mac {
 impl Blake3Mac {
     /// Create a new MAC instance.
     #[must_use]
-    pub fn new(key: &MacKey) -> Self {
+    pub const fn new(key: &MacKey) -> Self {
         Self {
             key: *key.as_bytes(),
         }

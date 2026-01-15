@@ -305,8 +305,7 @@ mod tests {
     fn rfc7748_test_vector_1() {
         // RFC 7748 Section 6.1 - First test vector
         // Alice's private key (after clamping it's still used as input)
-        let alice_private_hex =
-            "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+        let alice_private_hex = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
         let alice_private_bytes = hex::decode(alice_private_hex).unwrap();
         let mut alice_arr = [0u8; 32];
         alice_arr.copy_from_slice(&alice_private_bytes);
@@ -318,8 +317,7 @@ mod tests {
         assert_eq!(alice_sk.public_key().to_hex(), expected_alice_public);
 
         // Bob's private key
-        let bob_private_hex =
-            "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+        let bob_private_hex = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
         let bob_private_bytes = hex::decode(bob_private_hex).unwrap();
         let mut bob_arr = [0u8; 32];
         bob_arr.copy_from_slice(&bob_private_bytes);
@@ -331,8 +329,7 @@ mod tests {
         assert_eq!(bob_sk.public_key().to_hex(), expected_bob_public);
 
         // Shared secret
-        let expected_shared =
-            "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+        let expected_shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
 
         let alice_shared = alice_sk.diffie_hellman(&bob_sk.public_key());
         let bob_shared = bob_sk.diffie_hellman(&alice_sk.public_key());

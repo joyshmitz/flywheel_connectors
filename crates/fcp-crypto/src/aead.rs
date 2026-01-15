@@ -5,8 +5,8 @@
 
 use crate::error::{CryptoError, CryptoResult};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, XChaCha20Poly1305,
+    aead::{Aead, KeyInit, Payload},
 };
 use zeroize::ZeroizeOnDrop;
 
@@ -31,7 +31,7 @@ pub struct AeadKey {
 impl AeadKey {
     /// Create a new AEAD key from raw bytes.
     #[must_use]
-    pub fn from_bytes(bytes: [u8; AEAD_KEY_SIZE]) -> Self {
+    pub const fn from_bytes(bytes: [u8; AEAD_KEY_SIZE]) -> Self {
         Self { bytes }
     }
 
@@ -62,7 +62,7 @@ impl AeadKey {
 
     /// Get the key bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; AEAD_KEY_SIZE] {
+    pub const fn as_bytes(&self) -> &[u8; AEAD_KEY_SIZE] {
         &self.bytes
     }
 }
@@ -139,7 +139,7 @@ impl XChaCha20Nonce {
 
     /// Generate a random nonce.
     ///
-    /// XChaCha20 uses a 192-bit nonce which is safe for random generation
+    /// `XChaCha20` uses a 192-bit nonce which is safe for random generation
     /// (birthday collision resistance up to ~2^80 messages).
     #[must_use]
     pub fn generate() -> Self {
@@ -291,11 +291,7 @@ impl XChaCha20Poly1305Cipher {
     /// # Errors
     ///
     /// Returns an error if encryption fails.
-    pub fn encrypt_with_random_nonce(
-        &self,
-        plaintext: &[u8],
-        aad: &[u8],
-    ) -> CryptoResult<Vec<u8>> {
+    pub fn encrypt_with_random_nonce(&self, plaintext: &[u8], aad: &[u8]) -> CryptoResult<Vec<u8>> {
         let nonce = XChaCha20Nonce::generate();
         let ciphertext = self.encrypt(&nonce, plaintext, aad)?;
         let mut result = Vec::with_capacity(XCHACHA20_NONCE_SIZE + ciphertext.len());
@@ -424,7 +420,9 @@ mod tests {
         let aad = b"context";
 
         let encrypted = cipher.encrypt_with_random_nonce(plaintext, aad).unwrap();
-        let decrypted = cipher.decrypt_with_prepended_nonce(&encrypted, aad).unwrap();
+        let decrypted = cipher
+            .decrypt_with_prepended_nonce(&encrypted, aad)
+            .unwrap();
 
         assert_eq!(decrypted, plaintext);
     }
@@ -528,8 +526,9 @@ mod tests {
             0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
             0x9c, 0x9d, 0x9e, 0x9f,
         ]);
-        let nonce =
-            ChaCha20Nonce::from_bytes([0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47]);
+        let nonce = ChaCha20Nonce::from_bytes([
+            0x07, 0x00, 0x00, 0x00, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+        ]);
         let aad = hex::decode("50515253c0c1c2c3c4c5c6c7").unwrap();
         let plaintext = b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
 

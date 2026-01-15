@@ -426,7 +426,10 @@ mod tests {
         let expected_pk =
             hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
                 .unwrap();
-        assert_eq!(sk.verifying_key().to_bytes().as_slice(), expected_pk.as_slice());
+        assert_eq!(
+            sk.verifying_key().to_bytes().as_slice(),
+            expected_pk.as_slice()
+        );
 
         // MESSAGE: empty
         let message = b"";
@@ -458,7 +461,10 @@ mod tests {
         let expected_pk =
             hex::decode("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
                 .unwrap();
-        assert_eq!(sk.verifying_key().to_bytes().as_slice(), expected_pk.as_slice());
+        assert_eq!(
+            sk.verifying_key().to_bytes().as_slice(),
+            expected_pk.as_slice()
+        );
 
         // MESSAGE: single byte 0x72
         let message = &[0x72u8];
@@ -490,7 +496,10 @@ mod tests {
         let expected_pk =
             hex::decode("fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025")
                 .unwrap();
-        assert_eq!(sk.verifying_key().to_bytes().as_slice(), expected_pk.as_slice());
+        assert_eq!(
+            sk.verifying_key().to_bytes().as_slice(),
+            expected_pk.as_slice()
+        );
 
         // MESSAGE: 0xaf82
         let message = &[0xaf, 0x82];
