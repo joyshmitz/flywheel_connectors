@@ -8,7 +8,6 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::Utc;
-use ed25519_dalek::VerifyingKey;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
