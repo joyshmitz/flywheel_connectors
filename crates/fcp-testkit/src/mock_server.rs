@@ -2,9 +2,6 @@
 //!
 //! Provides a wrapper around wiremock for common FCP testing patterns.
 
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -13,9 +10,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// Wraps wiremock with convenience methods for common patterns.
 pub struct MockApiServer {
     server: MockServer,
-    /// Recorded requests for manual inspection (future use).
-    #[allow(dead_code)]
-    requests: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
 /// A recorded HTTP request.
@@ -39,7 +33,6 @@ impl MockApiServer {
         let server = MockServer::start().await;
         Self {
             server,
-            requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -123,7 +116,12 @@ impl MockApiServer {
     }
 
     /// Expect a request and respond with an error status.
-    pub async fn expect_error(&self, request_path: &str, status: u16, error_body: serde_json::Value) {
+    pub async fn expect_error(
+        &self,
+        request_path: &str,
+        status: u16,
+        error_body: serde_json::Value,
+    ) {
         Mock::given(path(request_path))
             .respond_with(
                 ResponseTemplate::new(status)
@@ -254,9 +252,7 @@ impl MockApiServer {
     /// Panics if no matching request was found.
     pub async fn assert_received(&self, request_path: &str) {
         let received = self.server.received_requests().await.unwrap_or_default();
-        let found = received
-            .iter()
-            .any(|r| r.url.path() == request_path);
+        let found = received.iter().any(|r| r.url.path() == request_path);
         assert!(
             found,
             "No request received to path '{}'. Received: {:?}",
@@ -312,27 +308,6 @@ impl MockScenarioBuilder {
         self
     }
 
-    /// Add a sequence of responses for the same path.
-    #[must_use]
-    pub fn with_response_sequence(
-        mut self,
-        request_path: &str,
-        responses: Vec<(u16, serde_json::Value)>,
-    ) -> Self {
-        for (i, (status, body)) in responses.into_iter().enumerate() {
-            let mock = Mock::given(path(request_path))
-                .respond_with(
-                    ResponseTemplate::new(status)
-                        .set_body_json(body)
-                        .insert_header("content-type", "application/json"),
-                )
-                .expect(1)
-                .with_priority((i + 1) as u8);
-            self.mocks.push(mock);
-        }
-        self
-    }
-
     /// Build and return the configured mock server.
     pub async fn build(self) -> MockApiServer {
         for mock in self.mocks {
@@ -340,7 +315,6 @@ impl MockScenarioBuilder {
         }
         MockApiServer {
             server: self.server,
-            requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

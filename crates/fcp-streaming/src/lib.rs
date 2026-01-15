@@ -26,17 +26,17 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-mod sse;
-mod websocket;
-mod stream;
-mod reconnect;
 mod error;
+mod reconnect;
+mod sse;
+mod stream;
+mod websocket;
 
-pub use sse::*;
-pub use websocket::*;
-pub use stream::*;
-pub use reconnect::*;
 pub use error::*;
+pub use reconnect::*;
+pub use sse::*;
+pub use stream::*;
+pub use websocket::*;
 
 use std::time::Duration;
 

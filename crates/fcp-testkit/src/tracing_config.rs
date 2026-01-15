@@ -5,7 +5,7 @@
 
 use std::sync::Once;
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 static INIT: Once = Once::new();
 
@@ -93,11 +93,7 @@ pub fn init_test_tracing_json() {
 
         tracing_subscriber::registry()
             .with(filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_test_writer()
-                    .json(),
-            )
+            .with(tracing_subscriber::fmt::layer().with_test_writer().json())
             .init();
     });
 }

@@ -26,15 +26,22 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod context;
+mod export;
 mod logging;
 pub mod metrics;
 mod tracing_layer;
-mod export;
 
 pub use context::*;
-pub use logging::*;
-pub use tracing_layer::*;
 pub use export::*;
+pub use logging::*;
+// Re-export tracing_layer items explicitly to avoid TraceContext collision
+// (we prefer context::TraceContext which is the proper W3C binary implementation)
+pub use tracing_layer::{
+    FcpSpan, SpanGuard, TRACEPARENT_HEADER, TRACESTATE_HEADER, extract_trace_context,
+    inject_trace_context,
+};
+// Export the legacy string-based TraceContext under a distinct name
+pub use tracing_layer::TraceContext as LegacyTraceContext;
 
 use std::sync::OnceLock;
 
@@ -230,4 +237,205 @@ pub enum TelemetryError {
 pub async fn shutdown_telemetry() {
     // Shutdown OpenTelemetry if initialized
     opentelemetry::global::shutdown_tracer_provider();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact float comparison is safe for sample rate
+    fn test_telemetry_config_default() {
+        let config = TelemetryConfig::default();
+
+        assert_eq!(config.service_name, "fcp-connector");
+        assert_eq!(config.log_level, "info");
+        assert!(config.json_logs);
+        assert!(!config.prometheus_enabled);
+        assert_eq!(config.prometheus_port, 9090);
+        assert!(!config.otlp_enabled);
+        assert!(config.otlp_endpoint.is_none());
+        assert_eq!(config.trace_sample_rate, 1.0);
+        assert!(!config.redact_fields.is_empty());
+    }
+
+    #[test]
+    fn test_telemetry_config_new() {
+        let config = TelemetryConfig::new("my-service");
+
+        assert_eq!(config.service_name, "my-service");
+        // Other fields should be defaults
+        assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn test_telemetry_config_with_log_level() {
+        let config = TelemetryConfig::new("test").with_log_level("debug");
+
+        assert_eq!(config.log_level, "debug");
+    }
+
+    #[test]
+    fn test_telemetry_config_with_json_logs_enabled() {
+        let config = TelemetryConfig::new("test").with_json_logs(true);
+
+        assert!(config.json_logs);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_json_logs_disabled() {
+        let config = TelemetryConfig::new("test").with_json_logs(false);
+
+        assert!(!config.json_logs);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_prometheus() {
+        let config = TelemetryConfig::new("test").with_prometheus(8080);
+
+        assert!(config.prometheus_enabled);
+        assert_eq!(config.prometheus_port, 8080);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_otlp() {
+        let config = TelemetryConfig::new("test").with_otlp("http://localhost:4317");
+
+        assert!(config.otlp_enabled);
+        assert_eq!(
+            config.otlp_endpoint,
+            Some("http://localhost:4317".to_string())
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact float comparison is safe for sample rate
+    fn test_telemetry_config_with_sample_rate() {
+        let config = TelemetryConfig::new("test").with_sample_rate(0.5);
+
+        assert_eq!(config.trace_sample_rate, 0.5);
+    }
+
+    #[test]
+    fn test_telemetry_config_with_redact_fields() {
+        let config =
+            TelemetryConfig::new("test").with_redact_fields(vec!["custom_secret".to_string()]);
+
+        assert!(config.redact_fields.contains(&"custom_secret".to_string()));
+        // Should also still have the default fields
+        assert!(config.redact_fields.contains(&"password".to_string()));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact float comparison is safe for sample rate
+    fn test_telemetry_config_builder_chain() {
+        let config = TelemetryConfig::new("my-connector")
+            .with_log_level("trace")
+            .with_json_logs(true)
+            .with_prometheus(9091)
+            .with_otlp("http://collector:4317")
+            .with_sample_rate(0.1)
+            .with_redact_fields(vec!["api_secret".to_string()]);
+
+        assert_eq!(config.service_name, "my-connector");
+        assert_eq!(config.log_level, "trace");
+        assert!(config.json_logs);
+        assert!(config.prometheus_enabled);
+        assert_eq!(config.prometheus_port, 9091);
+        assert!(config.otlp_enabled);
+        assert_eq!(
+            config.otlp_endpoint,
+            Some("http://collector:4317".to_string())
+        );
+        assert_eq!(config.trace_sample_rate, 0.1);
+        assert!(config.redact_fields.contains(&"api_secret".to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_config_debug() {
+        let config = TelemetryConfig::default();
+        let debug_str = format!("{config:?}");
+
+        assert!(debug_str.contains("TelemetryConfig"));
+        assert!(debug_str.contains("service_name"));
+    }
+
+    #[test]
+    fn test_telemetry_config_clone() {
+        let config = TelemetryConfig::new("test")
+            .with_prometheus(8080)
+            .with_log_level("debug");
+
+        let cloned = config.clone();
+
+        assert_eq!(config.service_name, cloned.service_name);
+        assert_eq!(config.prometheus_port, cloned.prometheus_port);
+        assert_eq!(config.log_level, cloned.log_level);
+    }
+
+    #[test]
+    fn test_telemetry_error_logging_init() {
+        let error = TelemetryError::LoggingInit("test error".to_string());
+        let error_str = format!("{error}");
+
+        assert!(error_str.contains("Failed to initialize logging"));
+        assert!(error_str.contains("test error"));
+    }
+
+    #[test]
+    fn test_telemetry_error_metrics_init() {
+        let error = TelemetryError::MetricsInit("metrics error".to_string());
+        let error_str = format!("{error}");
+
+        assert!(error_str.contains("Failed to initialize metrics"));
+        assert!(error_str.contains("metrics error"));
+    }
+
+    #[test]
+    fn test_telemetry_error_tracing_init() {
+        let error = TelemetryError::TracingInit("tracing error".to_string());
+        let error_str = format!("{error}");
+
+        assert!(error_str.contains("Failed to initialize tracing"));
+        assert!(error_str.contains("tracing error"));
+    }
+
+    #[test]
+    fn test_telemetry_error_config() {
+        let error = TelemetryError::Config("config error".to_string());
+        let error_str = format!("{error}");
+
+        assert!(error_str.contains("Configuration error"));
+        assert!(error_str.contains("config error"));
+    }
+
+    #[test]
+    fn test_telemetry_error_debug() {
+        let error = TelemetryError::LoggingInit("debug test".to_string());
+        let debug_str = format!("{error:?}");
+
+        assert!(debug_str.contains("LoggingInit"));
+    }
+
+    #[test]
+    fn test_default_redact_fields() {
+        let config = TelemetryConfig::default();
+
+        assert!(config.redact_fields.contains(&"password".to_string()));
+        assert!(config.redact_fields.contains(&"api_key".to_string()));
+        assert!(config.redact_fields.contains(&"secret".to_string()));
+        assert!(config.redact_fields.contains(&"token".to_string()));
+        assert!(config.redact_fields.contains(&"authorization".to_string()));
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact float comparison is safe for sample rate bounds
+    fn test_telemetry_config_sample_rate_bounds() {
+        // Test edge cases for sample rate
+        let config_zero = TelemetryConfig::new("test").with_sample_rate(0.0);
+        assert_eq!(config_zero.trace_sample_rate, 0.0);
+
+        let config_one = TelemetryConfig::new("test").with_sample_rate(1.0);
+        assert_eq!(config_one.trace_sample_rate, 1.0);
+    }
 }

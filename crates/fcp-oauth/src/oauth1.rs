@@ -5,9 +5,8 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
-use rand::Rng;
 use reqwest::Client;
 use sha1::Sha1;
 use url::Url;
@@ -112,15 +111,13 @@ impl OAuth1Client {
     /// Step 1: Get a request token.
     pub async fn get_request_token(&self) -> OAuthResult<RequestToken> {
         let mut params = BTreeMap::new();
-        params.insert("oauth_callback", self.config.callback_url.as_deref().unwrap_or("oob"));
+        params.insert(
+            "oauth_callback",
+            self.config.callback_url.as_deref().unwrap_or("oob"),
+        );
 
-        let auth_header = self.build_auth_header(
-            "POST",
-            &self.config.request_token_url,
-            &params,
-            None,
-            None,
-        )?;
+        let auth_header =
+            self.build_auth_header("POST", &self.config.request_token_url, &params, None, None)?;
 
         let response = self
             .http_client
@@ -220,9 +217,15 @@ impl OAuth1Client {
 
         // Collect all OAuth parameters
         let mut oauth_params: BTreeMap<String, String> = BTreeMap::new();
-        oauth_params.insert("oauth_consumer_key".to_string(), self.config.consumer_key.clone());
+        oauth_params.insert(
+            "oauth_consumer_key".to_string(),
+            self.config.consumer_key.clone(),
+        );
         oauth_params.insert("oauth_nonce".to_string(), nonce);
-        oauth_params.insert("oauth_signature_method".to_string(), "HMAC-SHA1".to_string());
+        oauth_params.insert(
+            "oauth_signature_method".to_string(),
+            "HMAC-SHA1".to_string(),
+        );
         oauth_params.insert("oauth_timestamp".to_string(), timestamp);
         oauth_params.insert("oauth_version".to_string(), "1.0".to_string());
 
@@ -236,12 +239,8 @@ impl OAuth1Client {
         }
 
         // Calculate signature
-        let signature = self.calculate_signature(
-            method,
-            url,
-            &oauth_params,
-            token_secret.unwrap_or(""),
-        )?;
+        let signature =
+            self.calculate_signature(method, url, &oauth_params, token_secret.unwrap_or(""))?;
 
         oauth_params.insert("oauth_signature".to_string(), signature);
 
@@ -320,9 +319,8 @@ impl OAuth1Client {
 
 /// Parse request token response.
 fn parse_request_token(body: &str) -> OAuthResult<RequestToken> {
-    let params: std::collections::HashMap<String, String> =
-        serde_urlencoded::from_str(body)
-            .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))?;
+    let params: std::collections::HashMap<String, String> = serde_urlencoded::from_str(body)
+        .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))?;
 
     let token = params
         .get("oauth_token")
@@ -348,9 +346,8 @@ fn parse_request_token(body: &str) -> OAuthResult<RequestToken> {
 
 /// Parse access token response.
 fn parse_access_token(body: &str) -> OAuthResult<OAuth1Tokens> {
-    let params: std::collections::HashMap<String, String> =
-        serde_urlencoded::from_str(body)
-            .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))?;
+    let params: std::collections::HashMap<String, String> = serde_urlencoded::from_str(body)
+        .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))?;
 
     let token = params
         .get("oauth_token")
@@ -372,9 +369,9 @@ fn parse_access_token(body: &str) -> OAuthResult<OAuth1Tokens> {
 
 /// Generate a random nonce.
 fn generate_nonce() -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
-    let bytes: Vec<u8> = (0..32).map(|_| rand::thread_rng().r#gen()).collect();
+    let bytes: Vec<u8> = (0..32).map(|_| rand::random()).collect();
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
@@ -425,7 +422,8 @@ mod tests {
 
     #[test]
     fn test_parse_access_token() {
-        let body = "oauth_token=access123&oauth_token_secret=secret789&user_id=12345&screen_name=testuser";
+        let body =
+            "oauth_token=access123&oauth_token_secret=secret789&user_id=12345&screen_name=testuser";
         let tokens = parse_access_token(body).unwrap();
 
         assert_eq!(tokens.token, "access123");

@@ -109,7 +109,10 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
         self.operations.push(RecordedOperation {
             operation: "configure".to_string(),
             input: Some(config),
-            result: result.as_ref().map(|()| serde_json::json!({})).map_err(|e| e.to_string()),
+            result: result
+                .as_ref()
+                .map(|()| serde_json::json!({}))
+                .map_err(|e| e.to_string()),
             duration_ms,
             timestamp: chrono::Utc::now(),
         });
@@ -195,7 +198,11 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
     /// Panics if the last operation succeeded or no operations recorded.
     pub fn assert_last_failure(&self) {
         let op = self.last_operation().expect("No operations recorded");
-        assert!(op.result.is_err(), "Expected failure but got: {:?}", op.result);
+        assert!(
+            op.result.is_err(),
+            "Expected failure but got: {:?}",
+            op.result
+        );
     }
 
     /// Assert the connector is ready.
@@ -262,7 +269,11 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
     #[must_use]
     pub fn stats(&self) -> HarnessStats {
         let total = self.operations.len();
-        let successes = self.operations.iter().filter(|op| op.result.is_ok()).count();
+        let successes = self
+            .operations
+            .iter()
+            .filter(|op| op.result.is_ok())
+            .count();
         let failures = total - successes;
         let total_duration_ms: u64 = self.operations.iter().map(|op| op.duration_ms).sum();
         let avg_duration_ms = if total > 0 {
@@ -270,7 +281,12 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
         } else {
             0
         };
-        let max_duration_ms = self.operations.iter().map(|op| op.duration_ms).max().unwrap_or(0);
+        let max_duration_ms = self
+            .operations
+            .iter()
+            .map(|op| op.duration_ms)
+            .max()
+            .unwrap_or(0);
 
         HarnessStats {
             total_operations: total,

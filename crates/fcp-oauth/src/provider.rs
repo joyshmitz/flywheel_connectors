@@ -272,7 +272,9 @@ mod tests {
 
     #[test]
     fn test_google_config() {
-        let config = OAuthProvider::Google.oauth2_config("client_id", "client_secret").unwrap();
+        let config = OAuthProvider::Google
+            .oauth2_config("client_id", "client_secret")
+            .unwrap();
 
         assert!(config.use_pkce);
         assert_eq!(config.pkce_method, PkceMethod::S256);
@@ -281,7 +283,9 @@ mod tests {
 
     #[test]
     fn test_github_config() {
-        let config = OAuthProvider::GitHub.oauth2_config("client_id", "client_secret").unwrap();
+        let config = OAuthProvider::GitHub
+            .oauth2_config("client_id", "client_secret")
+            .unwrap();
 
         assert!(!config.use_pkce); // GitHub doesn't support PKCE
         assert!(config.authorization_url.contains("github"));
@@ -320,7 +324,10 @@ mod tests {
 
         let config = endpoints.to_oauth2_config("client_id", "client_secret");
 
-        assert_eq!(config.authorization_url, "https://custom.auth.com/authorize");
+        assert_eq!(
+            config.authorization_url,
+            "https://custom.auth.com/authorize"
+        );
         assert_eq!(config.token_url, "https://custom.auth.com/token");
     }
 }

@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 
 use opentelemetry::{
-    global,
+    KeyValue, global,
     trace::{Span, SpanKind, Status, Tracer},
-    KeyValue,
 };
+use rand::Rng;
 
 /// W3C Trace Context header names.
 pub const TRACEPARENT_HEADER: &str = "traceparent";
@@ -130,30 +130,13 @@ fn generate_trace_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
 
-    let random: u64 = rand_u64();
+    let random: u64 = rand::rng().random();
     format!("{:016x}{:016x}", timestamp as u64, random)
 }
 
 /// Generate a random span ID (16 hex chars).
 fn generate_span_id() -> String {
-    format!("{:016x}", rand_u64())
-}
-
-/// Simple random u64 using system time as entropy source.
-fn rand_u64() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let mut hasher = DefaultHasher::new();
-    now.hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    hasher.finish()
+    format!("{:016x}", rand::rng().random::<u64>())
 }
 
 /// FCP operation span builder.
@@ -198,7 +181,8 @@ impl FcpSpan {
     /// Add an attribute.
     #[must_use]
     pub fn attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.attributes.push(KeyValue::new(key.into(), value.into()));
+        self.attributes
+            .push(KeyValue::new(key.into(), value.into()));
         self
     }
 
@@ -353,5 +337,343 @@ mod tests {
 
         let extracted = extract_trace_context(&headers).unwrap();
         assert_eq!(ctx.trace_id, extracted.trace_id);
+    }
+
+    #[test]
+    fn test_trace_context_default() {
+        let ctx = TraceContext::default();
+        assert_eq!(ctx.trace_id.len(), 32);
+        assert_eq!(ctx.parent_span_id.len(), 16);
+        assert_eq!(ctx.trace_flags, 0x01); // Sampled by default
+    }
+
+    #[test]
+    fn test_trace_context_new_generates_unique_ids() {
+        let ctx1 = TraceContext::new();
+        let ctx2 = TraceContext::new();
+
+        // Different contexts should have different trace IDs
+        assert_ne!(ctx1.trace_id, ctx2.trace_id);
+    }
+
+    #[test]
+    fn test_trace_id_format() {
+        let ctx = TraceContext::new();
+        // Trace ID should be 32 hex chars
+        assert_eq!(ctx.trace_id.len(), 32);
+        assert!(ctx.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_span_id_format() {
+        let ctx = TraceContext::new();
+        // Span ID should be 16 hex chars
+        assert_eq!(ctx.parent_span_id.len(), 16);
+        assert!(ctx.parent_span_id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_traceparent_format() {
+        let ctx = TraceContext::new();
+        let traceparent = ctx.to_traceparent();
+
+        // Format: 00-{trace_id}-{span_id}-{flags}
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "00"); // version
+        assert_eq!(parts[1].len(), 32); // trace_id
+        assert_eq!(parts[2].len(), 16); // span_id
+        assert_eq!(parts[3].len(), 2); // flags (hex byte)
+    }
+
+    #[test]
+    fn test_parse_traceparent_invalid_version() {
+        let value = "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_invalid_parts() {
+        // Too few parts
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7";
+        assert!(TraceContext::from_traceparent(value).is_none());
+
+        // Too many parts
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_invalid_trace_id_length() {
+        // Short trace ID
+        let value = "00-4bf92f3577b34da6a3ce929d0e-00f067aa0ba902b7-01";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_invalid_span_id_length() {
+        // Short span ID
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba9-01";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_parse_traceparent_invalid_flags() {
+        // Invalid hex in flags
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz";
+        assert!(TraceContext::from_traceparent(value).is_none());
+    }
+
+    #[test]
+    fn test_is_sampled_true() {
+        let mut ctx = TraceContext::new();
+        ctx.trace_flags = 0x01;
+        assert!(ctx.is_sampled());
+
+        ctx.trace_flags = 0x03; // Multiple flags set including sampled
+        assert!(ctx.is_sampled());
+    }
+
+    #[test]
+    fn test_is_sampled_false() {
+        let mut ctx = TraceContext::new();
+        ctx.trace_flags = 0x00;
+        assert!(!ctx.is_sampled());
+
+        ctx.trace_flags = 0x02; // Other flag, but not sampled
+        assert!(!ctx.is_sampled());
+    }
+
+    #[test]
+    fn test_child_preserves_trace_state() {
+        let mut parent = TraceContext::new();
+        parent.trace_state = Some("vendor=value".to_string());
+
+        let child = parent.child();
+        assert_eq!(child.trace_state, Some("vendor=value".to_string()));
+    }
+
+    #[test]
+    fn test_child_preserves_trace_flags() {
+        let mut parent = TraceContext::new();
+        parent.trace_flags = 0x03;
+
+        let child = parent.child();
+        assert_eq!(child.trace_flags, 0x03);
+    }
+
+    #[test]
+    fn test_inject_with_trace_state() {
+        let mut ctx = TraceContext::new();
+        ctx.trace_state = Some("vendor1=value1,vendor2=value2".to_string());
+
+        let mut headers = HashMap::new();
+        inject_trace_context(&ctx, &mut headers);
+
+        assert!(headers.contains_key(TRACEPARENT_HEADER));
+        assert!(headers.contains_key(TRACESTATE_HEADER));
+        assert_eq!(
+            headers.get(TRACESTATE_HEADER).unwrap(),
+            "vendor1=value1,vendor2=value2"
+        );
+    }
+
+    #[test]
+    fn test_inject_without_trace_state() {
+        let ctx = TraceContext::new(); // No trace_state
+
+        let mut headers = HashMap::new();
+        inject_trace_context(&ctx, &mut headers);
+
+        assert!(headers.contains_key(TRACEPARENT_HEADER));
+        assert!(!headers.contains_key(TRACESTATE_HEADER));
+    }
+
+    #[test]
+    fn test_extract_missing_traceparent() {
+        let headers = HashMap::new();
+        assert!(extract_trace_context(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_invalid_traceparent() {
+        let mut headers = HashMap::new();
+        headers.insert(TRACEPARENT_HEADER.to_string(), "invalid".to_string());
+        assert!(extract_trace_context(&headers).is_none());
+    }
+
+    #[test]
+    fn test_header_constants() {
+        assert_eq!(TRACEPARENT_HEADER, "traceparent");
+        assert_eq!(TRACESTATE_HEADER, "tracestate");
+    }
+
+    #[test]
+    fn test_fcp_span_builder() {
+        let span = FcpSpan::new("test_operation")
+            .connector_id("my-connector")
+            .operation("read")
+            .request_id("req-123");
+
+        // Verify attributes were added
+        assert_eq!(span.name, "test_operation");
+        assert_eq!(span.attributes.len(), 3);
+    }
+
+    #[test]
+    fn test_fcp_span_kind_client() {
+        let span = FcpSpan::new("client_call").client();
+        assert!(matches!(span.kind, SpanKind::Client));
+    }
+
+    #[test]
+    fn test_fcp_span_kind_server() {
+        let span = FcpSpan::new("server_handler").server();
+        assert!(matches!(span.kind, SpanKind::Server));
+    }
+
+    #[test]
+    fn test_fcp_span_kind_internal() {
+        let span = FcpSpan::new("internal_op");
+        assert!(matches!(span.kind, SpanKind::Internal));
+    }
+
+    #[test]
+    fn test_fcp_span_kind_explicit() {
+        let span = FcpSpan::new("custom").kind(SpanKind::Producer);
+        assert!(matches!(span.kind, SpanKind::Producer));
+    }
+
+    #[test]
+    fn test_fcp_span_custom_attribute() {
+        let span = FcpSpan::new("test")
+            .attribute("custom_key", "custom_value")
+            .attribute("another_key", "another_value");
+
+        assert_eq!(span.attributes.len(), 2);
+    }
+
+    #[test]
+    fn test_fcp_span_start() {
+        let span = FcpSpan::new("test_span")
+            .connector_id("test")
+            .operation("read");
+
+        // Start should return a SpanGuard
+        let _guard = span.start();
+    }
+
+    #[test]
+    fn test_span_guard_set_attribute() {
+        let span = FcpSpan::new("test_span");
+        let mut guard = span.start();
+
+        // Should not panic
+        guard.set_attribute("dynamic_key", "dynamic_value");
+    }
+
+    #[test]
+    fn test_span_guard_record_error() {
+        let span = FcpSpan::new("test_span");
+        let mut guard = span.start();
+
+        // Should not panic
+        guard.record_error("Something went wrong");
+    }
+
+    #[test]
+    fn test_span_guard_set_ok() {
+        let span = FcpSpan::new("test_span");
+        let mut guard = span.start();
+
+        // Should not panic
+        guard.set_ok();
+    }
+
+    #[test]
+    fn test_span_guard_drop() {
+        {
+            let span = FcpSpan::new("drop_test");
+            let _guard = span.start();
+            // Guard is dropped here
+        }
+        // If we reach here without panic, drop worked
+    }
+
+    #[test]
+    fn test_trace_context_clone() {
+        let ctx = TraceContext {
+            trace_id: "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
+            parent_span_id: "00f067aa0ba902b7".to_string(),
+            trace_flags: 0x01,
+            trace_state: Some("key=value".to_string()),
+        };
+
+        let cloned = ctx.clone();
+        assert_eq!(ctx.trace_id, cloned.trace_id);
+        assert_eq!(ctx.parent_span_id, cloned.parent_span_id);
+        assert_eq!(ctx.trace_flags, cloned.trace_flags);
+        assert_eq!(ctx.trace_state, cloned.trace_state);
+    }
+
+    #[test]
+    fn test_trace_context_debug() {
+        let ctx = TraceContext::new();
+        let debug_str = format!("{ctx:?}");
+        assert!(debug_str.contains("TraceContext"));
+        assert!(debug_str.contains("trace_id"));
+    }
+
+    #[test]
+    fn test_multiple_child_contexts() {
+        let parent = TraceContext::new();
+        let child1 = parent.child();
+        let child2 = parent.child();
+
+        // Children should have same trace_id as parent
+        assert_eq!(child1.trace_id, parent.trace_id);
+        assert_eq!(child2.trace_id, parent.trace_id);
+
+        // But different span IDs from each other
+        assert_ne!(child1.parent_span_id, child2.parent_span_id);
+    }
+
+    #[test]
+    fn test_grandchild_context() {
+        let parent = TraceContext::new();
+        let child = parent.child();
+        let grandchild = child.child();
+
+        // All should have same trace_id
+        assert_eq!(parent.trace_id, grandchild.trace_id);
+
+        // Grandchild should have different span_id from both parent and child
+        assert_ne!(grandchild.parent_span_id, parent.parent_span_id);
+        assert_ne!(grandchild.parent_span_id, child.parent_span_id);
+    }
+
+    #[test]
+    fn test_w3c_traceparent_example_unsampled() {
+        let value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00";
+        let ctx = TraceContext::from_traceparent(value).unwrap();
+
+        assert_eq!(ctx.trace_flags, 0x00);
+        assert!(!ctx.is_sampled());
+    }
+
+    #[test]
+    fn test_roundtrip_with_all_fields() {
+        let mut original = TraceContext::new();
+        original.trace_state = Some("vendor=data".to_string());
+
+        let mut headers = HashMap::new();
+        inject_trace_context(&original, &mut headers);
+
+        let extracted = extract_trace_context(&headers).unwrap();
+
+        assert_eq!(original.trace_id, extracted.trace_id);
+        assert_eq!(original.parent_span_id, extracted.parent_span_id);
+        assert_eq!(original.trace_flags, extracted.trace_flags);
+        // Note: extract doesn't preserve trace_state as it's not in traceparent
     }
 }

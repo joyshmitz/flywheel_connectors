@@ -11,13 +11,13 @@ use fcp_core::{CapabilityToken, ConnectorId, HealthSnapshot};
 /// Create a test connector ID.
 #[must_use]
 pub fn test_connector_id() -> ConnectorId {
-    ConnectorId::new("test-connector", "test", "1.0.0")
+    ConnectorId::new("test-connector", "test", "1.0.0").expect("valid connector id")
 }
 
 /// Create a connector ID with custom values.
 #[must_use]
 pub fn connector_id(name: &str, archetype: &str, version: &str) -> ConnectorId {
-    ConnectorId::new(name, archetype, version)
+    ConnectorId::new(name, archetype, version).expect("valid connector id")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,7 +85,11 @@ pub mod json {
 
     /// Paginated response.
     #[must_use]
-    pub fn paginated<T: serde::Serialize>(items: Vec<T>, total: usize, page: usize) -> serde_json::Value {
+    pub fn paginated<T: serde::Serialize>(
+        items: Vec<T>,
+        total: usize,
+        page: usize,
+    ) -> serde_json::Value {
         json!({
             "items": items,
             "total": total,
@@ -186,7 +190,13 @@ pub mod config {
 
     /// Database configuration.
     #[must_use]
-    pub fn database(host: &str, port: u16, database: &str, user: &str, password: &str) -> serde_json::Value {
+    pub fn database(
+        host: &str,
+        port: u16,
+        database: &str,
+        user: &str,
+        password: &str,
+    ) -> serde_json::Value {
         json!({
             "host": host,
             "port": port,

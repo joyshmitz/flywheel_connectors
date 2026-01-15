@@ -358,13 +358,15 @@ impl OAuth2Client {
             .await?;
 
         if !response.status().is_success() {
-            let error: TokenErrorResponse = response.json().await.unwrap_or_else(|_| {
-                TokenErrorResponse {
-                    error: "unknown_error".to_string(),
-                    error_description: None,
-                    error_uri: None,
-                }
-            });
+            let error: TokenErrorResponse =
+                response
+                    .json()
+                    .await
+                    .unwrap_or_else(|_| TokenErrorResponse {
+                        error: "unknown_error".to_string(),
+                        error_description: None,
+                        error_uri: None,
+                    });
 
             return Err(OAuthError::TokenExchangeFailed(format!(
                 "{}: {}",
@@ -455,10 +457,9 @@ impl AuthorizationCallback {
 
 /// Generate a cryptographically random state parameter.
 fn generate_state() -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    use rand::Rng;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
-    let bytes: Vec<u8> = (0..32).map(|_| rand::thread_rng().r#gen()).collect();
+    let bytes: Vec<u8> = (0..32).map(|_| rand::random()).collect();
     URL_SAFE_NO_PAD.encode(bytes)
 }
 

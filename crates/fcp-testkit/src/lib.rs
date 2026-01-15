@@ -45,18 +45,16 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+mod assertions;
+pub mod fixtures;
 mod harness;
 mod mock_server;
-pub mod fixtures;
-mod assertions;
 mod tracing_config;
 
+pub use assertions::*;
 pub use harness::*;
 pub use mock_server::*;
-pub use assertions::*;
 pub use tracing_config::*;
 
 // Re-export core types for convenience
-pub use fcp_core::{
-    FcpConnector, FcpError, FcpResult, HealthSnapshot, HealthState,
-};
+pub use fcp_core::{FcpConnector, FcpError, FcpResult, HealthSnapshot, HealthState};

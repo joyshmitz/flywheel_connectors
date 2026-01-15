@@ -28,17 +28,19 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-mod token_bucket;
-mod sliding_window;
-mod leaky_bucket;
-mod headers;
 mod backoff;
+mod fcp;
+mod headers;
+mod leaky_bucket;
+mod sliding_window;
+mod token_bucket;
 
-pub use token_bucket::*;
-pub use sliding_window::*;
-pub use leaky_bucket::*;
-pub use headers::*;
 pub use backoff::*;
+pub use fcp::*;
+pub use headers::*;
+pub use leaky_bucket::*;
+pub use sliding_window::*;
+pub use token_bucket::*;
 
 use std::time::Duration;
 
@@ -51,6 +53,18 @@ pub trait RateLimiter: Send + Sync {
     ///
     /// Returns `true` if the request is allowed, `false` if rate limited.
     async fn try_acquire(&self) -> bool;
+
+    /// Try to acquire multiple permits atomically.
+    ///
+    /// The default implementation is conservative: it only supports `permits == 1`. Limiters
+    /// that support quota/token-style accounting (e.g. token buckets) SHOULD override this.
+    async fn try_acquire_n(&self, permits: u32) -> bool {
+        if permits == 1 {
+            self.try_acquire().await
+        } else {
+            false
+        }
+    }
 
     /// Acquire a permit, waiting if necessary.
     ///

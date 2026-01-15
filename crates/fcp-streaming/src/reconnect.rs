@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use crate::{StreamError, StreamResult, DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY};
+use crate::{DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY, StreamError, StreamResult};
 
 /// Reconnection configuration.
 #[derive(Debug, Clone)]
@@ -115,7 +115,10 @@ impl ReconnectHandler {
     /// Create a new reconnection handler.
     #[must_use]
     pub fn new(config: ReconnectConfig) -> Self {
-        Self { config, attempts: 0 }
+        Self {
+            config,
+            attempts: 0,
+        }
     }
 
     /// Reset the reconnection state.
@@ -198,10 +201,7 @@ impl ReconnectHandler {
 }
 
 /// Execute an operation with automatic retry.
-pub async fn with_retry<T, F, Fut>(
-    config: ReconnectConfig,
-    mut operation: F,
-) -> StreamResult<T>
+pub async fn with_retry<T, F, Fut>(config: ReconnectConfig, mut operation: F) -> StreamResult<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = StreamResult<T>>,
@@ -212,21 +212,7 @@ where
 
 /// Simple random float generator (0.0 to 1.0).
 fn random_float() -> f64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let mut hasher = DefaultHasher::new();
-    now.hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-
-    let hash = hasher.finish();
-    (hash as f64) / (u64::MAX as f64)
+    rand::random()
 }
 
 #[cfg(test)]

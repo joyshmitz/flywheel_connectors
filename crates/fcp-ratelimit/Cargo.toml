@@ -34,5 +34,8 @@ thiserror.workspace = true
 # Logging
 tracing.workspace = true
 
+# Randomness
+rand = "0.9"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

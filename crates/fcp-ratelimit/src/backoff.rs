@@ -315,21 +315,7 @@ impl Default for RetryConfig {
 
 /// Simple random float generator (0.0 to 1.0).
 fn random_float() -> f64 {
-    use std::hash::{Hash, Hasher};
-    use std::collections::hash_map::DefaultHasher;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let mut hasher = DefaultHasher::new();
-    now.hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-
-    let hash = hasher.finish();
-    (hash as f64) / (u64::MAX as f64)
+    rand::random()
 }
 
 #[cfg(test)]
@@ -338,10 +324,8 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff() {
-        let mut backoff = ExponentialBackoff::new(
-            Duration::from_secs(1),
-            Duration::from_secs(60),
-        ).with_jitter(false);
+        let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60))
+            .with_jitter(false);
 
         assert_eq!(backoff.next_backoff(0), Duration::from_secs(1));
         assert_eq!(backoff.next_backoff(1), Duration::from_secs(2));

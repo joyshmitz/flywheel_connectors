@@ -56,8 +56,8 @@ impl HmacSha256Verifier {
     /// Compute signature for a payload.
     #[must_use]
     pub fn compute(&self, payload: &[u8]) -> String {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.secret)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
         mac.update(payload);
         hex::encode(mac.finalize().into_bytes())
     }
@@ -112,8 +112,8 @@ impl HmacSha1Verifier {
     /// Compute signature for a payload.
     #[must_use]
     pub fn compute(&self, payload: &[u8]) -> String {
-        let mut mac = Hmac::<Sha1>::new_from_slice(&self.secret)
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            Hmac::<Sha1>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
         mac.update(payload);
         hex::encode(mac.finalize().into_bytes())
     }
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_ed25519_verify() {
-        use ed25519_dalek::{SigningKey, Signer};
+        use ed25519_dalek::{Signer, SigningKey};
 
         // Generate a key pair for testing
         let signing_key = SigningKey::from_bytes(&[

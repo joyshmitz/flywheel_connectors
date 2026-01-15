@@ -36,7 +36,11 @@ pub struct WebhookEvent {
 impl WebhookEvent {
     /// Create a new webhook event.
     #[must_use]
-    pub fn new(id: impl Into<String>, event_type: impl Into<String>, provider: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        event_type: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             event_type: event_type.into(),
@@ -225,16 +229,15 @@ mod tests {
     use super::*;
 
     fn test_event() -> WebhookEvent {
-        WebhookEvent::new("evt_123", "push", "github")
-            .with_payload(serde_json::json!({
-                "ref": "refs/heads/main",
-                "repository": {
-                    "name": "test-repo",
-                    "owner": {
-                        "login": "user"
-                    }
+        WebhookEvent::new("evt_123", "push", "github").with_payload(serde_json::json!({
+            "ref": "refs/heads/main",
+            "repository": {
+                "name": "test-repo",
+                "owner": {
+                    "login": "user"
                 }
-            }))
+            }
+        }))
     }
 
     #[test]

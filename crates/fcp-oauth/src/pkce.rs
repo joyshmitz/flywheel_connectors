@@ -3,8 +3,7 @@
 //! PKCE is an extension to OAuth 2.0 that prevents authorization code
 //! interception attacks.
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::Rng;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
 use crate::OAuthError;
@@ -112,8 +111,7 @@ impl Pkce {
 
     /// Generate a cryptographically random verifier.
     fn generate_verifier() -> String {
-        let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..32).map(|_| rng.r#gen()).collect();
+        let bytes: Vec<u8> = (0..32).map(|_| rand::random()).collect();
         URL_SAFE_NO_PAD.encode(bytes)
     }
 
@@ -169,7 +167,10 @@ mod tests {
 
         assert_eq!(pkce.verifier(), verifier);
         // Known challenge for this verifier
-        assert_eq!(pkce.challenge(), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        assert_eq!(
+            pkce.challenge(),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]

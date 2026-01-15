@@ -10,7 +10,7 @@ use std::time::Duration;
 use futures_util::stream::Stream;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::Url;
 
 use crate::{StreamError, StreamResult};
@@ -113,8 +113,8 @@ impl From<WsMessage> for Message {
             WsMessage::Ping(b) => Message::Ping(b.into()),
             WsMessage::Pong(b) => Message::Pong(b.into()),
             WsMessage::Close(frame) => {
-                use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
                 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+                use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
                 Message::Close(frame.map(|f| CloseFrame {
                     code: CloseCode::from(f.code),
                     reason: f.reason.into(),
@@ -265,19 +265,16 @@ impl WsClient {
         let url = Url::parse(&self.url)
             .map_err(|e: url::ParseError| StreamError::ConnectionFailed(e.to_string()))?;
 
-        let connect_result = tokio::time::timeout(
-            self.config.connect_timeout,
-            connect_async(url.as_str()),
-        )
-        .await;
+        let connect_result =
+            tokio::time::timeout(self.config.connect_timeout, connect_async(url.as_str())).await;
 
         let ws_result = match connect_result {
             Ok(result) => result,
             Err(_) => return Err(StreamError::Timeout(self.config.connect_timeout)),
         };
 
-        let (ws_stream, _response) = ws_result
-            .map_err(|e: tokio_tungstenite::tungstenite::Error| {
+        let (ws_stream, _response) =
+            ws_result.map_err(|e: tokio_tungstenite::tungstenite::Error| {
                 StreamError::WebSocketError(e.to_string())
             })?;
 
@@ -341,8 +338,8 @@ impl WsConnection {
 
     /// Send JSON data.
     pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> StreamResult<()> {
-        let json = serde_json::to_string(data)
-            .map_err(|e| StreamError::ParseError(e.to_string()))?;
+        let json =
+            serde_json::to_string(data).map_err(|e| StreamError::ParseError(e.to_string()))?;
         self.send_text(json).await
     }
 

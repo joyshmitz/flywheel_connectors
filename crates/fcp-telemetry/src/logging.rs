@@ -1,17 +1,17 @@
 //! Structured logging with JSON output and sensitive data redaction.
 
 use tracing_subscriber::{
+    EnvFilter,
     fmt::{self, format::FmtSpan},
     prelude::*,
-    EnvFilter,
 };
 
 use crate::{TelemetryConfig, TelemetryError};
 
 /// Initialize the logging subsystem.
 pub(crate) fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
     let subscriber = tracing_subscriber::registry().with(env_filter);
 
@@ -54,8 +54,14 @@ pub fn redact_sensitive(value: &serde_json::Value, fields: &[String]) -> serde_j
         serde_json::Value::Object(map) => {
             let mut result = serde_json::Map::new();
             for (key, val) in map {
-                if fields.iter().any(|f| key.to_lowercase().contains(&f.to_lowercase())) {
-                    result.insert(key.clone(), serde_json::Value::String("[REDACTED]".to_string()));
+                if fields
+                    .iter()
+                    .any(|f| key.to_lowercase().contains(&f.to_lowercase()))
+                {
+                    result.insert(
+                        key.clone(),
+                        serde_json::Value::String("[REDACTED]".to_string()),
+                    );
                 } else {
                     result.insert(key.clone(), redact_sensitive(val, fields));
                 }
@@ -148,11 +154,14 @@ mod tests {
             }
         });
 
-        let redacted = redact_sensitive(&value, &[
-            "password".to_string(),
-            "api_key".to_string(),
-            "token".to_string(),
-        ]);
+        let redacted = redact_sensitive(
+            &value,
+            &[
+                "password".to_string(),
+                "api_key".to_string(),
+                "token".to_string(),
+            ],
+        );
 
         assert_eq!(redacted["user"], "john");
         assert_eq!(redacted["password"], "[REDACTED]");
@@ -176,5 +185,237 @@ mod tests {
         assert_eq!(redacted["users"][0]["password"], "[REDACTED]");
         assert_eq!(redacted["users"][1]["name"], "jane");
         assert_eq!(redacted["users"][1]["password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_case_insensitive() {
+        let value = json!({
+            "PASSWORD": "secret1",
+            "Password": "secret2",
+            "password": "secret3",
+            "user_password": "secret4"
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        // All variations should be redacted due to case-insensitive contains check
+        assert_eq!(redacted["PASSWORD"], "[REDACTED]");
+        assert_eq!(redacted["Password"], "[REDACTED]");
+        assert_eq!(redacted["password"], "[REDACTED]");
+        assert_eq!(redacted["user_password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_partial_match() {
+        let value = json!({
+            "api_key_id": "key-123",
+            "secret_token": "tok-456",
+            "authorization_header": "Bearer xyz"
+        });
+
+        let redacted = redact_sensitive(
+            &value,
+            &[
+                "key".to_string(),
+                "token".to_string(),
+                "authorization".to_string(),
+            ],
+        );
+
+        assert_eq!(redacted["api_key_id"], "[REDACTED]");
+        assert_eq!(redacted["secret_token"], "[REDACTED]");
+        assert_eq!(redacted["authorization_header"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_deeply_nested() {
+        let value = json!({
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "level4": {
+                            "password": "deep-secret"
+                        }
+                    }
+                }
+            }
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(
+            redacted["level1"]["level2"]["level3"]["level4"]["password"],
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn test_redact_array_of_arrays() {
+        let value = json!({
+            "matrix": [
+                [{"password": "p1"}, {"password": "p2"}],
+                [{"password": "p3"}, {"safe": "data"}]
+            ]
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted["matrix"][0][0]["password"], "[REDACTED]");
+        assert_eq!(redacted["matrix"][0][1]["password"], "[REDACTED]");
+        assert_eq!(redacted["matrix"][1][0]["password"], "[REDACTED]");
+        assert_eq!(redacted["matrix"][1][1]["safe"], "data");
+    }
+
+    #[test]
+    fn test_redact_preserves_primitives() {
+        let value = json!({
+            "string": "hello",
+            "number": 42,
+            "float": 1.234,
+            "boolean": true,
+            "null_value": null
+        });
+
+        let redacted = redact_sensitive(&value, &["nonexistent".to_string()]);
+
+        assert_eq!(redacted["string"], "hello");
+        assert_eq!(redacted["number"], 42);
+        assert_eq!(redacted["float"], 1.234);
+        assert_eq!(redacted["boolean"], true);
+        assert!(redacted["null_value"].is_null());
+    }
+
+    #[test]
+    fn test_redact_empty_object() {
+        let value = json!({});
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted, json!({}));
+    }
+
+    #[test]
+    fn test_redact_empty_array() {
+        let value = json!([]);
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted, json!([]));
+    }
+
+    #[test]
+    fn test_redact_no_fields() {
+        let value = json!({"safe": "data", "also_safe": "more data"});
+        let redacted = redact_sensitive(&value, &[]);
+        assert_eq!(redacted["safe"], "data");
+        assert_eq!(redacted["also_safe"], "more data");
+    }
+
+    #[test]
+    fn test_redact_multiple_sensitive_fields() {
+        let value = json!({
+            "credentials": {
+                "password": "pass123",
+                "api_key": "key456",
+                "secret": "sec789",
+                "token": "tok012",
+                "authorization": "auth345"
+            }
+        });
+
+        let redacted = redact_sensitive(
+            &value,
+            &[
+                "password".to_string(),
+                "api_key".to_string(),
+                "secret".to_string(),
+                "token".to_string(),
+                "authorization".to_string(),
+            ],
+        );
+
+        assert_eq!(redacted["credentials"]["password"], "[REDACTED]");
+        assert_eq!(redacted["credentials"]["api_key"], "[REDACTED]");
+        assert_eq!(redacted["credentials"]["secret"], "[REDACTED]");
+        assert_eq!(redacted["credentials"]["token"], "[REDACTED]");
+        assert_eq!(redacted["credentials"]["authorization"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_primitive_value() {
+        // Redacting a primitive should return it unchanged
+        let value = json!("just a string");
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted, "just a string");
+
+        let number = json!(42);
+        let redacted_num = redact_sensitive(&number, &["password".to_string()]);
+        assert_eq!(redacted_num, 42);
+    }
+
+    #[test]
+    fn test_redact_array_of_primitives() {
+        let value = json!(["one", "two", "three"]);
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+        assert_eq!(redacted, json!(["one", "two", "three"]));
+    }
+
+    #[test]
+    fn test_redact_mixed_array() {
+        let value = json!([
+            "string",
+            42,
+            {"password": "secret"},
+            null,
+            true
+        ]);
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted[0], "string");
+        assert_eq!(redacted[1], 42);
+        assert_eq!(redacted[2]["password"], "[REDACTED]");
+        assert!(redacted[3].is_null());
+        assert_eq!(redacted[4], true);
+    }
+
+    #[test]
+    fn test_redact_fcp_standard_fields() {
+        // Test with the default FCP redaction fields
+        let fcp_redact_fields = vec![
+            "password".to_string(),
+            "api_key".to_string(),
+            "secret".to_string(),
+            "token".to_string(),
+            "authorization".to_string(),
+        ];
+
+        let value = json!({
+            "request": {
+                "headers": {
+                    "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+                },
+                "body": {
+                    "user": "admin",
+                    "password": "admin123",
+                    "api_key": "sk-1234567890"
+                }
+            },
+            "response": {
+                "access_token": "at_abc123",
+                "refresh_token": "rt_xyz789"
+            }
+        });
+
+        let redacted = redact_sensitive(&value, &fcp_redact_fields);
+
+        // Headers with Authorization
+        assert_eq!(
+            redacted["request"]["headers"]["Authorization"],
+            "[REDACTED]"
+        );
+        // Body fields
+        assert_eq!(redacted["request"]["body"]["user"], "admin");
+        assert_eq!(redacted["request"]["body"]["password"], "[REDACTED]");
+        assert_eq!(redacted["request"]["body"]["api_key"], "[REDACTED]");
+        // Response tokens
+        assert_eq!(redacted["response"]["access_token"], "[REDACTED]");
+        assert_eq!(redacted["response"]["refresh_token"], "[REDACTED]");
     }
 }

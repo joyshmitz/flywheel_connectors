@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures_util::stream::Stream;
 use pin_project_lite::pin_project;
-use tokio::time::{sleep, Sleep};
+use tokio::time::{Sleep, sleep};
 
 use crate::{StreamError, StreamResult};
 
@@ -31,7 +31,6 @@ pub trait StreamExt: Stream {
     {
         BatchStream::new(self, max_size, max_wait)
     }
-
 }
 
 impl<S: Stream> StreamExt for S {}
@@ -195,7 +194,10 @@ pub struct CountingStream<S> {
 impl<S> CountingStream<S> {
     /// Create a new counting stream.
     pub fn new(inner: S) -> Self {
-        Self { inner, items_count: 0 }
+        Self {
+            inner,
+            items_count: 0,
+        }
     }
 
     /// Get the current count of processed items.

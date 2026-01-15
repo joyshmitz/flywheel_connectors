@@ -81,10 +81,14 @@ impl RateLimitHeaders {
 
         // GitHub secondary rate limits
         if let Some(used) = parse_header_u32(headers, "x-ratelimit-used") {
-            result.provider_info.insert("used".to_string(), used.to_string());
+            result
+                .provider_info
+                .insert("used".to_string(), used.to_string());
         }
         if let Some(resource) = headers.get("x-ratelimit-resource") {
-            result.provider_info.insert("resource".to_string(), resource.clone());
+            result
+                .provider_info
+                .insert("resource".to_string(), resource.clone());
         }
 
         result
@@ -96,8 +100,12 @@ impl RateLimitHeaders {
         let mut result = Self::parse(headers);
 
         // Twitter uses x-rate-limit-* headers
-        result.limit = result.limit.or_else(|| parse_header_u32(headers, "x-rate-limit-limit"));
-        result.remaining = result.remaining.or_else(|| parse_header_u32(headers, "x-rate-limit-remaining"));
+        result.limit = result
+            .limit
+            .or_else(|| parse_header_u32(headers, "x-rate-limit-limit"));
+        result.remaining = result
+            .remaining
+            .or_else(|| parse_header_u32(headers, "x-rate-limit-remaining"));
 
         if let Some(reset) = parse_header_u64(headers, "x-rate-limit-reset") {
             result.reset_at = Some(reset);
@@ -119,7 +127,9 @@ impl RateLimitHeaders {
 
         // Stripe uses different header naming
         if let Some(request_id) = headers.get("request-id") {
-            result.provider_info.insert("request_id".to_string(), request_id.clone());
+            result
+                .provider_info
+                .insert("request_id".to_string(), request_id.clone());
         }
 
         result
@@ -134,16 +144,22 @@ impl RateLimitHeaders {
         if let Some(limit_requests) = parse_header_u32(headers, "x-ratelimit-limit-requests") {
             result.limit = Some(limit_requests);
         }
-        if let Some(remaining_requests) = parse_header_u32(headers, "x-ratelimit-remaining-requests") {
+        if let Some(remaining_requests) =
+            parse_header_u32(headers, "x-ratelimit-remaining-requests")
+        {
             result.remaining = Some(remaining_requests);
         }
 
         // Token limits (for LLM APIs)
         if let Some(limit_tokens) = parse_header_u32(headers, "x-ratelimit-limit-tokens") {
-            result.provider_info.insert("limit_tokens".to_string(), limit_tokens.to_string());
+            result
+                .provider_info
+                .insert("limit_tokens".to_string(), limit_tokens.to_string());
         }
         if let Some(remaining_tokens) = parse_header_u32(headers, "x-ratelimit-remaining-tokens") {
-            result.provider_info.insert("remaining_tokens".to_string(), remaining_tokens.to_string());
+            result
+                .provider_info
+                .insert("remaining_tokens".to_string(), remaining_tokens.to_string());
         }
 
         // Reset times
@@ -162,24 +178,36 @@ impl RateLimitHeaders {
         let mut result = Self::parse(headers);
 
         // Anthropic uses similar headers to OpenAI
-        if let Some(limit_requests) = parse_header_u32(headers, "anthropic-ratelimit-requests-limit") {
+        if let Some(limit_requests) =
+            parse_header_u32(headers, "anthropic-ratelimit-requests-limit")
+        {
             result.limit = Some(limit_requests);
         }
-        if let Some(remaining_requests) = parse_header_u32(headers, "anthropic-ratelimit-requests-remaining") {
+        if let Some(remaining_requests) =
+            parse_header_u32(headers, "anthropic-ratelimit-requests-remaining")
+        {
             result.remaining = Some(remaining_requests);
         }
 
         // Token limits
         if let Some(limit_tokens) = parse_header_u32(headers, "anthropic-ratelimit-tokens-limit") {
-            result.provider_info.insert("limit_tokens".to_string(), limit_tokens.to_string());
+            result
+                .provider_info
+                .insert("limit_tokens".to_string(), limit_tokens.to_string());
         }
-        if let Some(remaining_tokens) = parse_header_u32(headers, "anthropic-ratelimit-tokens-remaining") {
-            result.provider_info.insert("remaining_tokens".to_string(), remaining_tokens.to_string());
+        if let Some(remaining_tokens) =
+            parse_header_u32(headers, "anthropic-ratelimit-tokens-remaining")
+        {
+            result
+                .provider_info
+                .insert("remaining_tokens".to_string(), remaining_tokens.to_string());
         }
 
         // Reset time
         if let Some(reset) = headers.get("anthropic-ratelimit-requests-reset") {
-            result.provider_info.insert("reset_time".to_string(), reset.clone());
+            result
+                .provider_info
+                .insert("reset_time".to_string(), reset.clone());
         }
 
         result
@@ -318,22 +346,37 @@ mod tests {
     fn test_parse_openai_headers() {
         let mut headers = HashMap::new();
         headers.insert("x-ratelimit-limit-requests".to_string(), "60".to_string());
-        headers.insert("x-ratelimit-remaining-requests".to_string(), "59".to_string());
+        headers.insert(
+            "x-ratelimit-remaining-requests".to_string(),
+            "59".to_string(),
+        );
         headers.insert("x-ratelimit-limit-tokens".to_string(), "150000".to_string());
-        headers.insert("x-ratelimit-remaining-tokens".to_string(), "149000".to_string());
+        headers.insert(
+            "x-ratelimit-remaining-tokens".to_string(),
+            "149000".to_string(),
+        );
 
         let parsed = RateLimitHeaders::parse_openai(&headers);
 
         assert_eq!(parsed.limit, Some(60));
         assert_eq!(parsed.remaining, Some(59));
-        assert_eq!(parsed.provider_info.get("limit_tokens"), Some(&"150000".to_string()));
+        assert_eq!(
+            parsed.provider_info.get("limit_tokens"),
+            Some(&"150000".to_string())
+        );
     }
 
     #[test]
     fn test_parse_duration_string() {
         assert_eq!(parse_duration_string("30"), Some(Duration::from_secs(30)));
-        assert_eq!(parse_duration_string("500ms"), Some(Duration::from_millis(500)));
-        assert_eq!(parse_duration_string("1.5s"), Some(Duration::from_secs_f64(1.5)));
+        assert_eq!(
+            parse_duration_string("500ms"),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_duration_string("1.5s"),
+            Some(Duration::from_secs_f64(1.5))
+        );
         assert_eq!(parse_duration_string("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse_duration_string("2h"), Some(Duration::from_secs(7200)));
     }

@@ -115,6 +115,38 @@ impl TokenBucket {
         }
     }
 
+    /// Try to consume `amount` tokens atomically.
+    fn try_consume(&self, amount: u32) -> bool {
+        if amount == 0 {
+            return true;
+        }
+        if amount > self.capacity {
+            return false;
+        }
+
+        self.refill();
+
+        loop {
+            let current = self.tokens.load(Ordering::Acquire);
+            if current < amount {
+                return false;
+            }
+
+            if self
+                .tokens
+                .compare_exchange(
+                    current,
+                    current - amount,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
     /// Calculate time until next token is available.
     fn time_until_token(&self) -> Duration {
         let last_refill = *self.last_refill.lock();
@@ -131,23 +163,11 @@ impl TokenBucket {
 #[async_trait]
 impl RateLimiter for TokenBucket {
     async fn try_acquire(&self) -> bool {
-        self.refill();
+        self.try_consume(1)
+    }
 
-        // Try to consume a token
-        loop {
-            let current = self.tokens.load(Ordering::Acquire);
-            if current == 0 {
-                return false;
-            }
-
-            if self
-                .tokens
-                .compare_exchange(current, current - 1, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                return true;
-            }
-        }
+    async fn try_acquire_n(&self, permits: u32) -> bool {
+        self.try_consume(permits)
     }
 
     async fn acquire(&self, max_wait: Duration) -> Result<Duration, RateLimitError> {
@@ -264,5 +284,18 @@ mod tests {
         // Second request should wait
         let waited = limiter.acquire(Duration::from_secs(1)).await.unwrap();
         assert!(waited >= Duration::from_millis(40));
+    }
+
+    #[tokio::test]
+    async fn test_token_bucket_try_acquire_n_is_atomic() {
+        let limiter = TokenBucket::new(2, Duration::from_secs(1));
+
+        // Cannot atomically take 3 tokens from a bucket of 2; must not partially consume.
+        assert!(!limiter.try_acquire_n(3).await);
+        assert_eq!(limiter.remaining(), 2);
+
+        // Taking 2 works.
+        assert!(limiter.try_acquire_n(2).await);
+        assert_eq!(limiter.remaining(), 0);
     }
 }

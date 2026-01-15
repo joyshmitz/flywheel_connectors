@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use crate::{
-    DeliveryStatus, EventSubscription, SignatureVerifier, WebhookError, WebhookEvent,
-    WebhookResult, DEFAULT_MAX_PAYLOAD_SIZE,
+    DEFAULT_MAX_PAYLOAD_SIZE, DeliveryStatus, EventSubscription, SignatureVerifier, WebhookError,
+    WebhookEvent, WebhookResult,
 };
 
 /// Webhook handler configuration.

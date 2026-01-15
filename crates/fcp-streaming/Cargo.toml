@@ -1,10 +1,15 @@
 [package]
 name = "fcp-streaming"
-version = "0.1.0"
-edition = "2021"
 description = "Unified streaming library for FCP connectors"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/anthropics/fcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 fcp-core = { path = "../fcp-core" }
@@ -35,6 +40,7 @@ tracing.workspace = true
 bytes.workspace = true
 pin-project-lite = "0.2"
 url = "2.5"
+rand = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -123,10 +123,7 @@ pub fn assert_unhealthy(snapshot: &HealthSnapshot) {
 ///
 /// Panics if result is null.
 pub fn assert_has_result(response: &InvokeResponse) {
-    assert!(
-        !response.result.is_null(),
-        "Expected result but got null"
-    );
+    assert!(!response.result.is_null(), "Expected result but got null");
 }
 
 /// Assert that an invoke response has a null result.
@@ -161,8 +158,15 @@ pub fn assert_result_has_field(response: &InvokeResponse, field: &str) {
 /// # Panics
 ///
 /// Panics if the field doesn't match.
-pub fn assert_result_field_eq(response: &InvokeResponse, field: &str, expected: &serde_json::Value) {
-    let actual = response.result.get(field).unwrap_or(&serde_json::Value::Null);
+pub fn assert_result_field_eq(
+    response: &InvokeResponse,
+    field: &str,
+    expected: &serde_json::Value,
+) {
+    let actual = response
+        .result
+        .get(field)
+        .unwrap_or(&serde_json::Value::Null);
     assert_eq!(
         actual, expected,
         "Expected field '{}' to equal {:?} but got {:?}",
@@ -186,7 +190,10 @@ pub fn assert_json_has(value: &serde_json::Value, path: &str) {
     for part in &parts {
         match current.get(*part) {
             Some(v) => current = v,
-            None => panic!("Missing field '{}' in path '{}'. JSON: {:?}", part, path, value),
+            None => panic!(
+                "Missing field '{}' in path '{}'. JSON: {:?}",
+                part, path, value
+            ),
         }
     }
 }
@@ -198,7 +205,8 @@ pub fn assert_json_has(value: &serde_json::Value, path: &str) {
 /// Panics if values don't match.
 pub fn assert_json_eq(actual: &serde_json::Value, expected: &serde_json::Value) {
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "JSON values don't match.\nExpected: {}\nActual: {}",
         serde_json::to_string_pretty(expected).unwrap_or_default(),
         serde_json::to_string_pretty(actual).unwrap_or_default()

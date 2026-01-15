@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::{OAuthError, OAuthResult, DEFAULT_REFRESH_THRESHOLD};
+use crate::{DEFAULT_REFRESH_THRESHOLD, OAuthError, OAuthResult};
 
 /// OAuth token response from provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,8 +136,8 @@ impl OAuthTokens {
         self.expires_at
             .map(|exp| {
                 // Use saturating conversion to avoid panic on extreme durations
-                let threshold_chrono = chrono::Duration::from_std(threshold)
-                    .unwrap_or(chrono::TimeDelta::MAX);
+                let threshold_chrono =
+                    chrono::Duration::from_std(threshold).unwrap_or(chrono::TimeDelta::MAX);
                 let threshold_time = Utc::now() + threshold_chrono;
                 threshold_time >= exp
             })
@@ -268,7 +268,9 @@ impl TokenStore {
     #[must_use]
     pub fn get_with_metadata(&self, key: &str) -> Option<(OAuthTokens, HashMap<String, String>)> {
         let store = self.tokens.read();
-        store.get(key).map(|s| (s.tokens.clone(), s.metadata.clone()))
+        store
+            .get(key)
+            .map(|s| (s.tokens.clone(), s.metadata.clone()))
     }
 
     /// Check if tokens exist and are valid.

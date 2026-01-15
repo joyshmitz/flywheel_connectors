@@ -6,9 +6,8 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use metrics::{
-    counter, gauge, histogram,
-    describe_counter, describe_gauge, describe_histogram,
-    Counter, Gauge, Histogram,
+    Counter, Gauge, Histogram, counter, describe_counter, describe_gauge, describe_histogram,
+    gauge, histogram,
 };
 
 /// Global metrics registry state.
@@ -35,10 +34,7 @@ pub fn init_metrics() {
     );
 
     // Connection metrics
-    describe_gauge!(
-        "fcp_connections_active",
-        "Number of active connections"
-    );
+    describe_gauge!("fcp_connections_active", "Number of active connections");
     describe_gauge!(
         "fcp_connections_total",
         "Total number of connections (including closed)"
@@ -49,40 +45,25 @@ pub fn init_metrics() {
         "fcp_health_status",
         "Connector health status (1=ready, 0.5=degraded, 0=error)"
     );
-    describe_gauge!(
-        "fcp_uptime_seconds",
-        "Connector uptime in seconds"
-    );
+    describe_gauge!("fcp_uptime_seconds", "Connector uptime in seconds");
 
     // Queue metrics
-    describe_gauge!(
-        "fcp_queue_depth",
-        "Current queue depth"
-    );
+    describe_gauge!("fcp_queue_depth", "Current queue depth");
     describe_counter!(
         "fcp_queue_processed_total",
         "Total items processed from queue"
     );
 
     // Rate limit metrics
-    describe_gauge!(
-        "fcp_rate_limit_remaining",
-        "Remaining rate limit quota"
-    );
+    describe_gauge!("fcp_rate_limit_remaining", "Remaining rate limit quota");
     describe_counter!(
         "fcp_rate_limit_exceeded_total",
         "Total number of rate limit exceeded events"
     );
 
     // Event metrics
-    describe_counter!(
-        "fcp_events_emitted_total",
-        "Total events emitted"
-    );
-    describe_counter!(
-        "fcp_events_dropped_total",
-        "Total events dropped"
-    );
+    describe_counter!("fcp_events_emitted_total", "Total events emitted");
+    describe_counter!("fcp_events_dropped_total", "Total events dropped");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,29 +72,23 @@ pub fn init_metrics() {
 
 /// Increment a counter by 1.
 pub fn increment_counter(name: &'static str, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     counter!(name, &labels).increment(1);
 }
 
 /// Increment a counter by a specific amount.
 pub fn increment_counter_by(name: &'static str, value: u64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     counter!(name, &labels).increment(value);
 }
 
 /// Get a counter handle for repeated operations.
 #[must_use]
 pub fn get_counter(name: &'static str, labels: &[(&'static str, &str)]) -> Counter {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     counter!(name, &labels)
 }
 
@@ -123,38 +98,30 @@ pub fn get_counter(name: &'static str, labels: &[(&'static str, &str)]) -> Count
 
 /// Set a gauge value.
 pub fn set_gauge(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     gauge!(name, &labels).set(value);
 }
 
 /// Increment a gauge.
 pub fn increment_gauge(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     gauge!(name, &labels).increment(value);
 }
 
 /// Decrement a gauge.
 pub fn decrement_gauge(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     gauge!(name, &labels).decrement(value);
 }
 
 /// Get a gauge handle for repeated operations.
 #[must_use]
 pub fn get_gauge(name: &'static str, labels: &[(&'static str, &str)]) -> Gauge {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     gauge!(name, &labels)
 }
 
@@ -164,20 +131,16 @@ pub fn get_gauge(name: &'static str, labels: &[(&'static str, &str)]) -> Gauge {
 
 /// Record a histogram value.
 pub fn record_histogram(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     histogram!(name, &labels).record(value);
 }
 
 /// Get a histogram handle for repeated operations.
 #[must_use]
 pub fn get_histogram(name: &'static str, labels: &[(&'static str, &str)]) -> Histogram {
-    let labels: Vec<(&'static str, String)> = labels
-        .iter()
-        .map(|(k, v)| (*k, v.to_string()))
-        .collect();
+    let labels: Vec<(&'static str, String)> =
+        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
     histogram!(name, &labels)
 }
 
@@ -263,33 +226,49 @@ impl Drop for TimerGuard {
 
 /// Record a successful request.
 pub fn record_request_success(connector: &str, operation: &str, duration_seconds: f64) {
-    increment_counter("fcp_requests_total", &[
-        ("connector", connector),
-        ("operation", operation),
-        ("status", "success"),
-    ]);
-    record_histogram("fcp_request_duration_seconds", duration_seconds, &[
-        ("connector", connector),
-        ("operation", operation),
-    ]);
+    increment_counter(
+        "fcp_requests_total",
+        &[
+            ("connector", connector),
+            ("operation", operation),
+            ("status", "success"),
+        ],
+    );
+    record_histogram(
+        "fcp_request_duration_seconds",
+        duration_seconds,
+        &[("connector", connector), ("operation", operation)],
+    );
 }
 
 /// Record a failed request.
-pub fn record_request_error(connector: &str, operation: &str, error_type: &str, duration_seconds: f64) {
-    increment_counter("fcp_requests_total", &[
-        ("connector", connector),
-        ("operation", operation),
-        ("status", "error"),
-    ]);
-    increment_counter("fcp_requests_errors_total", &[
-        ("connector", connector),
-        ("operation", operation),
-        ("error_type", error_type),
-    ]);
-    record_histogram("fcp_request_duration_seconds", duration_seconds, &[
-        ("connector", connector),
-        ("operation", operation),
-    ]);
+pub fn record_request_error(
+    connector: &str,
+    operation: &str,
+    error_type: &str,
+    duration_seconds: f64,
+) {
+    increment_counter(
+        "fcp_requests_total",
+        &[
+            ("connector", connector),
+            ("operation", operation),
+            ("status", "error"),
+        ],
+    );
+    increment_counter(
+        "fcp_requests_errors_total",
+        &[
+            ("connector", connector),
+            ("operation", operation),
+            ("error_type", error_type),
+        ],
+    );
+    record_histogram(
+        "fcp_request_duration_seconds",
+        duration_seconds,
+        &[("connector", connector), ("operation", operation)],
+    );
 }
 
 /// Update health status metric.
@@ -315,7 +294,11 @@ pub enum HealthStatusMetric {
 
 /// Update rate limit metrics.
 pub fn update_rate_limit(connector: &str, remaining: u32, exceeded: bool) {
-    set_gauge("fcp_rate_limit_remaining", f64::from(remaining), &[("connector", connector)]);
+    set_gauge(
+        "fcp_rate_limit_remaining",
+        f64::from(remaining),
+        &[("connector", connector)],
+    );
     if exceeded {
         increment_counter("fcp_rate_limit_exceeded_total", &[("connector", connector)]);
     }
@@ -323,19 +306,22 @@ pub fn update_rate_limit(connector: &str, remaining: u32, exceeded: bool) {
 
 /// Record event emission.
 pub fn record_event_emitted(connector: &str, event_type: &str) {
-    increment_counter("fcp_events_emitted_total", &[
-        ("connector", connector),
-        ("event_type", event_type),
-    ]);
+    increment_counter(
+        "fcp_events_emitted_total",
+        &[("connector", connector), ("event_type", event_type)],
+    );
 }
 
 /// Record dropped event.
 pub fn record_event_dropped(connector: &str, event_type: &str, reason: &str) {
-    increment_counter("fcp_events_dropped_total", &[
-        ("connector", connector),
-        ("event_type", event_type),
-        ("reason", reason),
-    ]);
+    increment_counter(
+        "fcp_events_dropped_total",
+        &[
+            ("connector", connector),
+            ("event_type", event_type),
+            ("reason", reason),
+        ],
+    );
 }
 
 #[cfg(test)]
@@ -356,5 +342,233 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         let elapsed = guard.elapsed_seconds();
         assert!(elapsed >= 0.01);
+    }
+
+    #[test]
+    fn test_timer_elapsed_seconds() {
+        let timer = Timer::start("test_elapsed", &[]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let elapsed_s = timer.elapsed_seconds();
+        assert!(elapsed_s >= 0.015);
+        assert!(elapsed_s < 1.0); // Sanity check
+    }
+
+    #[test]
+    fn test_timer_with_labels() {
+        let timer = Timer::start(
+            "labeled_metric",
+            &[("connector", "test"), ("operation", "read")],
+        );
+        // Just verify it doesn't panic with multiple labels
+        let _ = timer.elapsed_ms();
+    }
+
+    #[test]
+    fn test_timer_guard_drop() {
+        {
+            let _guard = TimerGuard::new("drop_test_metric", &[("test", "drop")]);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            // Guard is dropped here
+        }
+        // If we reach here without panic, the drop worked
+    }
+
+    #[test]
+    fn test_timer_guard_elapsed_before_drop() {
+        let guard = TimerGuard::new("elapsed_test", &[]);
+        let elapsed1 = guard.elapsed_seconds();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let elapsed2 = guard.elapsed_seconds();
+        assert!(elapsed2 > elapsed1);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact float values 0.0, 0.5, 1.0 are safe to compare
+    fn test_health_status_metric_values() {
+        // Test that health status values are correct
+        assert_eq!(
+            match HealthStatusMetric::Ready {
+                HealthStatusMetric::Ready => 1.0,
+                HealthStatusMetric::Degraded => 0.5,
+                HealthStatusMetric::Error => 0.0,
+            },
+            1.0
+        );
+        assert_eq!(
+            match HealthStatusMetric::Degraded {
+                HealthStatusMetric::Ready => 1.0,
+                HealthStatusMetric::Degraded => 0.5,
+                HealthStatusMetric::Error => 0.0,
+            },
+            0.5
+        );
+        assert_eq!(
+            match HealthStatusMetric::Error {
+                HealthStatusMetric::Ready => 1.0,
+                HealthStatusMetric::Degraded => 0.5,
+                HealthStatusMetric::Error => 0.0,
+            },
+            0.0
+        );
+    }
+
+    #[test]
+    fn test_health_status_metric_debug() {
+        // Test Debug derive
+        let status = HealthStatusMetric::Ready;
+        let debug_str = format!("{status:?}");
+        assert!(debug_str.contains("Ready"));
+    }
+
+    #[test]
+    fn test_health_status_metric_clone() {
+        let status = HealthStatusMetric::Degraded;
+        let cloned = status;
+        assert!(matches!(cloned, HealthStatusMetric::Degraded));
+    }
+
+    #[test]
+    fn test_init_metrics_idempotent() {
+        // Calling init_metrics multiple times should not panic
+        init_metrics();
+        init_metrics();
+        init_metrics();
+    }
+
+    #[test]
+    fn test_increment_counter_no_panic() {
+        // Verify counter operations don't panic
+        increment_counter("test_counter", &[("test", "true")]);
+    }
+
+    #[test]
+    fn test_increment_counter_by_no_panic() {
+        increment_counter_by("test_counter_by", 5, &[("test", "true")]);
+    }
+
+    #[test]
+    fn test_get_counter_returns_counter() {
+        let counter = get_counter("test_get_counter", &[("connector", "test")]);
+        // Just verify we get a counter back that we can use
+        counter.increment(1);
+    }
+
+    #[test]
+    fn test_set_gauge_no_panic() {
+        set_gauge("test_gauge", 42.0, &[("test", "true")]);
+    }
+
+    #[test]
+    fn test_increment_gauge_no_panic() {
+        increment_gauge("test_inc_gauge", 1.0, &[("test", "true")]);
+    }
+
+    #[test]
+    fn test_decrement_gauge_no_panic() {
+        decrement_gauge("test_dec_gauge", 1.0, &[("test", "true")]);
+    }
+
+    #[test]
+    fn test_get_gauge_returns_gauge() {
+        let gauge = get_gauge("test_get_gauge", &[("connector", "test")]);
+        gauge.set(100.0);
+        gauge.increment(10.0);
+        gauge.decrement(5.0);
+    }
+
+    #[test]
+    fn test_record_histogram_no_panic() {
+        record_histogram("test_histogram", 0.5, &[("test", "true")]);
+    }
+
+    #[test]
+    fn test_get_histogram_returns_histogram() {
+        let histogram = get_histogram("test_get_histogram", &[("operation", "read")]);
+        histogram.record(0.1);
+        histogram.record(0.5);
+        histogram.record(1.0);
+    }
+
+    #[test]
+    fn test_record_request_success_no_panic() {
+        record_request_success("test-connector", "read", 0.123);
+    }
+
+    #[test]
+    fn test_record_request_error_no_panic() {
+        record_request_error("test-connector", "write", "timeout", 1.5);
+    }
+
+    #[test]
+    fn test_update_health_status_all_states() {
+        update_health_status("test-connector", HealthStatusMetric::Ready);
+        update_health_status("test-connector", HealthStatusMetric::Degraded);
+        update_health_status("test-connector", HealthStatusMetric::Error);
+    }
+
+    #[test]
+    fn test_update_rate_limit_not_exceeded() {
+        update_rate_limit("test-connector", 100, false);
+    }
+
+    #[test]
+    fn test_update_rate_limit_exceeded() {
+        update_rate_limit("test-connector", 0, true);
+    }
+
+    #[test]
+    fn test_record_event_emitted_no_panic() {
+        record_event_emitted("test-connector", "message_received");
+    }
+
+    #[test]
+    fn test_record_event_dropped_no_panic() {
+        record_event_dropped("test-connector", "message", "buffer_full");
+    }
+
+    #[test]
+    fn test_counter_with_empty_labels() {
+        increment_counter("empty_labels_counter", &[]);
+    }
+
+    #[test]
+    fn test_gauge_with_multiple_labels() {
+        set_gauge(
+            "multi_label_gauge",
+            99.9,
+            &[
+                ("connector", "telegram"),
+                ("zone", "work"),
+                ("operation", "send"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_histogram_with_various_values() {
+        let labels = &[("operation", "api_call")];
+        record_histogram("response_time", 0.001, labels); // 1ms
+        record_histogram("response_time", 0.050, labels); // 50ms
+        record_histogram("response_time", 0.100, labels); // 100ms
+        record_histogram("response_time", 1.000, labels); // 1s
+        record_histogram("response_time", 10.00, labels); // 10s
+    }
+
+    #[test]
+    fn test_timer_stop_and_return() {
+        let timer = Timer::start("stop_return_test", &[]);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let elapsed = timer.stop_and_return();
+        assert!(elapsed >= 0.01);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // exact 0.0 comparison is safe
+    fn test_timer_guard_elapsed_on_empty_timer() {
+        let guard = TimerGuard {
+            timer: None, // Manually create with None
+        };
+        let elapsed = guard.elapsed_seconds();
+        assert_eq!(elapsed, 0.0);
     }
 }

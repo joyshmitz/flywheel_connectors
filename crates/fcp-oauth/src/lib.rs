@@ -33,19 +33,19 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-mod oauth2;
-mod oauth1;
-mod token;
-mod provider;
-mod pkce;
 mod error;
+mod oauth1;
+mod oauth2;
+mod pkce;
+mod provider;
+mod token;
 
-pub use oauth2::*;
-pub use oauth1::*;
-pub use token::*;
-pub use provider::*;
-pub use pkce::*;
 pub use error::*;
+pub use oauth1::*;
+pub use oauth2::*;
+pub use pkce::*;
+pub use provider::*;
+pub use token::*;
 
 use std::time::Duration;
 

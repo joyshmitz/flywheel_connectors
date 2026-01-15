@@ -23,17 +23,17 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-mod signature;
-mod provider;
+mod error;
 mod event;
 mod handler;
-mod error;
+mod provider;
+mod signature;
 
-pub use signature::*;
-pub use provider::*;
+pub use error::*;
 pub use event::*;
 pub use handler::*;
-pub use error::*;
+pub use provider::*;
+pub use signature::*;
 
 use std::time::Duration;
 

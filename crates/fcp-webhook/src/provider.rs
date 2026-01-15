@@ -9,8 +9,8 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
-    HmacSha256Verifier, SignatureVerifier, WebhookError, WebhookEvent, WebhookResult,
-    DEFAULT_TIMESTAMP_TOLERANCE,
+    DEFAULT_TIMESTAMP_TOLERANCE, HmacSha256Verifier, SignatureVerifier, WebhookError, WebhookEvent,
+    WebhookResult,
 };
 
 /// Webhook provider.
@@ -345,10 +345,7 @@ mod tests {
         let handler = GitHubWebhook::new("secret");
 
         let body = br#"{"action": "opened", "issue": {"number": 1}}"#;
-        let signature = format!(
-            "sha256={}",
-            handler.verifier.compute(body)
-        );
+        let signature = format!("sha256={}", handler.verifier.compute(body));
 
         let mut headers = HashMap::new();
         headers.insert("x-hub-signature-256".to_string(), signature);
