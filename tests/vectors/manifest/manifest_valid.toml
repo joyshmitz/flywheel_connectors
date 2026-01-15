@@ -1,0 +1,84 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["fcps.aead.xchacha20poly1305"]
+max_datagram_bytes = 1200
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.valid"
+name = "Valid Connector"
+version = "1.2.3"
+description = "Valid manifest used for tests"
+archetypes = ["bidirectional", "streaming"]
+format = "native"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:community"
+allowed_sources = ["z:owner", "z:community"]
+allowed_targets = ["z:community"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["media.download"]
+forbidden = ["system.exec"]
+
+[provides.operations.send_message]
+description = "Send a message"
+capability = "telegram.send_message"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+rate_limit = "60/min"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["chat_id", "text"] }
+output_schema = { type = "object", required = ["message_id"] }
+network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true }
+
+[provides.operations.send_message.ai_hints]
+when_to_use = "Use for approved chat messages."
+common_mistakes = ["Leaking secrets."]
+
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 10
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[signatures]
+publisher_signatures = [
+  { kid = "pub1", sig = "base64:Zm9v" },
+  { kid = "pub2", sig = "base64:YmFy" }
+]
+publisher_threshold = "2-of-2"
+registry_signature = { kid = "reg1", sig = "base64:YmF6" }
+transparency_log_entry = "objectid:1111111111111111111111111111111111111111111111111111111111111111"
+
+[supply_chain]
+attestations = [
+  { type = "in-toto", object_id = "objectid:2222222222222222222222222222222222222222222222222222222222222222" },
+  { type = "reproducible-build", object_id = "objectid:3333333333333333333333333333333333333333333333333333333333333333" }
+]
+
+[policy]
+require_transparency_log = true
+require_attestation_types = ["in-toto", "reproducible-build"]
+min_slsa_level = 2
+trusted_builders = ["github-actions", "internal-ci"]

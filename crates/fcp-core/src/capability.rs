@@ -8,14 +8,13 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::Utc;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::{FcpError, FcpResult};
 use crate::object::ObjectId;
-use crate::quorum::NodeId;
 use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
 
 /// Canonical identifier validation error (NORMATIVE).
@@ -743,6 +742,18 @@ impl<'de> Deserialize<'de> for CapabilityToken {
                     .decode(v)
                     .map_err(E::custom)
             }
+
+            // Support sequence of bytes (e.g. JSON array of numbers)
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::new();
+                while let Some(byte) = seq.next_element()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
         }
 
         let bytes = deserializer.deserialize_any(BytesVisitor)?;
@@ -779,6 +790,37 @@ impl<'de> Deserialize<'de> for CapabilityToken {
             raw,
             claims: CwtClaims::new(),
         }) // Dummy claims for now, fix struct
+    }
+}
+
+impl CapabilityToken {
+    /// Create a test token with minimal fields for testing.
+    ///
+    /// This token has a dummy signature and should only be used in tests.
+    #[must_use]
+    pub fn test_token() -> Self {
+        // Construct a dummy CoseToken from raw bytes (invalid signature but structurally okay)
+        // Or better, generate a real one with a throwaway key.
+        use fcp_crypto::cose::CapabilityTokenBuilder;
+        use fcp_crypto::ed25519::Ed25519SigningKey;
+        
+        let signing_key = Ed25519SigningKey::generate();
+        let now = chrono::Utc::now();
+        let expires = now + chrono::Duration::hours(1);
+        
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.all")
+            .zone_id("z:work")
+            .principal("test-principal")
+            .issuer("node:test")
+            .validity(now, expires)
+            .sign(&signing_key)
+            .expect("Failed to create test token");
+            
+        Self {
+            raw: cose_token,
+            claims: CwtClaims::new(), // empty claims, verified on use
+        }
     }
 }
 
@@ -1319,8 +1361,8 @@ impl Provenance {
 mod tests {
     use super::*;
     use fcp_crypto::cose::CapabilityTokenBuilder;
-    use ed25519_dalek::{SigningKey, Signer};
-    use rand::rngs::OsRng;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+    use chrono::Duration;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Canonical ID Validation Tests (FCP Spec §3.4.2)
@@ -1349,8 +1391,7 @@ mod tests {
     #[test]
     fn verify_capability_token() {
         // 1. Generate keys
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 
@@ -1369,8 +1410,6 @@ mod tests {
             .expect("Failed to sign token");
 
         // 3. Wrap in CapabilityToken
-        // Note: In real usage, claims would be populated after verify.
-        // Here we just wrap the raw token.
         let token = CapabilityToken {
             raw: cose_token,
             claims: CwtClaims::new(), 
@@ -1392,8 +1431,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_zone() {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 
@@ -1418,8 +1456,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_expired() {
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::generate(&mut csprng);
+        let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 

@@ -1,0 +1,47 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 1200
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.dangerous"
+name = "Dangerous Capabilities Connector"
+version = "0.1.0"
+description = "Manifest with invalid network capability host restrictions"
+archetypes = ["operational"]
+format = "native"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.egress:api.example.com:443", "network.dns"]
+optional = []
+forbidden = []
+
+[provides.operations.minimal_op]
+description = "Minimal operation"
+capability = "minimal.op"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

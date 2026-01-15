@@ -1632,6 +1632,10 @@ macro_rules! embed_manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    const PLACEHOLDER_HASH: &str =
+        "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
 
     fn test_manifest_toml(interface_hash: &str) -> String {
         format!(
@@ -1701,6 +1705,27 @@ deny_ptrace = true
         )
     }
 
+    fn vector_manifest_path(name: &str) -> std::path::PathBuf {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        root.join("../../tests/vectors/manifest").join(name)
+    }
+
+    fn read_vector_manifest(name: &str) -> String {
+        let path = vector_manifest_path(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!("failed to read manifest vector {}: {err}", path.display())
+        })
+    }
+
+    fn with_computed_hash(raw: &str) -> String {
+        let unchecked =
+            ConnectorManifest::parse_str_unchecked(raw).expect("vector must parse unchecked");
+        let computed = unchecked
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        raw.replace(PLACEHOLDER_HASH, &computed.to_string())
+    }
+
     #[test]
     fn manifest_parses_and_validates_with_computed_interface_hash() {
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
@@ -1762,5 +1787,165 @@ deny_ptrace = true
 
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(err, ManifestError::Invalid { .. }));
+    }
+
+    #[test]
+    fn vector_manifest_valid_parses() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw);
+        let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
+        assert_eq!(parsed.connector.id.as_str(), "fcp.valid");
+        assert_eq!(parsed.provides.operations.len(), 1);
+    }
+
+    #[test]
+    fn vector_manifest_minimal_parses() {
+        let raw = read_vector_manifest("manifest_minimal.toml");
+        let with_hash = with_computed_hash(&raw);
+        let parsed = ConnectorManifest::parse_str(&with_hash).expect("minimal manifest");
+        assert_eq!(parsed.connector.id.as_str(), "fcp.minimal");
+        assert_eq!(parsed.capabilities.required.len(), 1);
+    }
+
+    #[test]
+    fn vector_manifest_invalid_version_rejected() {
+        let raw = read_vector_manifest("manifest_invalid_version.toml");
+        let err = ConnectorManifest::parse_str_unchecked(&raw).unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn vector_manifest_dangerous_caps_rejected() {
+        let raw = read_vector_manifest("manifest_dangerous_caps.toml");
+        let with_hash = with_computed_hash(&raw);
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { .. }));
+    }
+
+    #[test]
+    fn rejects_event_caps_without_buffer() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let mut toml = test_manifest_toml(&placeholder);
+        toml = toml.replace("min_buffer_events = 10000", "min_buffer_events = 0");
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("min_buffer_events = 10000", "min_buffer_events = 0");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "event_caps.min_buffer_events"));
+    }
+
+    #[test]
+    fn rejects_signatures_without_threshold() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let mut with_hash = with_computed_hash(&raw);
+        with_hash = with_hash.replace("publisher_threshold = \"2-of-2\"\n", "");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold"));
+    }
+
+    #[test]
+    fn rejects_duplicate_signature_kid() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("pub2", "pub1");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_signatures"));
+    }
+
+    #[test]
+    fn rejects_duplicate_supply_chain_attestations() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace(
+            "objectid:3333333333333333333333333333333333333333333333333333333333333333",
+            "objectid:2222222222222222222222222222222222222222222222222222222222222222",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "supply_chain.attestations"));
+    }
+
+    #[test]
+    fn rejects_invalid_slsa_level() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("min_slsa_level = 2", "min_slsa_level = 9");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "policy.min_slsa_level"));
+    }
+
+    #[test]
+    fn rejects_invalid_base64_signature() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("base64:Zm9v", "Zm9v");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "base64"));
+    }
+
+    #[test]
+    fn rejects_uppercase_host_allow() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("api.telegram.org", "API.Telegram.org");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "provides.operations.*.network_constraints.host_allow"));
+    }
+
+    #[test]
+    fn rejects_ip_literal_in_host_allow() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("api.telegram.org", "192.0.2.1");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "provides.operations.*.network_constraints.host_allow"));
+    }
+
+    #[test]
+    fn rejects_invalid_rate_limit_shorthand() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace("60/min", "60/fortnight");
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace("60/min", "60/fortnight");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_signature_threshold() {
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("publisher_threshold = \"2-of-2\"", "publisher_threshold = \"3-of-2\"");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold"));
+    }
+
+    #[test]
+    fn rejects_empty_connector_name() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace("name = \"Telegram Connector\"", "name = \"\"");
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace("name = \"Telegram Connector\"", "name = \"\"");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "connector.name"));
+    }
+
+    #[test]
+    fn rejects_zero_cpu_percent() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace("cpu_percent = 50", "cpu_percent = 0");
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace("cpu_percent = 50", "cpu_percent = 0");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "sandbox.cpu_percent"));
+    }
+
+    mod embed_tests {
+        use super::*;
+
+        embed_manifest!("../../../tests/vectors/manifest/manifest_minimal.toml");
+
+        #[test]
+        fn embedded_manifest_matches_fixture() {
+            let path = vector_manifest_path("manifest_minimal.toml");
+            let raw = std::fs::read(&path).expect("read manifest fixture");
+            assert_eq!(embedded_manifest_bytes(), raw.as_slice());
+        }
     }
 }

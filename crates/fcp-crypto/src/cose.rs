@@ -188,6 +188,64 @@ impl CwtClaims {
         self
     }
 
+    /// Set FCP2 issuing node ID.
+    #[must_use]
+    pub fn issuing_node(mut self, node_id: &str) -> Self {
+        self.claims.insert(
+            fcp2_claims::ISS_NODE,
+            ciborium::Value::Text(node_id.into()),
+        );
+        self
+    }
+
+    /// Set FCP2 binary audience (ObjectId).
+    #[must_use]
+    pub fn audience_binary(mut self, object_id: &[u8]) -> Self {
+        self.claims.insert(
+            fcp2_claims::AUD_BINARY,
+            ciborium::Value::Bytes(object_id.to_vec()),
+        );
+        self
+    }
+
+    /// Set FCP2 grant object IDs.
+    #[must_use]
+    pub fn grant_objects(mut self, object_ids: &[&[u8]]) -> Self {
+        let values: Vec<ciborium::Value> = object_ids
+            .iter()
+            .map(|id| ciborium::Value::Bytes(id.to_vec()))
+            .collect();
+        self.claims.insert(
+            fcp2_claims::GRANT_OBJECT_IDS,
+            ciborium::Value::Array(values),
+        );
+        self
+    }
+
+    /// Set FCP2 holder node ID.
+    #[must_use]
+    pub fn holder_node(mut self, node_id: &str) -> Self {
+        self.claims.insert(
+            fcp2_claims::HOLDER_NODE,
+            ciborium::Value::Text(node_id.into()),
+        );
+        self
+    }
+
+    /// Set FCP2 checkpoint ID and sequence.
+    #[must_use]
+    pub fn checkpoint(mut self, id: &[u8], seq: u64) -> Self {
+        self.claims.insert(
+            fcp2_claims::CHK_ID,
+            ciborium::Value::Bytes(id.to_vec()),
+        );
+        self.claims.insert(
+            fcp2_claims::CHK_SEQ,
+            ciborium::Value::Integer(seq.into()),
+        );
+        self
+    }
+
     /// Set custom claim.
     #[must_use]
     pub fn custom(mut self, key: i64, value: ciborium::Value) -> Self {
@@ -501,6 +559,20 @@ impl CapabilityTokenBuilder {
     #[must_use]
     pub fn operations(mut self, ops: &[&str]) -> Self {
         self.claims = self.claims.operations(ops);
+        self
+    }
+
+    /// Set issuing node.
+    #[must_use]
+    pub fn issuing_node(mut self, node_id: &str) -> Self {
+        self.claims = self.claims.issuing_node(node_id);
+        self
+    }
+
+    /// Set checkpoint.
+    #[must_use]
+    pub fn checkpoint(mut self, id: &[u8], seq: u64) -> Self {
+        self.claims = self.claims.checkpoint(id, seq);
         self
     }
 
