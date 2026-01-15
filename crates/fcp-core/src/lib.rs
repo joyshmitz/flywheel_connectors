@@ -18,6 +18,7 @@ mod object;
 mod protocol;
 mod quorum;
 mod ratelimit;
+mod revocation;
 
 pub use capability::*;
 pub use connector::*;
@@ -28,6 +29,7 @@ pub use object::*;
 pub use protocol::*;
 pub use quorum::*;
 pub use ratelimit::*;
+pub use revocation::*;
 
 // Re-export commonly used external types
 pub use async_trait::async_trait;
