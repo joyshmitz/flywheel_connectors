@@ -1,0 +1,31 @@
+[package]
+name = "fcp-store"
+description = "FCP2 object and symbol stores (placement, repair, retention)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde = { workspace = true, features = ["derive"] }
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+async-trait.workspace = true
+raptorq.workspace = true
+
+# Internal crates
+fcp-core = { path = "../fcp-core" }
+fcp-raptorq = { path = "../fcp-raptorq" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+semver.workspace = true
+fcp-cbor = { path = "../fcp-cbor" }

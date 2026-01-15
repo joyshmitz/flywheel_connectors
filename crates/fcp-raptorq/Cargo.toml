@@ -1,0 +1,27 @@
+[package]
+name = "fcp-raptorq"
+description = "FCP2 RaptorQ encoding/decoding and chunking policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+blake3.workspace = true
+raptorq.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+# Internal crates
+fcp-core = { path = "../fcp-core" }
+fcp-cbor = { path = "../fcp-cbor" }
+
+[dev-dependencies]
+rand.workspace = true
+serde_json.workspace = true

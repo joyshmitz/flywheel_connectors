@@ -1,0 +1,361 @@
+//! `RaptorQ` encoder implementation.
+
+use raptorq::{Encoder, ObjectTransmissionInformation};
+
+use crate::chunk::{ChunkedObjectManifest, RawChunk};
+use crate::config::RaptorQConfig;
+use crate::error::EncodeError;
+
+/// `RaptorQ` encoder for producing symbols from a payload.
+pub struct RaptorQEncoder {
+    inner: Encoder,
+    config: RaptorQConfig,
+    payload_len: usize,
+}
+
+impl RaptorQEncoder {
+    /// Create encoder for a payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EncodeError::PayloadTooLarge` if payload exceeds max object size.
+    /// Returns `EncodeError::EmptyPayload` if payload is empty.
+    pub fn new(payload: &[u8], config: &RaptorQConfig) -> Result<Self, EncodeError> {
+        if payload.is_empty() {
+            return Err(EncodeError::EmptyPayload);
+        }
+
+        if payload.len() > config.max_object_size as usize {
+            return Err(EncodeError::PayloadTooLarge {
+                size: payload.len(),
+                max: config.max_object_size as usize,
+            });
+        }
+
+        let inner = Encoder::with_defaults(payload, config.symbol_size);
+
+        Ok(Self {
+            inner,
+            config: config.clone(),
+            payload_len: payload.len(),
+        })
+    }
+
+    /// Get K (number of source symbols).
+    #[must_use]
+    pub fn source_symbols(&self) -> u32 {
+        self.config.source_symbols(self.payload_len)
+    }
+
+    /// Get the number of repair symbols that will be generated.
+    #[must_use]
+    pub fn repair_symbols(&self) -> u32 {
+        self.config.repair_symbols(self.source_symbols())
+    }
+
+    /// Get total symbols (source + repair).
+    #[must_use]
+    pub fn total_symbols(&self) -> u32 {
+        self.source_symbols() + self.repair_symbols()
+    }
+
+    /// Generate all source + repair symbols.
+    ///
+    /// Returns a vector of (ESI, `symbol_data`) tuples.
+    #[must_use]
+    pub fn encode_all(&self) -> Vec<(u32, Vec<u8>)> {
+        let packets = self.inner.get_encoded_packets(self.repair_symbols());
+        packets
+            .into_iter()
+            .map(|packet| {
+                let esi = packet.payload_id().encoding_symbol_id();
+                (esi, packet.data().to_vec())
+            })
+            .collect()
+    }
+
+    /// Generate source symbols only.
+    #[must_use]
+    pub fn encode_source(&self) -> Vec<(u32, Vec<u8>)> {
+        let packets = self.inner.get_encoded_packets(0);
+        packets
+            .into_iter()
+            .map(|packet| {
+                let esi = packet.payload_id().encoding_symbol_id();
+                (esi, packet.data().to_vec())
+            })
+            .collect()
+    }
+
+    /// Get the object transmission information for this encoding.
+    #[must_use]
+    pub fn transmission_info(&self) -> ObjectTransmissionInformation {
+        self.inner.get_config()
+    }
+
+    /// Get the payload length.
+    #[must_use]
+    pub const fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    /// Get the symbol size.
+    #[must_use]
+    pub const fn symbol_size(&self) -> u16 {
+        self.config.symbol_size
+    }
+}
+
+/// Encoding decision based on payload size.
+#[derive(Clone, Debug)]
+pub enum EncodingDecision {
+    /// Small object: encode directly with `RaptorQ`.
+    Direct {
+        /// Encoded symbols (ESI, data).
+        symbols: Vec<(u32, Vec<u8>)>,
+        /// Object transmission info for decoding.
+        transmission_info: ObjectTransmissionInformation,
+    },
+    /// Large object: use chunked manifest.
+    Chunked {
+        /// The manifest referencing chunks.
+        manifest: ChunkedObjectManifest,
+        /// The raw chunks to store separately.
+        chunks: Vec<RawChunk>,
+    },
+}
+
+impl EncodingDecision {
+    /// Decide encoding strategy for a payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EncodeError::PayloadTooLarge` if payload exceeds max object size.
+    pub fn for_payload(payload: &[u8], config: &RaptorQConfig) -> Result<Self, EncodeError> {
+        if payload.is_empty() {
+            // Empty payloads use direct encoding with no symbols
+            return Ok(Self::Direct {
+                symbols: vec![],
+                transmission_info: ObjectTransmissionInformation::new(
+                    0,
+                    config.symbol_size,
+                    1,
+                    1,
+                    8,
+                ),
+            });
+        }
+
+        if payload.len() > config.max_object_size as usize {
+            return Err(EncodeError::PayloadTooLarge {
+                size: payload.len(),
+                max: config.max_object_size as usize,
+            });
+        }
+
+        if config.requires_chunking(payload.len()) {
+            // Large object: use chunking
+            let (manifest, chunks) =
+                ChunkedObjectManifest::from_payload(payload, config.chunk_size);
+            Ok(Self::Chunked { manifest, chunks })
+        } else {
+            // Small object: direct RaptorQ
+            let encoder = RaptorQEncoder::new(payload, config)?;
+            let symbols = encoder.encode_all();
+            let transmission_info = encoder.transmission_info();
+            Ok(Self::Direct {
+                symbols,
+                transmission_info,
+            })
+        }
+    }
+
+    /// Check if this is a direct encoding.
+    #[must_use]
+    pub const fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct { .. })
+    }
+
+    /// Check if this is a chunked encoding.
+    #[must_use]
+    pub const fn is_chunked(&self) -> bool {
+        matches!(self, Self::Chunked { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> RaptorQConfig {
+        RaptorQConfig {
+            symbol_size: 64, // Small symbols for testing
+            repair_ratio_bps: 500,
+            max_object_size: 1024 * 1024,
+            decode_timeout: std::time::Duration::from_secs(30),
+            max_chunk_threshold: 1024, // 1KB threshold for testing
+            chunk_size: 256,           // 256 byte chunks for testing
+        }
+    }
+
+    #[test]
+    fn encoder_creation() {
+        let config = test_config();
+        let payload = vec![42u8; 512];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        assert_eq!(encoder.payload_len(), 512);
+        assert_eq!(encoder.symbol_size(), 64);
+        // 512 bytes / 64 byte symbols = 8 source symbols
+        assert_eq!(encoder.source_symbols(), 8);
+    }
+
+    #[test]
+    fn encoder_empty_payload_rejected() {
+        let config = test_config();
+        let result = RaptorQEncoder::new(&[], &config);
+        assert!(matches!(result, Err(EncodeError::EmptyPayload)));
+    }
+
+    #[test]
+    fn encoder_oversized_payload_rejected() {
+        let config = test_config();
+        let oversized = vec![0u8; 2 * 1024 * 1024]; // 2MB, over 1MB limit
+        let result = RaptorQEncoder::new(&oversized, &config);
+        assert!(matches!(result, Err(EncodeError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn encoder_repair_symbols() {
+        let config = test_config();
+        let payload = vec![42u8; 640]; // 10 source symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        assert_eq!(encoder.source_symbols(), 10);
+        // 5% of 10 = 0 (rounds down)
+        assert_eq!(encoder.repair_symbols(), 0);
+
+        // Larger payload for meaningful repair count
+        let payload = vec![42u8; 6400]; // 100 source symbols
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        assert_eq!(encoder.source_symbols(), 100);
+        // 5% of 100 = 5 repair symbols
+        assert_eq!(encoder.repair_symbols(), 5);
+    }
+
+    #[test]
+    fn encoder_encode_all() {
+        let config = test_config();
+        let payload = vec![42u8; 512];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let symbols = encoder.encode_all();
+        assert!(!symbols.is_empty());
+
+        // Check that symbols have correct structure
+        for (esi, data) in &symbols {
+            assert!(!data.is_empty(), "Symbol {esi} should have data");
+        }
+    }
+
+    #[test]
+    fn encoder_encode_source() {
+        let config = test_config();
+        let payload = vec![42u8; 512];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let source_symbols = encoder.encode_source();
+        // Should have source symbols only
+        assert!(!source_symbols.is_empty());
+    }
+
+    #[test]
+    fn encoding_decision_direct_small_payload() {
+        let config = test_config();
+        let payload = vec![42u8; 512]; // Under 1KB threshold
+
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        assert!(decision.is_direct());
+        assert!(!decision.is_chunked());
+
+        if let EncodingDecision::Direct { symbols, .. } = decision {
+            assert!(!symbols.is_empty());
+        }
+    }
+
+    #[test]
+    fn encoding_decision_chunked_large_payload() {
+        let config = test_config();
+        let payload = vec![42u8; 2048]; // Over 1KB threshold
+
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        assert!(decision.is_chunked());
+        assert!(!decision.is_direct());
+
+        if let EncodingDecision::Chunked { manifest, chunks } = decision {
+            assert_eq!(manifest.total_len, 2048);
+            // 2048 / 256 = 8 chunks
+            assert_eq!(chunks.len(), 8);
+        }
+    }
+
+    #[test]
+    fn encoding_decision_empty_payload() {
+        let config = test_config();
+        let decision = EncodingDecision::for_payload(&[], &config).unwrap();
+
+        assert!(decision.is_direct());
+        if let EncodingDecision::Direct { symbols, .. } = decision {
+            assert!(symbols.is_empty());
+        }
+    }
+
+    #[test]
+    fn encoding_decision_oversized_rejected() {
+        let config = test_config();
+        let oversized = vec![0u8; 2 * 1024 * 1024];
+
+        let result = EncodingDecision::for_payload(&oversized, &config);
+        assert!(matches!(result, Err(EncodeError::PayloadTooLarge { .. })));
+    }
+
+    #[test]
+    fn encoding_decision_boundary() {
+        let config = test_config();
+
+        // Exactly at threshold - should be direct
+        let payload = vec![42u8; 1024];
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        assert!(decision.is_direct());
+
+        // One byte over - should be chunked
+        let payload = vec![42u8; 1025];
+        let decision = EncodingDecision::for_payload(&payload, &config).unwrap();
+        assert!(decision.is_chunked());
+    }
+
+    #[test]
+    fn encode_decode_roundtrip() {
+        use raptorq::Decoder;
+
+        let config = test_config();
+        let payload: Vec<u8> = (0..512_u32).map(|i| (i % 256) as u8).collect();
+
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let symbols = encoder.encode_all();
+        let oti = encoder.transmission_info();
+
+        // Create decoder and feed symbols
+        let mut decoder = Decoder::new(oti);
+        for (esi, data) in symbols {
+            let packet = raptorq::EncodingPacket::new(raptorq::PayloadId::new(0, esi), data);
+            if let Some(decoded) = decoder.decode(packet) {
+                assert_eq!(decoded, payload);
+                return;
+            }
+        }
+
+        // Should have decoded by now
+        panic!("Failed to decode payload");
+    }
+}

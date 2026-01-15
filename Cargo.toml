@@ -58,6 +58,7 @@ authors = ["Flywheel Core Team <core@flywheel.dev>"]
 tokio = { version = "1.43", features = ["full"] }
 async-trait = "0.1"
 futures-util = "0.3"
+parking_lot = "0.12"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -94,6 +95,10 @@ chrono = { version = "0.4", features = ["serde"] }
 # Bytes
 bytes = "1.9"
 hex = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+
+# Fountain codes
+raptorq = "2.0"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -106,6 +111,26 @@ tokio-stream = "0.1"
 
 # Testing
 wiremock = "0.6"
+
+# Internal crates
+fcp-audit = { path = "crates/fcp-audit" }
+fcp-cbor = { path = "crates/fcp-cbor" }
+fcp-core = { path = "crates/fcp-core" }
+fcp-crypto = { path = "crates/fcp-crypto" }
+fcp-manifest = { path = "crates/fcp-manifest" }
+fcp-mesh = { path = "crates/fcp-mesh" }
+fcp-oauth = { path = "crates/fcp-oauth" }
+fcp-protocol = { path = "crates/fcp-protocol" }
+fcp-raptorq = { path = "crates/fcp-raptorq" }
+fcp-ratelimit = { path = "crates/fcp-ratelimit" }
+fcp-sandbox = { path = "crates/fcp-sandbox" }
+fcp-sdk = { path = "crates/fcp-sdk" }
+fcp-store = { path = "crates/fcp-store" }
+fcp-streaming = { path = "crates/fcp-streaming" }
+fcp-tailscale = { path = "crates/fcp-tailscale" }
+fcp-telemetry = { path = "crates/fcp-telemetry" }
+fcp-testkit = { path = "crates/fcp-testkit" }
+fcp-webhook = { path = "crates/fcp-webhook" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

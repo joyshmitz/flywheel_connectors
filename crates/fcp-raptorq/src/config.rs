@@ -1,0 +1,224 @@
+//! `RaptorQ` configuration (NORMATIVE).
+
+// Allow truncation casts - symbol/repair counts are bounded by protocol
+#![allow(clippy::cast_possible_truncation)]
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+/// `RaptorQ` configuration (NORMATIVE).
+///
+/// Controls symbol size, repair ratio, object size limits, decode timeouts,
+/// and chunking thresholds.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RaptorQConfig {
+    /// Symbol size in bytes.
+    ///
+    /// Default: 1024
+    pub symbol_size: u16,
+
+    /// Repair ratio in basis points (NORMATIVE).
+    ///
+    /// 500 = 5% = K × 1.05 total symbols.
+    ///
+    /// Default: 500
+    pub repair_ratio_bps: u16,
+
+    /// Maximum object size that can be encoded.
+    ///
+    /// Default: 64MB
+    pub max_object_size: u32,
+
+    /// Maximum time to wait for object reconstruction.
+    ///
+    /// Default: 30s
+    #[serde(with = "duration_secs")]
+    pub decode_timeout: Duration,
+
+    /// Objects above this size MUST use `ChunkedObjectManifest`.
+    ///
+    /// Default: 256KB
+    pub max_chunk_threshold: u32,
+
+    /// Chunk size for `ChunkedObjectManifest`.
+    ///
+    /// Default: 64KB
+    pub chunk_size: u32,
+}
+
+impl Default for RaptorQConfig {
+    fn default() -> Self {
+        Self {
+            symbol_size: 1024,
+            repair_ratio_bps: 500,
+            max_object_size: 64 * 1024 * 1024, // 64MB
+            decode_timeout: Duration::from_secs(30),
+            max_chunk_threshold: 256 * 1024, // 256KB
+            chunk_size: 64 * 1024,           // 64KB
+        }
+    }
+}
+
+impl RaptorQConfig {
+    /// Calculate number of repair symbols from basis points.
+    ///
+    /// `repair_ratio_bps = 500` means 5% overhead.
+    /// For K source symbols, generate K + K×500/10000 = K×1.05 total symbols.
+    #[must_use]
+    pub fn repair_symbols(&self, source_symbols: u32) -> u32 {
+        (u64::from(source_symbols) * u64::from(self.repair_ratio_bps) / 10000) as u32
+    }
+
+    /// Calculate K (source symbols) needed for a payload.
+    #[must_use]
+    pub fn source_symbols(&self, payload_len: usize) -> u32 {
+        payload_len.div_ceil(usize::from(self.symbol_size)) as u32
+    }
+
+    /// Total symbols (source + repair) for a payload.
+    #[must_use]
+    pub fn total_symbols(&self, payload_len: usize) -> u32 {
+        let k = self.source_symbols(payload_len);
+        k + self.repair_symbols(k)
+    }
+
+    /// Check if a payload requires chunking.
+    #[must_use]
+    pub const fn requires_chunking(&self, payload_len: usize) -> bool {
+        payload_len > self.max_chunk_threshold as usize
+    }
+
+    /// Calculate the number of chunks for a payload.
+    #[must_use]
+    pub const fn chunk_count(&self, payload_len: usize) -> usize {
+        if payload_len == 0 {
+            return 0;
+        }
+        payload_len.div_ceil(self.chunk_size as usize)
+    }
+}
+
+/// Serde helper for `Duration` as seconds.
+mod duration_secs {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        duration.as_secs().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_values() {
+        let config = RaptorQConfig::default();
+        assert_eq!(config.symbol_size, 1024);
+        assert_eq!(config.repair_ratio_bps, 500);
+        assert_eq!(config.max_object_size, 64 * 1024 * 1024);
+        assert_eq!(config.decode_timeout, Duration::from_secs(30));
+        assert_eq!(config.max_chunk_threshold, 256 * 1024);
+        assert_eq!(config.chunk_size, 64 * 1024);
+    }
+
+    #[test]
+    fn repair_symbols_calculation() {
+        let config = RaptorQConfig::default();
+        // 500 bps = 5% overhead
+        // 100 source symbols -> 5 repair symbols
+        assert_eq!(config.repair_symbols(100), 5);
+        // 1000 source symbols -> 50 repair symbols
+        assert_eq!(config.repair_symbols(1000), 50);
+        // 0 source symbols -> 0 repair symbols
+        assert_eq!(config.repair_symbols(0), 0);
+    }
+
+    #[test]
+    fn source_symbols_calculation() {
+        let config = RaptorQConfig::default();
+        // 1024 bytes = 1 symbol
+        assert_eq!(config.source_symbols(1024), 1);
+        // 1025 bytes = 2 symbols (ceiling division)
+        assert_eq!(config.source_symbols(1025), 2);
+        // 0 bytes = 0 symbols
+        assert_eq!(config.source_symbols(0), 0);
+        // 10240 bytes = 10 symbols
+        assert_eq!(config.source_symbols(10240), 10);
+    }
+
+    #[test]
+    fn total_symbols_calculation() {
+        let config = RaptorQConfig::default();
+        // 10240 bytes = 10 source + 0 repair (5% of 10 rounds down)
+        assert_eq!(config.total_symbols(10240), 10);
+        // 102400 bytes = 100 source + 5 repair
+        assert_eq!(config.total_symbols(102_400), 105);
+    }
+
+    #[test]
+    fn requires_chunking() {
+        let config = RaptorQConfig::default();
+        // Under threshold: no chunking
+        assert!(!config.requires_chunking(256 * 1024));
+        // Over threshold: requires chunking
+        assert!(config.requires_chunking(256 * 1024 + 1));
+        // Zero: no chunking
+        assert!(!config.requires_chunking(0));
+    }
+
+    #[test]
+    fn chunk_count_calculation() {
+        let config = RaptorQConfig::default();
+        // 0 bytes = 0 chunks
+        assert_eq!(config.chunk_count(0), 0);
+        // 64KB = 1 chunk
+        assert_eq!(config.chunk_count(64 * 1024), 1);
+        // 64KB + 1 = 2 chunks
+        assert_eq!(config.chunk_count(64 * 1024 + 1), 2);
+        // 256KB = 4 chunks
+        assert_eq!(config.chunk_count(256 * 1024), 4);
+    }
+
+    #[test]
+    fn config_serialization_roundtrip() {
+        let config = RaptorQConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RaptorQConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.symbol_size, config.symbol_size);
+        assert_eq!(deserialized.repair_ratio_bps, config.repair_ratio_bps);
+        assert_eq!(deserialized.decode_timeout, config.decode_timeout);
+    }
+
+    #[test]
+    fn custom_config() {
+        let config = RaptorQConfig {
+            symbol_size: 2048,
+            repair_ratio_bps: 1000, // 10%
+            max_object_size: 128 * 1024 * 1024,
+            decode_timeout: Duration::from_secs(60),
+            max_chunk_threshold: 512 * 1024,
+            chunk_size: 128 * 1024,
+        };
+
+        // 10% repair ratio
+        assert_eq!(config.repair_symbols(100), 10);
+        // 2048 byte symbols
+        assert_eq!(config.source_symbols(2048), 1);
+        assert_eq!(config.source_symbols(2049), 2);
+    }
+}
