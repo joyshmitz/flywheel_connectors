@@ -5,7 +5,7 @@
 > Purpose: Provide a Rust-focused connector guide aligned exactly to FCP Specification V2.
 > Version: 2.0.0
 > Status: Draft
-> Last Updated: 2026-01-14
+> Last Updated: 2026-01-15
 > License: MIT
 > Canonical Spec: FCP_Specification_V2.md
 
@@ -1336,6 +1336,18 @@ pub struct NetworkConstraints {
     pub deny_ip_literals: bool,
     /// Hostnames MUST be canonicalized (lowercase, IDNA2008, no trailing dot) (NORMATIVE default: true)
     pub require_host_canonicalization: bool,
+
+    // DNS rebinding defense (NORMATIVE)
+    /// Max IPs per DNS response (prevents rebinding flood)
+    pub dns_max_ips: u16,
+    /// Max HTTP redirects (prevents infinite redirect loops)
+    pub max_redirects: u8,
+    /// TCP connect timeout in milliseconds
+    pub connect_timeout_ms: u32,
+    /// Total request timeout in milliseconds
+    pub total_timeout_ms: u32,
+    /// Max response body size in bytes
+    pub max_response_bytes: u64,
 }
 ```
 
@@ -1614,6 +1626,23 @@ pub struct ResourceObject {
     pub metadata: Option<Value>,
     /// Connector signature over resource metadata
     pub signature: Signature,
+
+    // TOCTOU prevention and caching (NORMATIVE)
+    /// Optional BLAKE3-256 digest of resource content at fetch time
+    /// Enables TOCTOU (time-of-check-time-of-use) attack prevention
+    pub content_digest: Option<[u8; 32]>,
+    /// Optional caching hints for resource freshness
+    pub cache_policy: Option<CachePolicy>,
+}
+
+/// Cache policy hints for ResourceObject (NORMATIVE)
+pub struct CachePolicy {
+    /// Maximum age in seconds before revalidation
+    pub max_age_secs: u32,
+    /// Whether the resource is immutable (never changes)
+    pub immutable: bool,
+    /// Optional ETag for conditional requests
+    pub etag: Option<String>,
 }
 
 /// Simulate request for preflight checks (NORMATIVE)
@@ -1753,6 +1782,27 @@ FCP-7000..7999  External service errors
 FCP-9000..9999  Internal errors
 ```
 
+### 9.1 Standard Error Codes (NORMATIVE)
+
+| Code | Description | Category |
+|------|-------------|----------|
+| `FCP_ERR_UNSUPPORTED_VERSION` | Frame version not supported | Protocol |
+| `FCP_ERR_MAC_INVALID` | Session MAC verification failed | Auth |
+| `FCP_ERR_REPLAY` | Frame sequence indicates replay | Protocol |
+| `FCP_ERR_TOKEN_EXPIRED` | Capability token has expired | Capability |
+| `FCP_ERR_EGRESS_DENIED` | Egress blocked by NetworkConstraints | Network |
+| `FCP_ERR_ZONE_VIOLATION` | Operation crossed zone boundary illegally | Zone |
+| `FCP_ERR_CAPABILITY_MISSING` | Required capability not present | Capability |
+| `FCP_ERR_SCHEMA_MISMATCH` | Input/output schema validation failed | Protocol |
+| `FCP_ERR_RATE_EXCEEDED` | Rate limit exceeded | Resource |
+| `FCP_ERR_ATTESTATION_INVALID` | Node/device attestation failed validation | Auth |
+
+**Error Logging (NORMATIVE):** All errors MUST be logged with structured context including:
+- Error code and message
+- Operation ID and connector ID
+- Zone context
+- Timestamp (monotonic and wall-clock)
+
 ---
 
 ## 10. Agent Integration (Introspection + MCP)
@@ -1780,10 +1830,17 @@ Map connector operations to MCP-compatible tools with:
 ```toml
 [manifest]
 format = "fcp-connector-manifest"
-schema_version = "2.0"
+schema_version = "2.1"
 min_mesh_version = "2.0.0"              # NORMATIVE: minimum compatible mesh version
-min_protocol = "fcp2-sym"               # NORMATIVE: required protocol features
-interface_hash = "blake3:..."           # NORMATIVE: hash of API surface (ops + schemas + caps)
+min_protocol = "fcp2-sym/2.0"           # NORMATIVE: required protocol version (SemVer)
+# NORMATIVE: required protocol features (explicit capability negotiation)
+protocol_features = [
+  "fcps.aead.xchacha20poly1305",
+  "fcps.session_mac.hmacsha256.trunc16",
+  "egress.dns_rebind_protection",
+]
+interface_hash = "blake3-256:fcp.interface.v2:..."  # NORMATIVE: hash of API surface (ops + schemas + caps)
+max_datagram_bytes = 1200               # NORMATIVE: for MTU-constrained paths
 
 [connector]
 id = "fcp.telegram"
@@ -2454,6 +2511,21 @@ pub struct AuditHead {
     pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
 }
 
+/// Structured quorum signature with explicit signer attribution (NORMATIVE)
+///
+/// Each signature in a quorum-signed checkpoint MUST include:
+/// - The signing node's identity
+/// - The key ID used for this signature
+/// - The signature itself
+pub struct QuorumSignature {
+    /// Tailscale node ID of the signer
+    pub signer_node: TailscaleNodeId,
+    /// Key ID (first 8 bytes of BLAKE3-256("fcp.kid.v2" || pubkey))
+    pub signer_kid: [u8; 8],
+    /// Ed25519 signature over checkpoint content
+    pub sig: Signature,
+}
+
 /// Zone checkpoint for fast sync (NORMATIVE)
 ///
 /// Quorum-signed checkpoint of zone state for efficient synchronization.
@@ -2462,6 +2534,9 @@ pub struct AuditHead {
 pub struct ZoneCheckpoint {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
+    /// Optional backpointer for chain validation and fork detection (NORMATIVE)
+    /// If Some, the signer attests that prev_checkpoint was their prior tip.
+    pub prev_checkpoint: Option<ObjectId>,
     /// Enforceable heads (NORMATIVE):
     pub rev_head: ObjectId,
     pub rev_seq: u64,
