@@ -455,6 +455,34 @@ impl DiscordConnector {
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
+        // Extract and verify capability token
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing capability_token".into(),
+            })?;
+
+        let token: fcp_core::CapabilityToken = serde_json::from_value(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+
+        // Verify token
+        // Note: For now we pass empty resource_uris. In a full implementation,
+        // we would extract target resources (channel_id, etc) from input to validate constraints.
+        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation ID format".into(),
+        })?;
+
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(&token, &op_id, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
+
         let result = match operation {
             "discord.send_message" => self.invoke_send_message(input).await,
             "discord.edit_message" => self.invoke_edit_message(input).await,

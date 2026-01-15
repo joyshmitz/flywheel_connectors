@@ -95,6 +95,7 @@ impl OpenAIError {
             },
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
                 retry_after_ms: *retry_after_ms,
+                violation: None,
             },
             Self::ContextLengthExceeded { message } => FcpError::InvalidRequest {
                 code: 2002,

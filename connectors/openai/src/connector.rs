@@ -3,8 +3,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, CapabilityId, FcpError, FcpResult, IdempotencyClass, Introspection, OperationId,
-    OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, EventCaps,
+    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, InstanceId,
+    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
 use serde_json::json;
 use tracing::{info, instrument};
@@ -21,6 +22,9 @@ pub struct OpenAIConnector {
     requests_total: AtomicU64,
     requests_error: AtomicU64,
     total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000)
+    verifier: Option<CapabilityVerifier>,
+    instance_id: InstanceId,
+    session_id: Option<SessionId>,
 }
 
 impl OpenAIConnector {
@@ -32,6 +36,9 @@ impl OpenAIConnector {
             requests_total: AtomicU64::new(0),
             requests_error: AtomicU64::new(0),
             total_cost: AtomicU64::new(0),
+            verifier: None,
+            instance_id: InstanceId::new(),
+            session_id: None,
         }
     }
 
@@ -98,15 +105,54 @@ impl OpenAIConnector {
 
     /// Handle handshake method.
     pub async fn handle_handshake(
-        &self,
-        _params: serde_json::Value,
+        &mut self,
+        params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        Ok(json!({
-            "connector_id": "fcp.openai",
-            "connector_version": env!("CARGO_PKG_VERSION"),
-            "protocol_version": "1.0",
-            "capabilities": ["chat", "streaming", "tools", "vision"]
-        }))
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {e}"),
+            })?;
+
+        // Set up verifier
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.instance_id.clone(),
+        ));
+
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
+
+        // Convert capability IDs to grants
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {
+                capability: cap,
+                operation: None,
+            })
+            .collect();
+
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: "sha256:openai-connector-v1".into(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
     }
 
     /// Handle health check.
@@ -293,6 +339,30 @@ impl OpenAIConnector {
                 })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        // Extract and verify capability token
+        let token_value = params.get("capability_token").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing capability_token".into(),
+        })?;
+
+        let token: CapabilityToken = serde_json::from_value(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+
+        // Verify token
+        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation ID format".into(),
+        })?;
+
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(&token, &op_id, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
 
         let result = match operation {
             "openai.chat" => self.invoke_chat(input).await,

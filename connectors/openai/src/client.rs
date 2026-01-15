@@ -249,8 +249,7 @@ impl OpenAIClient {
                             "Retrying OpenAI API request"
                         );
                         tokio::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
                     Err(e) => return Err(e),
                 },
@@ -263,8 +262,7 @@ impl OpenAIClient {
                             "Retrying after connection error"
                         );
                         tokio::time::sleep(delay).await;
-                        delay =
-                            std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(OpenAIError::Http(e));
                     }
@@ -435,8 +433,8 @@ fn parse_sse_event(event_str: &str) -> Option<OpenAIResult<ChatCompletionChunk>>
 mod tests {
     use super::*;
     use wiremock::{
-        matchers::{header, method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
     };
 
     #[tokio::test]
@@ -566,8 +564,18 @@ mod tests {
 
     #[test]
     fn test_error_is_retryable() {
-        assert!(OpenAIError::RateLimited { retry_after_ms: 1000 }.is_retryable());
-        assert!(OpenAIError::Overloaded { retry_after_ms: 1000 }.is_retryable());
+        assert!(
+            OpenAIError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
+        assert!(
+            OpenAIError::Overloaded {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
         assert!(!OpenAIError::InvalidApiKey.is_retryable());
         assert!(!OpenAIError::NotConfigured.is_retryable());
     }

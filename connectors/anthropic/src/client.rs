@@ -12,7 +12,10 @@ use tracing::{debug, instrument, warn};
 
 use crate::{
     error::{AnthropicError, AnthropicResult},
-    types::{ApiError, Message, MessagesRequest, MessagesResponse, Model, StreamEvent, Tool, ToolChoice, Usage},
+    types::{
+        ApiError, Message, MessagesRequest, MessagesResponse, Model, StreamEvent, Tool, ToolChoice,
+        Usage,
+    },
 };
 
 /// Default API base URL.
@@ -212,28 +215,23 @@ impl AnthropicClient {
                 .await;
 
             match result {
-                Ok(response) => {
-                    match self.handle_response(response).await {
-                        Ok(data) => return Ok(data),
-                        Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                            if let Some(retry_after) = e.retry_after() {
-                                delay = retry_after;
-                            }
-                            warn!(
-                                attempt = attempts,
-                                delay_ms = delay.as_millis(),
-                                error = %e,
-                                "Retrying Anthropic API request"
-                            );
-                            tokio::time::sleep(delay).await;
-                            delay = std::cmp::min(
-                                delay * 2,
-                                Duration::from_millis(self.max_delay_ms),
-                            );
+                Ok(response) => match self.handle_response(response).await {
+                    Ok(data) => return Ok(data),
+                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
+                        if let Some(retry_after) = e.retry_after() {
+                            delay = retry_after;
                         }
-                        Err(e) => return Err(e),
+                        warn!(
+                            attempt = attempts,
+                            delay_ms = delay.as_millis(),
+                            error = %e,
+                            "Retrying Anthropic API request"
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
-                }
+                    Err(e) => return Err(e),
+                },
                 Err(e) if e.is_timeout() || e.is_connect() => {
                     if attempts < self.max_retries {
                         warn!(
@@ -324,9 +322,7 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
             return AnthropicError::InvalidApiKey;
         }
 
-        if error.error_type == "invalid_request_error"
-            && error.message.contains("context length")
-        {
+        if error.error_type == "invalid_request_error" && error.message.contains("context length") {
             return AnthropicError::ContextLengthExceeded {
                 message: error.message,
             };
@@ -348,9 +344,7 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
 }
 
 /// Parse SSE stream into events.
-fn parse_sse_stream(
-    response: Response,
-) -> impl Stream<Item = AnthropicResult<StreamEvent>> {
+fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<StreamEvent>> {
     async_stream::stream! {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -403,14 +397,17 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
 
     // Parse based on event type
     match event_type {
-        Some("message_start") | Some("content_block_start") | Some("content_block_delta")
-        | Some("content_block_stop") | Some("message_delta") | Some("message_stop")
-        | Some("ping") | Some("error") => {
-            match serde_json::from_str::<StreamEvent>(data) {
-                Ok(event) => Some(Ok(event)),
-                Err(e) => Some(Err(AnthropicError::Json(e))),
-            }
-        }
+        Some("message_start")
+        | Some("content_block_start")
+        | Some("content_block_delta")
+        | Some("content_block_stop")
+        | Some("message_delta")
+        | Some("message_stop")
+        | Some("ping")
+        | Some("error") => match serde_json::from_str::<StreamEvent>(data) {
+            Ok(event) => Some(Ok(event)),
+            Err(e) => Some(Err(AnthropicError::Json(e))),
+        },
         _ => None,
     }
 }
@@ -419,8 +416,8 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
 mod tests {
     use super::*;
     use wiremock::{
-        matchers::{header, method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
     };
 
     #[tokio::test]
@@ -541,8 +538,18 @@ mod tests {
 
     #[test]
     fn test_error_is_retryable() {
-        assert!(AnthropicError::RateLimited { retry_after_ms: 1000 }.is_retryable());
-        assert!(AnthropicError::Overloaded { retry_after_ms: 1000 }.is_retryable());
+        assert!(
+            AnthropicError::RateLimited {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
+        assert!(
+            AnthropicError::Overloaded {
+                retry_after_ms: 1000
+            }
+            .is_retryable()
+        );
         assert!(!AnthropicError::InvalidApiKey.is_retryable());
         assert!(!AnthropicError::NotConfigured.is_retryable());
     }

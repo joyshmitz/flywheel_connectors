@@ -333,6 +333,30 @@ impl TelegramConnector {
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
+        // Extract and verify capability token
+        let token_value = params.get("capability_token").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing capability_token".into(),
+        })?;
+
+        let token: fcp_core::CapabilityToken = serde_json::from_value(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+
+        // Verify token
+        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation ID format".into(),
+        })?;
+
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(&token, &op_id, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
+
         let result = match operation {
             "telegram.send_message" => self.invoke_send_message(input).await,
             "telegram.get_file" => self.invoke_get_file(input).await,

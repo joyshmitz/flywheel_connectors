@@ -72,12 +72,8 @@ impl DiscordError {
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after } => {
-                Some(Duration::from_secs_f64(*retry_after))
-            }
-            Self::Api { retry_after, .. } => {
-                retry_after.map(Duration::from_secs_f64)
-            }
+            Self::RateLimited { retry_after } => Some(Duration::from_secs_f64(*retry_after)),
+            Self::Api { retry_after, .. } => retry_after.map(Duration::from_secs_f64),
             _ => None,
         }
     }
@@ -110,6 +106,7 @@ impl DiscordError {
                     let retry_secs = retry_after.unwrap_or(30.0).clamp(0.0, 3600.0);
                     FcpError::RateLimited {
                         retry_after_ms: (retry_secs * 1000.0) as u64,
+                        violation: None,
                     }
                 } else {
                     FcpError::External {
@@ -126,6 +123,7 @@ impl DiscordError {
                 let retry_secs = retry_after.clamp(0.0, 3600.0);
                 FcpError::RateLimited {
                     retry_after_ms: (retry_secs * 1000.0) as u64,
+                    violation: None,
                 }
             }
             Self::InvalidToken => FcpError::Unauthorized {

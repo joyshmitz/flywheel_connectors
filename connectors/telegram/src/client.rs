@@ -75,7 +75,10 @@ impl TelegramClient {
 
     /// Get updates using long polling.
     #[instrument(skip(self))]
-    pub async fn get_updates(&self, request: GetUpdatesRequest) -> Result<Vec<Update>, TelegramError> {
+    pub async fn get_updates(
+        &self,
+        request: GetUpdatesRequest,
+    ) -> Result<Vec<Update>, TelegramError> {
         let response: TelegramResponse<Vec<Update>> = self
             .client
             .post(self.api_url("getUpdates"))
@@ -303,9 +306,7 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
         .unwrap_or(trimmed);
 
     // Strip group: prefix
-    let normalized = normalized
-        .strip_prefix("group:")
-        .unwrap_or(normalized);
+    let normalized = normalized.strip_prefix("group:").unwrap_or(normalized);
 
     // Handle t.me links
     if let Some(username) = normalized
@@ -374,7 +375,10 @@ mod tests {
 
         // Prefixed formats
         assert_eq!(normalize_chat_id("telegram:123456").unwrap(), "123456");
-        assert_eq!(normalize_chat_id("tg:group:-100123456").unwrap(), "-100123456");
+        assert_eq!(
+            normalize_chat_id("tg:group:-100123456").unwrap(),
+            "-100123456"
+        );
 
         // t.me links
         assert_eq!(normalize_chat_id("t.me/username").unwrap(), "@username");

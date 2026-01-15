@@ -104,6 +104,7 @@ impl AnthropicError {
                 } else if *status_code == Some(429) {
                     FcpError::RateLimited {
                         retry_after_ms: 30_000,
+                        violation: None,
                     }
                 } else {
                     FcpError::External {
@@ -117,6 +118,7 @@ impl AnthropicError {
             }
             Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
                 retry_after_ms: *retry_after_ms,
+                violation: None,
             },
             Self::Overloaded { retry_after_ms } => FcpError::External {
                 service: "anthropic".into(),

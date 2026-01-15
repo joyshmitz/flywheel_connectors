@@ -53,8 +53,8 @@ fn default_intents() -> u64 {
 }
 
 mod duration_secs {
-    use std::time::Duration;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::Duration;
 
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where

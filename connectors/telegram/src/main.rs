@@ -8,7 +8,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod client;
 mod connector;
@@ -47,9 +47,7 @@ fn run_fcp_loop() -> Result<()> {
             continue;
         }
 
-        let response = runtime.block_on(async {
-            handle_message(&mut connector, &line).await
-        });
+        let response = runtime.block_on(async { handle_message(&mut connector, &line).await });
 
         let response_json = serde_json::to_string(&response)?;
         writeln!(stdout, "{response_json}")?;
@@ -60,10 +58,7 @@ fn run_fcp_loop() -> Result<()> {
 }
 
 /// Handle a single FCP message.
-async fn handle_message(
-    connector: &mut TelegramConnector,
-    message: &str,
-) -> serde_json::Value {
+async fn handle_message(connector: &mut TelegramConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {
         Ok(v) => v,
         Err(e) => {
@@ -78,7 +73,10 @@ async fn handle_message(
 
     let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = request.get("id").cloned();
-    let params = request.get("params").cloned().unwrap_or(serde_json::json!({}));
+    let params = request
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     let result = match method {
         "configure" => connector.handle_configure(params).await,

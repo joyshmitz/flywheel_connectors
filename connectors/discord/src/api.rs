@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use reqwest::{Client, Response, StatusCode};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracing::{debug, instrument, warn};
 
 use crate::{
@@ -88,7 +88,10 @@ impl DiscordApiClient {
 
         loop {
             attempts += 1;
-            debug!(attempt = attempts, method, endpoint, "Making Discord API request (no response expected)");
+            debug!(
+                attempt = attempts,
+                method, endpoint, "Making Discord API request (no response expected)"
+            );
 
             let req = match method {
                 "DELETE" => self.client.delete(&url),
@@ -114,7 +117,11 @@ impl DiscordApiClient {
 
                         if attempts < self.max_retries {
                             delay = Duration::from_secs_f64(retry_after);
-                            warn!(attempt = attempts, delay_ms = delay.as_millis(), "Rate limited, retrying");
+                            warn!(
+                                attempt = attempts,
+                                delay_ms = delay.as_millis(),
+                                "Rate limited, retrying"
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
@@ -132,10 +139,11 @@ impl DiscordApiClient {
                         code: Option<i32>,
                         message: Option<String>,
                     }
-                    let error: DiscordApiError = serde_json::from_slice(&bytes).unwrap_or(DiscordApiError {
-                        code: Some(status.as_u16() as i32),
-                        message: Some(String::from_utf8_lossy(&bytes).into_owned()),
-                    });
+                    let error: DiscordApiError =
+                        serde_json::from_slice(&bytes).unwrap_or(DiscordApiError {
+                            code: Some(status.as_u16() as i32),
+                            message: Some(String::from_utf8_lossy(&bytes).into_owned()),
+                        });
 
                     let err = DiscordError::Api {
                         code: error.code.unwrap_or(status.as_u16() as i32),
@@ -177,7 +185,10 @@ impl DiscordApiClient {
 
         loop {
             attempts += 1;
-            debug!(attempt = attempts, method, endpoint, "Making Discord API request");
+            debug!(
+                attempt = attempts,
+                method, endpoint, "Making Discord API request"
+            );
 
             let mut req = match method {
                 "GET" => self.client.get(&url),
@@ -196,28 +207,23 @@ impl DiscordApiClient {
             let result = req.send().await;
 
             match result {
-                Ok(response) => {
-                    match self.handle_response(response).await {
-                        Ok(data) => return Ok(data),
-                        Err(e) if e.is_retryable() && attempts < self.max_retries => {
-                            if let Some(retry_after) = e.retry_after() {
-                                delay = retry_after;
-                            }
-                            warn!(
-                                attempt = attempts,
-                                delay_ms = delay.as_millis(),
-                                error = %e,
-                                "Retrying Discord API request"
-                            );
-                            tokio::time::sleep(delay).await;
-                            delay = std::cmp::min(
-                                delay * 2,
-                                Duration::from_millis(self.max_delay_ms),
-                            );
+                Ok(response) => match self.handle_response(response).await {
+                    Ok(data) => return Ok(data),
+                    Err(e) if e.is_retryable() && attempts < self.max_retries => {
+                        if let Some(retry_after) = e.retry_after() {
+                            delay = retry_after;
                         }
-                        Err(e) => return Err(e),
+                        warn!(
+                            attempt = attempts,
+                            delay_ms = delay.as_millis(),
+                            error = %e,
+                            "Retrying Discord API request"
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     }
-                }
+                    Err(e) => return Err(e),
+                },
                 Err(e) if e.is_timeout() || e.is_connect() => {
                     if attempts < self.max_retries {
                         warn!(
@@ -227,10 +233,7 @@ impl DiscordApiClient {
                             "Retrying after connection error"
                         );
                         tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(
-                            delay * 2,
-                            Duration::from_millis(self.max_delay_ms),
-                        );
+                        delay = std::cmp::min(delay * 2, Duration::from_millis(self.max_delay_ms));
                     } else {
                         return Err(DiscordError::Http(e));
                     }
@@ -366,7 +369,10 @@ impl DiscordApiClient {
     /// Trigger typing indicator.
     pub async fn trigger_typing(&self, channel_id: &str) -> DiscordResult<()> {
         let _: serde_json::Value = self
-            .post(&format!("/channels/{channel_id}/typing"), &serde_json::json!({}))
+            .post(
+                &format!("/channels/{channel_id}/typing"),
+                &serde_json::json!({}),
+            )
             .await?;
         Ok(())
     }
@@ -405,8 +411,8 @@ impl DiscordApiClient {
 mod tests {
     use super::*;
     use wiremock::{
-        matchers::{header, method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
     };
 
     /// Create a test config pointing to the mock server.

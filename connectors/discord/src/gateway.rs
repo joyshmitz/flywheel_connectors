@@ -8,7 +8,7 @@ use serde_json::json;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message as WsMessage, MaybeTlsStream, WebSocketStream,
+    MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message as WsMessage,
 };
 use tracing::{debug, error, info, instrument, warn};
 
@@ -16,7 +16,10 @@ use crate::{
     api::DiscordApiClient,
     config::DiscordConfig,
     error::{DiscordError, DiscordResult},
-    types::{GatewayHello, GatewayIdentify, GatewayPayload, GatewayProperties, GatewayReady, GatewayResume},
+    types::{
+        GatewayHello, GatewayIdentify, GatewayPayload, GatewayProperties, GatewayReady,
+        GatewayResume,
+    },
 };
 
 /// Discord Gateway opcodes.
@@ -92,7 +95,10 @@ pub enum GatewayEvent {
     /// Typing started.
     TypingStart(serde_json::Value),
     /// Unknown or unhandled event.
-    Unknown { event_name: String, data: serde_json::Value },
+    Unknown {
+        event_name: String,
+        data: serde_json::Value,
+    },
 }
 
 /// Discord Gateway connection.
@@ -144,9 +150,7 @@ impl GatewayConnection {
     /// Connect to the gateway and start receiving events.
     /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
-    pub async fn connect(
-        &mut self,
-    ) -> DiscordResult<mpsc::Receiver<GatewayEvent>> {
+    pub async fn connect(&mut self) -> DiscordResult<mpsc::Receiver<GatewayEvent>> {
         // Use resume_url if we have one (from previous READY), otherwise get fresh URL
         let gateway_url = if let Some(ref url) = self.resume_url {
             info!(url = %url, "Using resume gateway URL");
@@ -173,12 +177,7 @@ impl GatewayConnection {
 
         tokio::spawn(async move {
             if let Err(e) = run_gateway_loop(
-                ws_stream,
-                config,
-                event_tx,
-                session_id,
-                sequence,
-                resume_url,
+                ws_stream, config, event_tx, session_id, sequence, resume_url,
             )
             .await
             {
@@ -222,13 +221,17 @@ async fn run_gateway_loop(
             hello
         }
         Some(Ok(msg)) => {
-            return Err(DiscordError::Gateway(format!("Unexpected message: {msg:?}")));
+            return Err(DiscordError::Gateway(format!(
+                "Unexpected message: {msg:?}"
+            )));
         }
         Some(Err(e)) => {
             return Err(DiscordError::Gateway(format!("WebSocket error: {e}")));
         }
         None => {
-            return Err(DiscordError::Gateway("Connection closed before Hello".into()));
+            return Err(DiscordError::Gateway(
+                "Connection closed before Hello".into(),
+            ));
         }
     };
 
@@ -254,7 +257,9 @@ async fn run_gateway_loop(
         };
 
         write
-            .send(WsMessage::Text(serde_json::to_string(&resume_payload)?.into()))
+            .send(WsMessage::Text(
+                serde_json::to_string(&resume_payload)?.into(),
+            ))
             .await
             .map_err(|e| DiscordError::Gateway(format!("Failed to send Resume: {e}")))?;
     } else {
@@ -278,7 +283,9 @@ async fn run_gateway_loop(
         };
 
         write
-            .send(WsMessage::Text(serde_json::to_string(&identify_payload)?.into()))
+            .send(WsMessage::Text(
+                serde_json::to_string(&identify_payload)?.into(),
+            ))
             .await
             .map_err(|e| DiscordError::Gateway(format!("Failed to send Identify: {e}")))?;
     }

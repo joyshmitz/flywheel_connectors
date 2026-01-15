@@ -130,10 +130,7 @@ pub enum ContentBlock {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
     /// Base64-encoded image data
-    Base64 {
-        media_type: String,
-        data: String,
-    },
+    Base64 { media_type: String, data: String },
     /// URL to an image
     Url { url: String },
 }
@@ -296,14 +293,14 @@ pub enum StreamEvent {
         content_block: ContentBlockStartData,
     },
     /// Delta for content block
-    ContentBlockDelta {
-        index: u32,
-        delta: ContentDelta,
-    },
+    ContentBlockDelta { index: u32, delta: ContentDelta },
     /// End of content block
     ContentBlockStop { index: u32 },
     /// Delta for message (usage updates)
-    MessageDelta { delta: MessageDeltaData, usage: Usage },
+    MessageDelta {
+        delta: MessageDeltaData,
+        usage: Usage,
+    },
     /// End of message
     MessageStop,
     /// Ping event (keepalive)
