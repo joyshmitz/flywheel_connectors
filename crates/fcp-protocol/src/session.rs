@@ -1,0 +1,1518 @@
+//! FCP2 mesh session primitives (handshake, key derivation, and FCPS datagram MACs).
+//!
+//! Implements the normative session handshake defined in `FCP_Specification_V2.md` §4.2.
+use fcp_cbor::{SerializationError, to_canonical_cbor};
+use fcp_core::TailscaleNodeId;
+use fcp_crypto::{
+    CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, HkdfSha256,
+    X25519PublicKey, X25519SharedSecret, hkdf_sha256_array,
+};
+use fcp_tailscale::{MeshIdentity, TailscaleError};
+use hmac::{Hmac, Mac};
+use rand::RngCore;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::io::Cursor;
+use subtle::ConstantTimeEq;
+use thiserror::Error;
+
+/// Size of the session identifier in bytes.
+pub const SESSION_ID_SIZE: usize = 16;
+
+/// Size of the hello/ack nonces in bytes.
+pub const SESSION_NONCE_SIZE: usize = 16;
+
+/// Size of the stateless cookie in bytes.
+pub const SESSION_COOKIE_SIZE: usize = 32;
+
+/// Size of the truncated session MAC tag in bytes.
+pub const SESSION_MAC_SIZE: usize = 16;
+
+/// Length of the FCPS datagram header (`session_id` + seq + mac).
+pub const FCPS_DATAGRAM_HEADER_LEN: usize = 40;
+
+/// Default max datagram bytes (MTU-safe).
+pub const DEFAULT_MAX_DATAGRAM_BYTES: u16 = 1200;
+
+/// Maximum handshake payload size in bytes (defensive limit).
+pub const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
+
+/// Errors for session handshake and FCPS datagram handling.
+#[derive(Debug, Error)]
+pub enum SessionError {
+    #[error("invalid session crypto suite id {0}")]
+    InvalidSuiteId(u8),
+
+    #[error("no mutually supported session crypto suite")]
+    NoMutualSuite,
+
+    #[error("missing signature")]
+    MissingSignature,
+
+    #[error("signature verification failed")]
+    InvalidSignature,
+
+    #[error("invalid stateless cookie")]
+    InvalidCookie,
+
+    #[error("invalid stateless cookie length (len {len})")]
+    InvalidCookieLength { len: usize },
+
+    #[error("attestation missing or invalid")]
+    InvalidAttestation,
+
+    #[error("attestation expired")]
+    AttestationExpired,
+
+    #[error("attested node id does not match handshake")]
+    AttestationNodeMismatch,
+
+    #[error("attestation verification failed: {reason}")]
+    AttestationVerifyFailed { reason: String },
+
+    #[error("FCPS datagram too short (len {len})")]
+    DatagramTooShort { len: usize },
+
+    #[error("FCPS datagram too large (len {len} > max {max})")]
+    DatagramTooLarge { len: usize, max: usize },
+
+    #[error("MAC key length invalid")]
+    InvalidMacKeyLength,
+
+    #[error("timestamp skew too large (delta {delta} > max {max})")]
+    TimestampSkew { delta: u64, max: u64 },
+
+    #[error(transparent)]
+    Cbor(#[from] fcp_cbor::SerializationError),
+
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+}
+
+/// Session crypto suite negotiation (NORMATIVE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionCryptoSuite {
+    /// X25519 + HKDF-SHA256 + HMAC-SHA256 (tag truncated to 16 bytes).
+    Suite1 = 1,
+    /// X25519 + HKDF-SHA256 + BLAKE3-keyed (tag truncated to 16 bytes).
+    Suite2 = 2,
+}
+
+impl SessionCryptoSuite {
+    /// Return the numeric suite identifier.
+    #[must_use]
+    pub const fn id(self) -> u8 {
+        self as u8
+    }
+
+    /// Convert from a numeric suite identifier.
+    ///
+    /// # Errors
+    /// Returns `SessionError::InvalidSuiteId` for unknown values.
+    pub const fn try_from_id(id: u8) -> Result<Self, SessionError> {
+        match id {
+            1 => Ok(Self::Suite1),
+            2 => Ok(Self::Suite2),
+            other => Err(SessionError::InvalidSuiteId(other)),
+        }
+    }
+
+    /// Human-readable suite label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Suite1 => "suite1-hmacsha256",
+            Self::Suite2 => "suite2-blake3",
+        }
+    }
+}
+
+impl Serialize for SessionCryptoSuite {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u8(self.id())
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionCryptoSuite {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let id = u8::deserialize(deserializer)?;
+        Self::try_from_id(id).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Mesh session identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MeshSessionId(#[serde(with = "bytes16_serde")] pub [u8; SESSION_ID_SIZE]);
+
+impl MeshSessionId {
+    /// Generate a new random session id.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut bytes = [0u8; SESSION_ID_SIZE];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    /// Borrow the raw session id bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; SESSION_ID_SIZE] {
+        &self.0
+    }
+}
+
+impl Default for MeshSessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fixed-size session nonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionNonce(#[serde(with = "bytes16_serde")] pub [u8; SESSION_NONCE_SIZE]);
+
+impl SessionNonce {
+    /// Generate a new random nonce.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut bytes = [0u8; SESSION_NONCE_SIZE];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    /// Borrow the raw nonce bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; SESSION_NONCE_SIZE] {
+        &self.0
+    }
+}
+
+impl Default for SessionNonce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Stateless cookie for `HelloRetry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionCookie(#[serde(with = "bytes32_serde")] pub [u8; SESSION_COOKIE_SIZE]);
+
+impl SessionCookie {
+    /// Borrow the raw cookie bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; SESSION_COOKIE_SIZE] {
+        &self.0
+    }
+
+    /// Parse a cookie from raw bytes.
+    ///
+    /// # Errors
+    /// Returns `SessionError::InvalidCookieLength` if length is incorrect.
+    pub fn try_from_slice(slice: &[u8]) -> Result<Self, SessionError> {
+        if slice.len() != SESSION_COOKIE_SIZE {
+            return Err(SessionError::InvalidCookieLength { len: slice.len() });
+        }
+        let mut bytes = [0u8; SESSION_COOKIE_SIZE];
+        bytes.copy_from_slice(slice);
+        Ok(Self(bytes))
+    }
+}
+
+mod bytes16_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(bytes)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 16], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != 16 {
+            return Err(serde::de::Error::custom(format!(
+                "invalid length: expected 16, got {}",
+                bytes.len()
+            )));
+        }
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+}
+
+mod bytes32_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(bytes)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        if bytes.len() != 32 {
+            return Err(serde::de::Error::custom(format!(
+                "invalid length: expected 32, got {}",
+                bytes.len()
+            )));
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Ok(out)
+    }
+}
+
+/// Negotiated transport limits (NORMATIVE when used).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TransportLimits {
+    /// Maximum UDP payload bytes the sender will transmit for FCPS frames.
+    pub max_datagram_bytes: u16,
+}
+
+impl TransportLimits {
+    /// Validate `max_datagram_bytes` and return the effective limit.
+    #[must_use]
+    pub const fn effective_max(self) -> u16 {
+        if self.max_datagram_bytes == 0 {
+            DEFAULT_MAX_DATAGRAM_BYTES
+        } else {
+            self.max_datagram_bytes
+        }
+    }
+}
+
+impl Default for TransportLimits {
+    fn default() -> Self {
+        Self {
+            max_datagram_bytes: DEFAULT_MAX_DATAGRAM_BYTES,
+        }
+    }
+}
+
+/// Session handshake: initiator → responder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshSessionHello {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub nonce: SessionNonce,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cookie: Option<SessionCookie>,
+    pub timestamp: u64,
+    pub suites: Vec<SessionCryptoSuite>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_limits: Option<TransportLimits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Ed25519Signature>,
+}
+
+impl MeshSessionHello {
+    /// Compute the handshake transcript bytes (signature excluded).
+    ///
+    /// Uses canonical CBOR for each field to keep encoding deterministic.
+    ///
+    /// # Errors
+    /// Returns `SessionError::Cbor` if canonical encoding fails.
+    pub fn transcript_bytes(&self) -> Result<Vec<u8>, SessionError> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"FCP2-HELLO-V1");
+        append_cbor(&mut buf, &self.from)?;
+        append_cbor(&mut buf, &self.to)?;
+        append_cbor(&mut buf, &self.eph_pubkey)?;
+        append_cbor(&mut buf, &self.nonce)?;
+        append_cbor(&mut buf, &self.cookie)?;
+        append_cbor(&mut buf, &self.timestamp)?;
+        append_cbor(&mut buf, &self.suites)?;
+        append_cbor(&mut buf, &self.transport_limits)?;
+        Ok(buf)
+    }
+
+    /// Sign the hello transcript in-place.
+    ///
+    /// # Errors
+    /// Returns `SessionError::Cbor` if canonical encoding fails.
+    pub fn sign(&mut self, signing_key: &Ed25519SigningKey) -> Result<(), SessionError> {
+        let transcript = self.transcript_bytes()?;
+        self.signature = Some(signing_key.sign(&transcript));
+        Ok(())
+    }
+
+    /// Verify the hello signature.
+    ///
+    /// # Errors
+    /// Returns `SessionError::MissingSignature` or `SessionError::InvalidSignature`.
+    pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), SessionError> {
+        let signature = self.signature.ok_or(SessionError::MissingSignature)?;
+        let transcript = self.transcript_bytes()?;
+        verifying_key
+            .verify(&transcript, &signature)
+            .map_err(|_| SessionError::InvalidSignature)
+    }
+}
+
+/// Session handshake: responder → initiator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshSessionAck {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub eph_pubkey: X25519PublicKey,
+    pub nonce: SessionNonce,
+    pub session_id: MeshSessionId,
+    pub suite: SessionCryptoSuite,
+    pub timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Ed25519Signature>,
+}
+
+impl MeshSessionAck {
+    /// Compute the handshake transcript bytes (signature excluded).
+    ///
+    /// # Errors
+    /// Returns `SessionError::Cbor` if canonical encoding fails.
+    pub fn transcript_bytes(&self, hello: &MeshSessionHello) -> Result<Vec<u8>, SessionError> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"FCP2-ACK-V1");
+        append_cbor(&mut buf, &self.from)?;
+        append_cbor(&mut buf, &self.to)?;
+        append_cbor(&mut buf, &self.eph_pubkey)?;
+        append_cbor(&mut buf, &self.nonce)?;
+        append_cbor(&mut buf, &self.session_id)?;
+        append_cbor(&mut buf, &self.suite)?;
+        append_cbor(&mut buf, &self.timestamp)?;
+        append_cbor(&mut buf, &hello.eph_pubkey)?;
+        append_cbor(&mut buf, &hello.nonce)?;
+        Ok(buf)
+    }
+
+    /// Sign the ack transcript in-place.
+    ///
+    /// # Errors
+    /// Returns `SessionError::Cbor` if canonical encoding fails.
+    pub fn sign(
+        &mut self,
+        hello: &MeshSessionHello,
+        signing_key: &Ed25519SigningKey,
+    ) -> Result<(), SessionError> {
+        let transcript = self.transcript_bytes(hello)?;
+        self.signature = Some(signing_key.sign(&transcript));
+        Ok(())
+    }
+
+    /// Verify the ack signature.
+    ///
+    /// # Errors
+    /// Returns `SessionError::MissingSignature` or `SessionError::InvalidSignature`.
+    pub fn verify(
+        &self,
+        hello: &MeshSessionHello,
+        verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<(), SessionError> {
+        let signature = self.signature.ok_or(SessionError::MissingSignature)?;
+        let transcript = self.transcript_bytes(hello)?;
+        verifying_key
+            .verify(&transcript, &signature)
+            .map_err(|_| SessionError::InvalidSignature)
+    }
+}
+
+/// Decode canonical CBOR and reject non-canonical encodings.
+fn decode_canonical_cbor<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T, SessionError> {
+    if bytes.len() > MAX_HANDSHAKE_BYTES {
+        return Err(SessionError::Cbor(SerializationError::PayloadTooLarge {
+            len: bytes.len(),
+            max: MAX_HANDSHAKE_BYTES,
+        }));
+    }
+
+    let mut cursor = Cursor::new(bytes);
+    let value: T =
+        ciborium::from_reader(&mut cursor).map_err(SerializationError::CborDeserialize)?;
+    if cursor.position() as usize != bytes.len() {
+        return Err(SessionError::Cbor(SerializationError::TrailingBytes));
+    }
+
+    let canonical = to_canonical_cbor(&value)?;
+    if canonical != bytes {
+        return Err(SessionError::Cbor(SerializationError::NonCanonicalEncoding));
+    }
+
+    Ok(value)
+}
+
+/// Decode a canonical CBOR-encoded `MeshSessionHello`.
+///
+/// # Errors
+/// Returns `SessionError::Cbor` if decoding fails or encoding is non-canonical.
+pub fn decode_hello_cbor(bytes: &[u8]) -> Result<MeshSessionHello, SessionError> {
+    decode_canonical_cbor(bytes)
+}
+
+/// Decode a canonical CBOR-encoded `MeshSessionAck`.
+///
+/// # Errors
+/// Returns `SessionError::Cbor` if decoding fails or encoding is non-canonical.
+pub fn decode_ack_cbor(bytes: &[u8]) -> Result<MeshSessionAck, SessionError> {
+    decode_canonical_cbor(bytes)
+}
+
+/// Decode a raw cookie from bytes.
+///
+/// # Errors
+/// Returns `SessionError::InvalidCookieLength` if length is incorrect.
+pub fn decode_cookie_bytes(bytes: &[u8]) -> Result<SessionCookie, SessionError> {
+    SessionCookie::try_from_slice(bytes)
+}
+
+/// Stateless cookie challenge (`HelloRetry`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshSessionHelloRetry {
+    pub from: TailscaleNodeId,
+    pub to: TailscaleNodeId,
+    pub cookie: SessionCookie,
+    pub timestamp: u64,
+}
+
+fn map_attestation_error(err: TailscaleError) -> SessionError {
+    match err {
+        TailscaleError::InvalidAttestation => SessionError::InvalidAttestation,
+        TailscaleError::AttestationExpired => SessionError::AttestationExpired,
+        other => SessionError::AttestationVerifyFailed {
+            reason: other.to_string(),
+        },
+    }
+}
+
+/// Get current Unix timestamp in seconds.
+pub fn current_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before Unix epoch")
+        .as_secs()
+}
+
+/// Verify a hello signature against a peer identity and attestation.
+///
+/// # Errors
+/// Returns `SessionError::AttestationNodeMismatch` if the node id differs,
+/// `SessionError::TimestampSkew` if timestamp is outside policy window,
+/// or the relevant `SessionError` if attestation/signature verification fails.
+pub fn verify_hello_attested(
+    hello: &MeshSessionHello,
+    identity: &MeshIdentity,
+    time_policy: &TimePolicy,
+) -> Result<(), SessionError> {
+    if identity.node_id.as_str() != hello.from.as_str() {
+        return Err(SessionError::AttestationNodeMismatch);
+    }
+
+    // Verify timestamp freshness
+    let now = current_timestamp();
+    let skew = if hello.timestamp > now {
+        hello.timestamp - now
+    } else {
+        now - hello.timestamp
+    };
+
+    if skew > time_policy.max_skew_secs {
+        return Err(SessionError::TimestampSkew {
+            delta: skew,
+            max: time_policy.max_skew_secs,
+        });
+    }
+
+    identity
+        .verify_attestation()
+        .map_err(map_attestation_error)?;
+    hello.verify(&identity.node_keys.signing_key)?;
+    Ok(())
+}
+
+/// Verify an ack signature against a peer identity and attestation.
+///
+/// # Errors
+/// Returns `SessionError::AttestationNodeMismatch` if the node id differs,
+/// `SessionError::TimestampSkew` if timestamp is outside policy window,
+/// or the relevant `SessionError` if attestation/signature verification fails.
+pub fn verify_ack_attested(
+    ack: &MeshSessionAck,
+    hello: &MeshSessionHello,
+    identity: &MeshIdentity,
+    time_policy: &TimePolicy,
+) -> Result<(), SessionError> {
+    if identity.node_id.as_str() != ack.from.as_str() {
+        return Err(SessionError::AttestationNodeMismatch);
+    }
+
+    // Verify timestamp freshness
+    let now = current_timestamp();
+    let skew = if ack.timestamp > now {
+        ack.timestamp - now
+    } else {
+        now - ack.timestamp
+    };
+
+    if skew > time_policy.max_skew_secs {
+        return Err(SessionError::TimestampSkew {
+            delta: skew,
+            max: time_policy.max_skew_secs,
+        });
+    }
+
+    identity
+        .verify_attestation()
+        .map_err(map_attestation_error)?;
+    ack.verify(hello, &identity.node_keys.signing_key)?;
+    Ok(())
+}
+
+/// Direction for session MAC computation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionDirection {
+    InitiatorToResponder,
+    ResponderToInitiator,
+}
+
+impl SessionDirection {
+    /// Return the direction byte used in MAC input.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::InitiatorToResponder => 0x00,
+            Self::ResponderToInitiator => 0x01,
+        }
+    }
+}
+
+/// Replay window tracker for a session.
+///
+/// Uses a sliding bitmap to track received sequence numbers and detect replays.
+#[derive(Debug, Clone)]
+pub struct ReplayWindow {
+    highest_seq: u64,
+    bitmap: u128,
+    window_size: u64,
+}
+
+impl ReplayWindow {
+    /// Create a new replay window with the given size.
+    #[must_use]
+    pub fn new(window_size: u64) -> Self {
+        let window_size = window_size.max(1);
+        Self {
+            highest_seq: 0,
+            bitmap: 0,
+            window_size,
+        }
+    }
+
+    /// Check if sequence is valid (not a replay) and update window.
+    ///
+    /// Returns `true` if accepted, `false` if replayed or too old.
+    pub fn check_and_update(&mut self, seq: u64) -> bool {
+        if seq == 0 {
+            return false;
+        }
+
+        if seq > self.highest_seq {
+            let shift = (seq - self.highest_seq).min(128);
+            self.bitmap = self.bitmap.checked_shl(shift as u32).unwrap_or(0);
+            self.bitmap |= 1;
+            self.highest_seq = seq;
+            true
+        } else {
+            let diff = self.highest_seq - seq;
+            if diff >= self.window_size || diff >= 128 {
+                return false;
+            }
+            let bit = 1u128 << diff;
+            if self.bitmap & bit != 0 {
+                return false;
+            }
+            self.bitmap |= bit;
+            true
+        }
+    }
+
+    /// Return the highest sequence number observed.
+    #[must_use]
+    pub const fn highest_seq(&self) -> u64 {
+        self.highest_seq
+    }
+}
+
+/// Replay protection policy (NORMATIVE defaults).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionReplayPolicy {
+    pub max_reorder_window: u64,
+    pub rekey_after_frames: u64,
+    pub rekey_after_seconds: u64,
+    pub rekey_after_bytes: u64,
+}
+
+impl Default for SessionReplayPolicy {
+    fn default() -> Self {
+        Self {
+            max_reorder_window: 128,
+            rekey_after_frames: 1_000_000_000,
+            rekey_after_seconds: 86_400,
+            rekey_after_bytes: 1_099_511_627_776,
+        }
+    }
+}
+
+/// Time skew handling policy (NORMATIVE defaults).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimePolicy {
+    pub max_skew_secs: u64,
+    pub log_skew_events: bool,
+}
+
+impl Default for TimePolicy {
+    fn default() -> Self {
+        Self {
+            max_skew_secs: 120,
+            log_skew_events: true,
+        }
+    }
+}
+
+/// Derived session key material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionKeys {
+    pub k_mac_i2r: [u8; 32],
+    pub k_mac_r2i: [u8; 32],
+    pub k_ctx: [u8; 32],
+}
+
+impl SessionKeys {
+    /// Return the MAC key for a given direction.
+    #[must_use]
+    pub const fn mac_key(&self, direction: SessionDirection) -> &[u8; 32] {
+        match direction {
+            SessionDirection::InitiatorToResponder => &self.k_mac_i2r,
+            SessionDirection::ResponderToInitiator => &self.k_mac_r2i,
+        }
+    }
+}
+
+/// Derive session keys from the ECDH shared secret and handshake transcript data.
+///
+/// # Errors
+/// Returns `SessionError::Crypto` if HKDF expansion fails.
+pub fn derive_session_keys(
+    shared_secret: &X25519SharedSecret,
+    session_id: &MeshSessionId,
+    initiator_node_id: &TailscaleNodeId,
+    responder_node_id: &TailscaleNodeId,
+    hello_nonce: &SessionNonce,
+    ack_nonce: &SessionNonce,
+) -> Result<SessionKeys, SessionError> {
+    let mut info = Vec::new();
+    info.extend_from_slice(b"FCP2-SESSION-V1");
+    info.extend_from_slice(initiator_node_id.as_str().as_bytes());
+    info.extend_from_slice(responder_node_id.as_str().as_bytes());
+    info.extend_from_slice(hello_nonce.as_bytes());
+    info.extend_from_slice(ack_nonce.as_bytes());
+
+    let prk =
+        hkdf_sha256_array::<32>(Some(session_id.as_bytes()), shared_secret.as_bytes(), &info)?;
+
+    let hkdf = HkdfSha256::new(None, &prk);
+    let okm = hkdf.expand_to_array::<96>(b"FCP2-SESSION-KEYS-V1")?;
+
+    let mut k_mac_i2r = [0u8; 32];
+    let mut k_mac_r2i = [0u8; 32];
+    let mut k_ctx = [0u8; 32];
+    k_mac_i2r.copy_from_slice(&okm[0..32]);
+    k_mac_r2i.copy_from_slice(&okm[32..64]);
+    k_ctx.copy_from_slice(&okm[64..96]);
+
+    Ok(SessionKeys {
+        k_mac_i2r,
+        k_mac_r2i,
+        k_ctx,
+    })
+}
+
+/// Negotiate the session crypto suite using initiator preference ordering.
+#[must_use]
+pub fn negotiate_suite(
+    initiator_suites: &[SessionCryptoSuite],
+    responder_suites: &[SessionCryptoSuite],
+) -> Option<SessionCryptoSuite> {
+    initiator_suites
+        .iter()
+        .copied()
+        .find(|suite| responder_suites.contains(suite))
+}
+
+/// Compute the stateless cookie for a hello message.
+///
+/// # Errors
+/// Returns `SessionError::InvalidMacKeyLength` on key init failure.
+pub fn compute_cookie(
+    cookie_key: &[u8; 32],
+    hello: &MeshSessionHello,
+) -> Result<SessionCookie, SessionError> {
+    let mut data = Vec::new();
+    append_cbor(&mut data, &hello.from)?;
+    append_cbor(&mut data, &hello.to)?;
+    append_cbor(&mut data, &hello.eph_pubkey)?;
+    append_cbor(&mut data, &hello.nonce)?;
+    append_cbor(&mut data, &hello.timestamp)?;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(cookie_key)
+        .map_err(|_| SessionError::InvalidMacKeyLength)?;
+    mac.update(&data);
+    let result = mac.finalize().into_bytes();
+    let mut out = [0u8; SESSION_COOKIE_SIZE];
+    out.copy_from_slice(&result[..SESSION_COOKIE_SIZE]);
+    Ok(SessionCookie(out))
+}
+
+/// Verify a stateless cookie against a hello message.
+///
+/// # Errors
+/// Returns `SessionError::InvalidCookie` if the cookie does not match.
+pub fn verify_cookie(
+    cookie_key: &[u8; 32],
+    hello: &MeshSessionHello,
+    cookie: &SessionCookie,
+) -> Result<(), SessionError> {
+    let expected = compute_cookie(cookie_key, hello)?;
+    if expected.as_bytes().ct_eq(cookie.as_bytes()).into() {
+        Ok(())
+    } else {
+        Err(SessionError::InvalidCookie)
+    }
+}
+
+/// Compute the session MAC for an FCPS frame.
+///
+/// # Errors
+/// Returns `SessionError::InvalidMacKeyLength` on key init failure.
+pub fn compute_session_mac(
+    suite: SessionCryptoSuite,
+    mac_key: &[u8; 32],
+    session_id: &MeshSessionId,
+    direction: SessionDirection,
+    seq: u64,
+    frame_bytes: &[u8],
+) -> Result<[u8; SESSION_MAC_SIZE], SessionError> {
+    let data = mac_input(session_id, direction, seq, frame_bytes);
+    match suite {
+        SessionCryptoSuite::Suite1 => {
+            let mut mac = Hmac::<Sha256>::new_from_slice(mac_key)
+                .map_err(|_| SessionError::InvalidMacKeyLength)?;
+            mac.update(&data);
+            let full = mac.finalize().into_bytes();
+            let mut out = [0u8; SESSION_MAC_SIZE];
+            out.copy_from_slice(&full[..SESSION_MAC_SIZE]);
+            Ok(out)
+        }
+        SessionCryptoSuite::Suite2 => {
+            let hash = blake3::keyed_hash(mac_key, &data);
+            let mut out = [0u8; SESSION_MAC_SIZE];
+            out.copy_from_slice(&hash.as_bytes()[..SESSION_MAC_SIZE]);
+            Ok(out)
+        }
+    }
+}
+
+/// Verify the session MAC for an FCPS frame.
+///
+/// # Errors
+/// Returns `SessionError::InvalidSignature` on MAC mismatch.
+pub fn verify_session_mac(
+    suite: SessionCryptoSuite,
+    mac_key: &[u8; 32],
+    session_id: &MeshSessionId,
+    direction: SessionDirection,
+    seq: u64,
+    frame_bytes: &[u8],
+    expected: &[u8; SESSION_MAC_SIZE],
+) -> Result<(), SessionError> {
+    let computed = compute_session_mac(suite, mac_key, session_id, direction, seq, frame_bytes)?;
+    if computed.ct_eq(expected).into() {
+        Ok(())
+    } else {
+        Err(SessionError::InvalidSignature)
+    }
+}
+
+/// FCPS datagram wrapper (on-wire format).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FcpsDatagram {
+    pub session_id: MeshSessionId,
+    pub seq: u64,
+    pub mac: [u8; SESSION_MAC_SIZE],
+    pub frame_bytes: Vec<u8>,
+}
+
+impl FcpsDatagram {
+    /// Encode the datagram to bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(FCPS_DATAGRAM_HEADER_LEN + self.frame_bytes.len());
+        out.extend_from_slice(self.session_id.as_bytes());
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        out.extend_from_slice(&self.mac);
+        out.extend_from_slice(&self.frame_bytes);
+        out
+    }
+
+    /// Decode a datagram from bytes, enforcing length limits.
+    ///
+    /// # Errors
+    /// Returns `SessionError::DatagramTooShort` or `SessionError::DatagramTooLarge`.
+    pub fn decode(bytes: &[u8], max_datagram_bytes: u16) -> Result<Self, SessionError> {
+        if bytes.len() < FCPS_DATAGRAM_HEADER_LEN {
+            return Err(SessionError::DatagramTooShort { len: bytes.len() });
+        }
+
+        let max = max_datagram_bytes as usize;
+        if bytes.len() > max {
+            return Err(SessionError::DatagramTooLarge {
+                len: bytes.len(),
+                max,
+            });
+        }
+
+        let mut session_id = [0u8; SESSION_ID_SIZE];
+        session_id.copy_from_slice(&bytes[0..16]);
+
+        let mut seq_bytes = [0u8; 8];
+        seq_bytes.copy_from_slice(&bytes[16..24]);
+        let seq = u64::from_le_bytes(seq_bytes);
+
+        let mut mac = [0u8; SESSION_MAC_SIZE];
+        mac.copy_from_slice(&bytes[24..40]);
+
+        let frame_bytes = bytes[40..].to_vec();
+
+        Ok(Self {
+            session_id: MeshSessionId(session_id),
+            seq,
+            mac,
+            frame_bytes,
+        })
+    }
+}
+
+fn append_cbor<T: Serialize>(buf: &mut Vec<u8>, value: &T) -> Result<(), SessionError> {
+    let bytes = to_canonical_cbor(value)?;
+    buf.extend_from_slice(&bytes);
+    Ok(())
+}
+
+fn mac_input(
+    session_id: &MeshSessionId,
+    direction: SessionDirection,
+    seq: u64,
+    frame_bytes: &[u8],
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(SESSION_ID_SIZE + 1 + 8 + frame_bytes.len());
+    data.extend_from_slice(session_id.as_bytes());
+    data.push(direction.as_u8());
+    data.extend_from_slice(&seq.to_le_bytes());
+    data.extend_from_slice(frame_bytes);
+    data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_crypto::X25519SecretKey;
+    use fcp_tailscale::{MeshIdentity, NodeId, NodeKeyAttestation, NodeKeys, TailscaleTag};
+    use serde_json::json;
+    use std::panic::AssertUnwindSafe;
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    struct LogContext<'a> {
+        phase: &'a str,
+        operation: &'a str,
+        suite: Option<SessionCryptoSuite>,
+        session_id: Option<&'a MeshSessionId>,
+        peer_node_id: Option<&'a TailscaleNodeId>,
+        reason_code: Option<&'a str>,
+        details: Option<serde_json::Value>,
+    }
+
+    impl<'a> LogContext<'a> {
+        fn new(phase: &'a str, operation: &'a str) -> Self {
+            Self {
+                phase,
+                operation,
+                suite: None,
+                session_id: None,
+                peer_node_id: None,
+                reason_code: None,
+                details: None,
+            }
+        }
+
+        fn with_suite(mut self, suite: SessionCryptoSuite) -> Self {
+            self.suite = Some(suite);
+            self
+        }
+
+        fn with_session(mut self, session_id: &'a MeshSessionId) -> Self {
+            self.session_id = Some(session_id);
+            self
+        }
+
+        fn with_peer(mut self, peer: &'a TailscaleNodeId) -> Self {
+            self.peer_node_id = Some(peer);
+            self
+        }
+
+        fn with_reason(mut self, reason_code: &'a str) -> Self {
+            self.reason_code = Some(reason_code);
+            self
+        }
+
+        fn with_details(mut self, details: serde_json::Value) -> Self {
+            self.details = Some(details);
+            self
+        }
+    }
+
+    fn run_logged_test<F>(test_name: &str, assertions: u32, context: &LogContext<'_>, f: F)
+    where
+        F: FnOnce(),
+    {
+        let start = Instant::now();
+        let result = std::panic::catch_unwind(AssertUnwindSafe(f));
+        let duration_ms = start.elapsed().as_millis();
+
+        let (passed, failed, outcome) = match result {
+            Ok(()) => (assertions, 0, "pass"),
+            Err(_) => (0, assertions, "fail"),
+        };
+
+        let log = json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "level": "info",
+            "test_name": test_name,
+            "module": "fcp-session",
+            "phase": context.phase,
+            "correlation_id": Uuid::new_v4().to_string(),
+            "session_id": context.session_id.map(|id| hex::encode(id.as_bytes())),
+            "peer_node_id": context.peer_node_id.map(TailscaleNodeId::as_str),
+            "suite": context.suite.map(SessionCryptoSuite::as_str),
+            "operation": context.operation,
+            "result": outcome,
+            "reason_code": context.reason_code,
+            "details": context.details,
+            "duration_ms": duration_ms,
+            "assertions": {
+                "passed": passed,
+                "failed": failed
+            }
+        });
+        println!("{log}");
+
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn suite_negotiation_prefers_initiator_order() {
+        let context = LogContext::new("handshake", "suite_negotiate");
+        run_logged_test(
+            "suite_negotiation_prefers_initiator_order",
+            2,
+            &context,
+            || {
+                let initiator = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
+                let responder = [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
+                let chosen = negotiate_suite(&initiator, &responder).expect("suite chosen");
+                assert_eq!(chosen, SessionCryptoSuite::Suite2);
+                assert_eq!(chosen.id(), 2);
+            },
+        );
+    }
+
+    #[test]
+    fn session_mac_round_trip() {
+        let session_id = MeshSessionId([0x22_u8; 16]);
+        let context = LogContext::new("established", "mac_round_trip")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite2);
+        run_logged_test("session_mac_round_trip", 2, &context, || {
+            let key = [0x11_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite2,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                7,
+                frame,
+            )
+            .expect("mac computed");
+            verify_session_mac(
+                SessionCryptoSuite::Suite2,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                7,
+                frame,
+                &mac,
+            )
+            .expect("mac verified");
+        });
+    }
+
+    #[test]
+    fn fcps_datagram_encode_decode() {
+        let session_id = MeshSessionId([0x33_u8; 16]);
+        let context = LogContext::new("datagram", "encode_decode").with_session(&session_id);
+        run_logged_test("fcps_datagram_encode_decode", 3, &context, || {
+            let datagram = FcpsDatagram {
+                session_id,
+                seq: 42,
+                mac: [0x44_u8; 16],
+                frame_bytes: vec![0xAA, 0xBB, 0xCC],
+            };
+            let encoded = datagram.encode();
+            let decoded =
+                FcpsDatagram::decode(&encoded, DEFAULT_MAX_DATAGRAM_BYTES).expect("decode ok");
+            assert_eq!(decoded.session_id, datagram.session_id);
+            assert_eq!(decoded.seq, datagram.seq);
+            assert_eq!(decoded.frame_bytes, datagram.frame_bytes);
+        });
+    }
+
+    #[test]
+    fn suite_negotiation_returns_none_when_no_overlap() {
+        let context = LogContext::new("handshake", "suite_negotiate").with_reason("FCP-3001");
+        run_logged_test(
+            "suite_negotiation_returns_none_when_no_overlap",
+            1,
+            &context,
+            || {
+                let initiator = [SessionCryptoSuite::Suite1];
+                let responder = [SessionCryptoSuite::Suite2];
+                assert!(negotiate_suite(&initiator, &responder).is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn hello_signature_round_trip() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let context = LogContext::new("handshake", "hello_verify").with_peer(&responder);
+        run_logged_test("hello_signature_round_trip", 3, &context, || {
+            let signing_key = Ed25519SigningKey::generate();
+            let mut hello = MeshSessionHello {
+                from: initiator.clone(),
+                to: responder.clone(),
+                eph_pubkey: X25519SecretKey::generate().public_key(),
+                nonce: SessionNonce([0x10_u8; 16]),
+                cookie: None,
+                timestamp: 1_704_067_200,
+                suites: vec![SessionCryptoSuite::Suite1],
+                transport_limits: Some(TransportLimits {
+                    max_datagram_bytes: 1200,
+                }),
+                signature: None,
+            };
+            let transcript_before = hello.transcript_bytes().expect("transcript");
+            hello.sign(&signing_key).expect("sign");
+            let transcript_after = hello.transcript_bytes().expect("transcript");
+            assert_eq!(transcript_before, transcript_after);
+            hello.verify(&signing_key.verifying_key()).expect("verify");
+        });
+    }
+
+    #[test]
+    fn ack_signature_rejects_mismatched_hello() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let session_id = MeshSessionId([0x42_u8; 16]);
+        let context = LogContext::new("handshake", "ack_verify")
+            .with_session(&session_id)
+            .with_peer(&initiator)
+            .with_reason("FCP-3002");
+        run_logged_test(
+            "ack_signature_rejects_mismatched_hello",
+            2,
+            &context,
+            || {
+                let signing_key = Ed25519SigningKey::generate();
+                let hello = MeshSessionHello {
+                    from: initiator.clone(),
+                    to: responder.clone(),
+                    eph_pubkey: X25519SecretKey::generate().public_key(),
+                    nonce: SessionNonce([0x11_u8; 16]),
+                    cookie: None,
+                    timestamp: 1_704_067_200,
+                    suites: vec![SessionCryptoSuite::Suite1],
+                    transport_limits: None,
+                    signature: None,
+                };
+                let mut ack = MeshSessionAck {
+                    from: responder.clone(),
+                    to: initiator.clone(),
+                    eph_pubkey: X25519SecretKey::generate().public_key(),
+                    nonce: SessionNonce([0x22_u8; 16]),
+                    session_id,
+                    suite: SessionCryptoSuite::Suite1,
+                    timestamp: 1_704_067_205,
+                    signature: None,
+                };
+                ack.sign(&hello, &signing_key).expect("sign");
+                ack.verify(&hello, &signing_key.verifying_key())
+                    .expect("verify");
+
+                let mut tampered = hello;
+                tampered.nonce = SessionNonce([0x99_u8; 16]);
+                assert!(matches!(
+                    ack.verify(&tampered, &signing_key.verifying_key()),
+                    Err(SessionError::InvalidSignature)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn cookie_verification_detects_tampering() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let context = LogContext::new("handshake", "cookie_verify").with_peer(&responder);
+        run_logged_test("cookie_verification_detects_tampering", 2, &context, || {
+            let cookie_key = [0x55_u8; 32];
+            let hello = MeshSessionHello {
+                from: initiator.clone(),
+                to: responder.clone(),
+                eph_pubkey: X25519SecretKey::generate().public_key(),
+                nonce: SessionNonce([0x22_u8; 16]),
+                cookie: None,
+                timestamp: 1_704_067_200,
+                suites: vec![SessionCryptoSuite::Suite2],
+                transport_limits: None,
+                signature: None,
+            };
+            let cookie = compute_cookie(&cookie_key, &hello).expect("cookie");
+            verify_cookie(&cookie_key, &hello, &cookie).expect("verify");
+
+            let mut tampered = hello;
+            tampered.timestamp += 1;
+            assert!(matches!(
+                verify_cookie(&cookie_key, &tampered, &cookie),
+                Err(SessionError::InvalidCookie)
+            ));
+        });
+    }
+
+    #[test]
+    fn derive_session_keys_is_deterministic_and_separated() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let session_id = MeshSessionId([0x77_u8; 16]);
+        let context = LogContext::new("handshake", "key_derive").with_session(&session_id);
+        run_logged_test(
+            "derive_session_keys_is_deterministic_and_separated",
+            4,
+            &context,
+            || {
+                let sk_i = X25519SecretKey::from_bytes([0x12_u8; 32]);
+                let sk_r = X25519SecretKey::from_bytes([0x34_u8; 32]);
+                let shared = sk_i.diffie_hellman(&sk_r.public_key());
+                let hello_nonce = SessionNonce([0x01_u8; 16]);
+                let ack_nonce = SessionNonce([0x02_u8; 16]);
+                let keys1 = derive_session_keys(
+                    &shared,
+                    &session_id,
+                    &initiator,
+                    &responder,
+                    &hello_nonce,
+                    &ack_nonce,
+                )
+                .expect("keys");
+                let keys2 = derive_session_keys(
+                    &shared,
+                    &session_id,
+                    &initiator,
+                    &responder,
+                    &hello_nonce,
+                    &ack_nonce,
+                )
+                .expect("keys");
+                assert_eq!(keys1, keys2);
+                assert_ne!(keys1.k_mac_i2r, keys1.k_mac_r2i);
+                assert_ne!(keys1.k_mac_i2r, keys1.k_ctx);
+                assert_ne!(keys1.k_mac_r2i, keys1.k_ctx);
+            },
+        );
+    }
+
+    #[test]
+    fn datagram_decode_rejects_invalid_lengths() {
+        let session_id = MeshSessionId([0x99_u8; 16]);
+        let context = LogContext::new("datagram", "decode_bounds")
+            .with_session(&session_id)
+            .with_reason("FCP-3003");
+        run_logged_test(
+            "datagram_decode_rejects_invalid_lengths",
+            2,
+            &context,
+            || {
+                let too_short = vec![0u8; FCPS_DATAGRAM_HEADER_LEN - 1];
+                assert!(matches!(
+                    FcpsDatagram::decode(&too_short, DEFAULT_MAX_DATAGRAM_BYTES),
+                    Err(SessionError::DatagramTooShort { .. })
+                ));
+
+                let mut too_large = vec![0u8; FCPS_DATAGRAM_HEADER_LEN + 1];
+                too_large.resize((DEFAULT_MAX_DATAGRAM_BYTES as usize) + 1, 0u8);
+                assert!(matches!(
+                    FcpsDatagram::decode(&too_large, DEFAULT_MAX_DATAGRAM_BYTES),
+                    Err(SessionError::DatagramTooLarge { .. })
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn session_mac_rejects_tampered_frame() {
+        let session_id = MeshSessionId([0x55_u8; 16]);
+        let context = LogContext::new("established", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite1)
+            .with_reason("FCP-3004");
+        run_logged_test("session_mac_rejects_tampered_frame", 1, &context, || {
+            let key = [0x44_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite1,
+                &key,
+                &session_id,
+                SessionDirection::ResponderToInitiator,
+                9,
+                frame,
+            )
+            .expect("mac");
+            let mut tampered = frame.to_vec();
+            tampered[0] ^= 0xFF;
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite1,
+                    &key,
+                    &session_id,
+                    SessionDirection::ResponderToInitiator,
+                    9,
+                    &tampered,
+                    &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn replay_window_accepts_in_order_and_rejects_replay() {
+        let mut window = ReplayWindow::new(128);
+        let context = LogContext::new("established", "replay_check").with_details(json!({
+            "sequence_received": 1,
+            "decision": "accept"
+        }));
+        run_logged_test(
+            "replay_window_accepts_in_order_and_rejects_replay",
+            3,
+            &context,
+            || {
+                assert!(!window.check_and_update(0));
+                assert!(window.check_and_update(1));
+                assert!(!window.check_and_update(1));
+            },
+        );
+    }
+
+    #[test]
+    fn replay_window_allows_reordering_within_window() {
+        let mut window = ReplayWindow::new(128);
+        let context = LogContext::new("established", "replay_check").with_details(json!({
+            "sequence_received": [100, 99, 95, 50],
+            "decision": "accept",
+            "reason": "IN_WINDOW"
+        }));
+        run_logged_test(
+            "replay_window_allows_reordering_within_window",
+            4,
+            &context,
+            || {
+                assert!(window.check_and_update(100));
+                assert!(window.check_and_update(99));
+                assert!(window.check_and_update(95));
+                assert!(window.check_and_update(50));
+            },
+        );
+    }
+
+    #[test]
+    fn replay_window_rejects_old_sequences() {
+        let mut window = ReplayWindow::new(128);
+        let context = LogContext::new("established", "replay_check").with_details(json!({
+            "sequence_received": 50,
+            "decision": "reject",
+            "reason": "STALE"
+        }));
+        run_logged_test("replay_window_rejects_old_sequences", 3, &context, || {
+            assert!(window.check_and_update(200));
+            assert!(!window.check_and_update(50));
+            assert!(window.check_and_update(73));
+        });
+    }
+
+    #[test]
+    fn hello_attestation_verifies_and_expired_fails() {
+        let owner_key = Ed25519SigningKey::generate();
+        let node_signing = Ed25519SigningKey::generate();
+        let node_issuance = Ed25519SigningKey::generate();
+        let node_encryption = X25519SecretKey::generate();
+        let node_id = NodeId::new("node-initiator");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+
+        let node_keys = NodeKeys::new(
+            node_signing.verifying_key(),
+            node_encryption.public_key(),
+            node_issuance.verifying_key(),
+        );
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).expect("attest");
+
+        let identity = MeshIdentity::new(
+            node_id.clone(),
+            "host".to_string(),
+            Vec::new(),
+            tags.clone(),
+            owner_key.verifying_key(),
+            node_keys.clone(),
+        )
+        .with_attestation(attestation);
+
+        let mut hello = MeshSessionHello {
+            from: TailscaleNodeId::new("node-initiator"),
+            to: TailscaleNodeId::new("node-responder"),
+            eph_pubkey: node_encryption.public_key(),
+            nonce: SessionNonce([0xAB_u8; 16]),
+            cookie: None,
+            timestamp: 1_704_067_200,
+            suites: vec![SessionCryptoSuite::Suite1],
+            transport_limits: None,
+            signature: None,
+        };
+        hello.sign(&node_signing).expect("sign hello");
+
+        let context = LogContext::new("handshake", "attestation_verify");
+        run_logged_test(
+            "hello_attestation_verifies_and_expired_fails",
+            2,
+            &context,
+            || {
+                verify_hello_attested(&hello, &identity, &TimePolicy::default()).expect("attestation ok");
+
+                let mut expired = identity.clone();
+                if let Some(att) = expired.attestation.as_mut() {
+                    att.expires_at = Utc::now() - Duration::hours(1);
+                }
+                assert!(matches!(
+                    verify_hello_attested(&hello, &expired, &TimePolicy::default()),
+                    Err(SessionError::AttestationExpired)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn ack_attestation_detects_node_mismatch() {
+        let owner_key = Ed25519SigningKey::generate();
+        let node_signing = Ed25519SigningKey::generate();
+        let node_issuance = Ed25519SigningKey::generate();
+        let node_encryption = X25519SecretKey::generate();
+        let node_id = NodeId::new("node-responder");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+
+        let node_keys = NodeKeys::new(
+            node_signing.verifying_key(),
+            node_encryption.public_key(),
+            node_issuance.verifying_key(),
+        );
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).expect("attest");
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            Vec::new(),
+            tags,
+            owner_key.verifying_key(),
+            node_keys.clone(),
+        )
+        .with_attestation(attestation);
+
+        let mut hello = MeshSessionHello {
+            from: TailscaleNodeId::new("node-initiator"),
+            to: TailscaleNodeId::new("node-responder"),
+            eph_pubkey: X25519SecretKey::generate().public_key(),
+            nonce: SessionNonce([0x11_u8; 16]),
+            cookie: None,
+            timestamp: 1_704_067_200,
+            suites: vec![SessionCryptoSuite::Suite1],
+            transport_limits: None,
+            signature: None,
+        };
+        hello.sign(&node_signing).expect("sign hello");
+
+        let mut ack = MeshSessionAck {
+            from: TailscaleNodeId::new("node-responder"),
+            to: TailscaleNodeId::new("node-initiator"),
+            eph_pubkey: node_encryption.public_key(),
+            nonce: SessionNonce([0x22_u8; 16]),
+            session_id: MeshSessionId([0x10_u8; 16]),
+            suite: SessionCryptoSuite::Suite1,
+            timestamp: 1_704_067_205,
+            signature: None,
+        };
+        ack.sign(&hello, &node_signing).expect("sign ack");
+
+        let mut mismatched = identity.clone();
+        mismatched.node_id = NodeId::new("node-other");
+        let context = LogContext::new("handshake", "attestation_verify").with_reason("FCP-3006");
+        run_logged_test("ack_attestation_detects_node_mismatch", 1, &context, || {
+            assert!(matches!(
+                verify_ack_attested(&ack, &hello, &mismatched, &TimePolicy::default()),
+                Err(SessionError::AttestationNodeMismatch)
+            ));
+        });
+    }
+}
