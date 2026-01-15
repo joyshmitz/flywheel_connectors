@@ -297,19 +297,58 @@ impl PartialOrd for NodeSignature {
 ///
 /// Signatures are stored sorted by `node_id` to ensure deterministic
 /// serialization for hashing and encoding.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(into = "SignatureSetRaw", from = "SignatureSetRaw")]
 pub struct SignatureSet {
     /// Signatures sorted by `node_id` (NORMATIVE: MUST be sorted).
     signatures: Vec<NodeSignature>,
 
     /// Set of node IDs for O(1) duplicate detection.
-    #[serde(skip)]
+    /// NOTE: This is a cache rebuilt on deserialization - not serialized.
     node_ids: BTreeSet<String>,
+}
+
+/// Raw representation for serialization (without the cache).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignatureSetRaw {
+    signatures: Vec<NodeSignature>,
+}
+
+impl From<SignatureSet> for SignatureSetRaw {
+    fn from(set: SignatureSet) -> Self {
+        Self {
+            signatures: set.signatures,
+        }
+    }
+}
+
+impl From<SignatureSetRaw> for SignatureSet {
+    fn from(raw: SignatureSetRaw) -> Self {
+        let node_ids = raw
+            .signatures
+            .iter()
+            .map(|sig| sig.node_id.0.clone())
+            .collect();
+        Self {
+            signatures: raw.signatures,
+            node_ids,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SignatureSet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = SignatureSetRaw::deserialize(deserializer)?;
+        Ok(Self::from(raw))
+    }
 }
 
 impl PartialEq for SignatureSet {
     fn eq(&self, other: &Self) -> bool {
-        // Only compare signatures, not the node_ids cache (which is skipped in serde)
+        // Only compare signatures - node_ids is a derived cache
         self.signatures == other.signatures
     }
 }
@@ -419,7 +458,7 @@ impl fmt::Display for DegradedModeReason {
 }
 
 /// Degraded mode state for a zone (NORMATIVE).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DegradedModeState {
     /// Whether degraded mode is active.
     pub active: bool,
@@ -914,8 +953,45 @@ mod tests {
         let deserialized: SignatureSet = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.len(), 2);
-        // Note: node_ids set is not serialized, so duplicate detection
-        // won't work after deserialization without rebuilding
+        // The node_ids cache is rebuilt during deserialization
+    }
+
+    #[test]
+    fn test_signature_set_duplicate_detection_after_deserialization() {
+        // Regression test: ensure node_ids cache is rebuilt after deserialization
+        // so that duplicate detection continues to work correctly.
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("node-alpha"), [0xAA; 64], 1000));
+        set.add(NodeSignature::new(NodeId::new("node-beta"), [0xBB; 64], 2000));
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&set).unwrap();
+        let mut deserialized: SignatureSet = serde_json::from_str(&json).unwrap();
+
+        // Try to add a duplicate - should be rejected
+        let duplicate_added = deserialized.add(NodeSignature::new(
+            NodeId::new("node-alpha"), // Same node_id
+            [0xFF; 64],                // Different signature value
+            3000,
+        ));
+        assert!(
+            !duplicate_added,
+            "Duplicate node-alpha should be rejected after deserialization"
+        );
+        assert_eq!(
+            deserialized.len(),
+            2,
+            "Length should remain 2 after rejected duplicate"
+        );
+
+        // Adding a new node should still work
+        let new_added = deserialized.add(NodeSignature::new(
+            NodeId::new("node-gamma"),
+            [0xCC; 64],
+            4000,
+        ));
+        assert!(new_added, "New node-gamma should be accepted");
+        assert_eq!(deserialized.len(), 3);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
