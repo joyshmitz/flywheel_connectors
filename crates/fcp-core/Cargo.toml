@@ -17,8 +17,10 @@ base64 = "0.22"
 blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+ciborium.workspace = true
 ed25519-dalek.workspace = true
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-crypto = { path = "../fcp-crypto" }
 futures-util.workspace = true
 hex.workspace = true
 serde.workspace = true
@@ -33,3 +35,4 @@ uuid.workspace = true
 ciborium.workspace = true
 semver.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rand = "0.8"

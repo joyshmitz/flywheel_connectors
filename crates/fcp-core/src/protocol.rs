@@ -3,15 +3,15 @@
 //! Based on FCP Specification Section 9 (Wire Protocol).
 //!
 //! This module implements the canonical wire format as defined in the
-//! FCP Specification V1. All types are designed to be serializable to
+//! FCP Specification V2. All types are designed to be serializable to
 //! both JSON (for debugging) and CBOR (for production).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId, IdempotencyClass,
-    InstanceId, OperationId, Provenance, RiskLevel, SafetyTier, SessionId, ZoneId,
+    CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId, IdempotencyClass, InstanceId,
+    OperationId, Provenance, RiskLevel, SafetyTier, SessionId, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,7 +20,7 @@ use crate::{
 
 /// Request identifier for correlation.
 ///
-/// On the wire, this is a string like "req_123" or a UUID string.
+/// On the wire, this is a string like "`req_123`" or a UUID string.
 /// The format is not prescribed; the Hub and connector just need to echo it back.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RequestId(pub String);
@@ -73,7 +73,7 @@ pub struct HostInfo {
 /// Transport capabilities for negotiation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TransportCaps {
-    /// Supported compression algorithms (e.g., ["zstd", "lz4"])
+    /// Supported compression algorithms (e.g., `zstd`, `lz4`)
     #[serde(default)]
     pub compression: Vec<String>,
 
@@ -295,7 +295,7 @@ pub struct InvokeResponse {
     /// Result data
     pub result: serde_json::Value,
 
-    /// Resource URIs created/modified (e.g., "fcp://fcp.gmail/message/17c9a...")
+    /// Resource URIs created/modified (e.g., `<fcp://fcp.gmail/message/17c9a...>`)
     #[serde(default)]
     pub resource_uris: Vec<String>,
 
@@ -391,7 +391,7 @@ pub struct SubscribeResult {
     /// Whether replay is available
     pub replay_supported: bool,
 
-    /// Buffer info (min_events, overflow policy)
+    /// Buffer info (`min_events`, overflow policy)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer: Option<ReplayBufferInfo>,
 }
@@ -440,14 +440,14 @@ pub struct ShutdownRequest {
     pub reason: Option<String>,
 }
 
-fn default_deadline() -> u64 {
+const fn default_deadline() -> u64 {
     10000 // 10 seconds default
 }
 
 /// Shutdown acknowledgment from connector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShutdownAck {
-    /// Message type (always "shutdown_ack")
+    /// Message type (always "`shutdown_ack`")
     pub r#type: String,
 
     /// Status of shutdown
@@ -492,7 +492,7 @@ pub struct Introspection {
 /// Information about an operation.
 ///
 /// Per FCP Specification Section 8.2 and 9.6:
-/// - Operations MUST declare capability, risk_level, safety_tier, and idempotency
+/// - Operations MUST declare capability, `risk_level`, `safety_tier`, and `idempotency`
 /// - `risk_level` is for UX/prioritization; `safety_tier` is normative enforcement
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationInfo {
@@ -593,4 +593,495 @@ pub struct ResourceTypeInfo {
 
     /// JSON Schema for resource
     pub schema: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CapabilityToken;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RequestId Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn request_id_new() {
+        let id = RequestId::new("req_123");
+        assert_eq!(id.to_string(), "req_123");
+    }
+
+    #[test]
+    fn request_id_random() {
+        let id = RequestId::random();
+        assert!(id.to_string().starts_with("req_"));
+    }
+
+    #[test]
+    fn request_id_from_string() {
+        let id: RequestId = "my-request".into();
+        assert_eq!(id.0, "my-request");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Handshake Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn handshake_request_serialization_roundtrip() {
+        let req = HandshakeRequest {
+            protocol_version: "1.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: Some("/var/fcp/zones/work".into()),
+            host_public_key: [0x42_u8; 32],
+            nonce: [0xaa_u8; 32],
+            capabilities_requested: vec!["cap.read".parse().unwrap()],
+            host: Some(HostInfo {
+                name: "flywheel-hub".into(),
+                version: Some("2.0.0".into()),
+                build: Some("abc123".into()),
+            }),
+            transport_caps: Some(TransportCaps {
+                compression: vec!["zstd".into()],
+                max_frame_size: Some(65536),
+            }),
+            requested_instance_id: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: HandshakeRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.protocol_version, "1.0.0");
+        assert_eq!(deserialized.zone.as_str(), "z:work");
+        assert_eq!(deserialized.host_public_key, [0x42_u8; 32]);
+        assert_eq!(deserialized.nonce, [0xaa_u8; 32]);
+        assert_eq!(deserialized.capabilities_requested.len(), 1);
+        assert!(deserialized.host.is_some());
+        assert!(deserialized.transport_caps.is_some());
+    }
+
+    #[test]
+    fn handshake_request_minimal() {
+        let req = HandshakeRequest {
+            protocol_version: "1.0.0".into(),
+            zone: ZoneId::public(),
+            zone_dir: None,
+            host_public_key: [0_u8; 32],
+            nonce: [0_u8; 32],
+            capabilities_requested: vec![],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("zone_dir"));
+        // Note: check for exact field name with colon to avoid matching host_public_key
+        assert!(!json.contains("\"host\":"));
+        assert!(!json.contains("transport_caps"));
+    }
+
+    #[test]
+    fn handshake_response_serialization_roundtrip() {
+        let resp = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted: vec![crate::CapabilityGrant {
+                capability: "cap.read".parse().unwrap(),
+                operation: None,
+            }],
+            session_id: SessionId::new(),
+            manifest_hash: "sha256:abc123".into(),
+            nonce: [0xbb_u8; 32],
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: true,
+                min_buffer_events: 1000,
+                requires_ack: true,
+            }),
+            auth_caps: Some(AuthCaps {
+                methods: vec!["oauth2".into()],
+                oauth: Some(OAuthConfig {
+                    authorize_url: "https://example.com/auth".into(),
+                    token_url: "https://example.com/token".into(),
+                    scopes: vec!["read".into(), "write".into()],
+                }),
+            }),
+            op_catalog_hash: Some("sha256:def456".into()),
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: HandshakeResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.status, "accepted");
+        assert_eq!(deserialized.capabilities_granted.len(), 1);
+        assert!(deserialized.event_caps.is_some());
+        assert!(deserialized.auth_caps.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Invoke Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn invoke_request_serialization_roundtrip() {
+        let req = InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_001"),
+            operation: "gmail.search".parse().unwrap(),
+            input: serde_json::json!({"query": "from:alice"}),
+            capability_token: CapabilityToken::test_token(),
+            context: Some(InvokeContext {
+                locale: Some("en-US".into()),
+                pagination: Some(serde_json::json!({"page": 1, "size": 10})),
+            }),
+            idempotency_key: Some("idem_123".into()),
+            deadline_ms: Some(30000),
+            correlation_id: Some(CorrelationId::new()),
+            provenance: Some(crate::Provenance::new(ZoneId::work())),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: InvokeRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.r#type, "invoke");
+        assert_eq!(deserialized.id.0, "req_001");
+        assert_eq!(deserialized.operation.as_str(), "gmail.search");
+        assert!(deserialized.context.is_some());
+        assert_eq!(deserialized.idempotency_key, Some("idem_123".into()));
+        assert_eq!(deserialized.deadline_ms, Some(30000));
+    }
+
+    #[test]
+    fn invoke_response_serialization_roundtrip() {
+        let resp = InvokeResponse {
+            r#type: "response".into(),
+            id: RequestId::new("req_001"),
+            result: serde_json::json!({"messages": []}),
+            resource_uris: vec!["fcp://fcp.gmail/message/123".into()],
+            next_cursor: Some("cursor_abc".into()),
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: InvokeResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.r#type, "response");
+        assert_eq!(deserialized.id.0, "req_001");
+        assert_eq!(deserialized.resource_uris.len(), 1);
+        assert_eq!(deserialized.next_cursor, Some("cursor_abc".into()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Subscribe Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn subscribe_request_serialization_roundtrip() {
+        let req = SubscribeRequest {
+            r#type: "subscribe".into(),
+            id: RequestId::new("sub_001"),
+            topics: vec!["messages.*".into(), "events.new".into()],
+            since: Some("cursor_start".into()),
+            max_events_per_sec: Some(100),
+            batch_ms: Some(500),
+            window_size: Some(10),
+            capability_token: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: SubscribeRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.r#type, "subscribe");
+        assert_eq!(deserialized.topics.len(), 2);
+        assert_eq!(deserialized.since, Some("cursor_start".into()));
+        assert_eq!(deserialized.max_events_per_sec, Some(100));
+    }
+
+    #[test]
+    fn subscribe_response_serialization_roundtrip() {
+        let resp = SubscribeResponse {
+            r#type: "response".into(),
+            id: RequestId::new("sub_001"),
+            result: SubscribeResult {
+                confirmed_topics: vec!["messages.*".into()],
+                cursors: std::iter::once(("messages.*".into(), "cursor_123".into())).collect(),
+                replay_supported: true,
+                buffer: Some(ReplayBufferInfo {
+                    min_events: 1000,
+                    overflow: "stream.reset".into(),
+                }),
+            },
+        };
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: SubscribeResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.result.confirmed_topics.len(), 1);
+        assert!(deserialized.result.replay_supported);
+        assert!(deserialized.result.buffer.is_some());
+    }
+
+    #[test]
+    fn unsubscribe_request_serialization() {
+        let req = UnsubscribeRequest {
+            r#type: "unsubscribe".into(),
+            id: RequestId::new("unsub_001"),
+            topics: vec!["messages.*".into()],
+            capability_token: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: UnsubscribeRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.r#type, "unsubscribe");
+        assert_eq!(deserialized.topics.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Shutdown Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn shutdown_request_defaults() {
+        let json = r#"{"type":"shutdown"}"#;
+        let req: ShutdownRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(req.r#type, "shutdown");
+        assert_eq!(req.deadline_ms, 10000); // Default
+        assert!(!req.drain);
+    }
+
+    #[test]
+    fn shutdown_request_with_values() {
+        let req = ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 30000,
+            drain: true,
+            reason: Some("Maintenance".into()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: ShutdownRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.deadline_ms, 30000);
+        assert!(deserialized.drain);
+        assert_eq!(deserialized.reason, Some("Maintenance".into()));
+    }
+
+    #[test]
+    fn shutdown_ack_serialization() {
+        let ack = ShutdownAck {
+            r#type: "shutdown_ack".into(),
+            status: "completed".into(),
+            events_flushed: Some(100),
+            requests_completed: Some(5),
+        };
+
+        let json = serde_json::to_string(&ack).unwrap();
+        let deserialized: ShutdownAck = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.status, "completed");
+        assert_eq!(deserialized.events_flushed, Some(100));
+        assert_eq!(deserialized.requests_completed, Some(5));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Introspection Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn operation_info_serialization_roundtrip() {
+        let op = OperationInfo {
+            id: "gmail.search".parse().unwrap(),
+            summary: "Search emails".into(),
+            description: Some("Searches Gmail using query syntax".into()),
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: serde_json::json!({"type": "array"}),
+            capability: "cap.gmail.read".parse().unwrap(),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When user wants to find emails".into(),
+                common_mistakes: vec!["Forgetting date range".into()],
+                examples: vec!["gmail.search({query: 'from:alice'})".into()],
+                related: vec!["cap.gmail.write".parse().unwrap()],
+            },
+            rate_limit: Some(crate::RateLimit {
+                max: 100,
+                per_ms: 60000,
+                burst: Some(10),
+                scope: Some("per_zone".into()),
+            }),
+            requires_approval: Some(ApprovalMode::Policy),
+        };
+
+        let json = serde_json::to_string(&op).unwrap();
+        let deserialized: OperationInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.id.as_str(), "gmail.search");
+        assert_eq!(deserialized.summary, "Search emails");
+        assert!(matches!(deserialized.risk_level, RiskLevel::Low));
+        assert!(matches!(deserialized.safety_tier, SafetyTier::Safe));
+        assert!(matches!(deserialized.idempotency, IdempotencyClass::Strict));
+    }
+
+    #[test]
+    fn risk_level_serialization() {
+        let levels = [
+            (RiskLevel::Low, "low"),
+            (RiskLevel::Medium, "medium"),
+            (RiskLevel::High, "high"),
+            (RiskLevel::Critical, "critical"),
+        ];
+
+        for (level, expected) in levels {
+            let json = serde_json::to_string(&level).unwrap();
+            assert!(json.contains(expected));
+            let deserialized: RiskLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, level);
+        }
+    }
+
+    #[test]
+    fn safety_tier_serialization() {
+        let tiers = [
+            (SafetyTier::Safe, "safe"),
+            (SafetyTier::Risky, "risky"),
+            (SafetyTier::Dangerous, "dangerous"),
+            (SafetyTier::Forbidden, "forbidden"),
+        ];
+
+        for (tier, expected) in tiers {
+            let json = serde_json::to_string(&tier).unwrap();
+            assert!(json.contains(expected));
+            let deserialized: SafetyTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, tier);
+        }
+    }
+
+    #[test]
+    fn idempotency_class_serialization() {
+        let classes = [
+            (IdempotencyClass::None, "none"),
+            (IdempotencyClass::BestEffort, "best_effort"),
+            (IdempotencyClass::Strict, "strict"),
+        ];
+
+        for (class, expected) in classes {
+            let json = serde_json::to_string(&class).unwrap();
+            assert!(json.contains(expected));
+            let deserialized: IdempotencyClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, class);
+        }
+    }
+
+    #[test]
+    fn approval_mode_serialization() {
+        let modes = [
+            (ApprovalMode::None, "none"),
+            (ApprovalMode::Policy, "policy"),
+            (ApprovalMode::Interactive, "interactive"),
+            (ApprovalMode::ElevationToken, "elevation_token"),
+        ];
+
+        for (mode, expected) in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert!(json.contains(expected));
+            let deserialized: ApprovalMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, mode);
+        }
+    }
+
+    #[test]
+    fn introspection_serialization() {
+        let intro = Introspection {
+            operations: vec![],
+            events: vec![EventInfo {
+                topic: "messages.new".into(),
+                schema: serde_json::json!({"type": "object"}),
+                requires_ack: true,
+            }],
+            resource_types: vec![ResourceTypeInfo {
+                name: "Message".into(),
+                uri_pattern: "fcp://fcp.gmail/message/{id}".into(),
+                schema: serde_json::json!({"type": "object"}),
+            }],
+            auth_caps: None,
+            event_caps: Some(EventCaps::default()),
+        };
+
+        let json = serde_json::to_string(&intro).unwrap();
+        let deserialized: Introspection = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.events.len(), 1);
+        assert_eq!(deserialized.resource_types.len(), 1);
+        assert!(deserialized.event_caps.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Transport / Host Info Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn host_info_serialization() {
+        let info = HostInfo {
+            name: "test-hub".into(),
+            version: Some("1.0.0".into()),
+            build: Some("git-abc123".into()),
+        };
+
+        let json = serde_json::to_string(&info).unwrap();
+        let deserialized: HostInfo = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.name, "test-hub");
+        assert_eq!(deserialized.version, Some("1.0.0".into()));
+        assert_eq!(deserialized.build, Some("git-abc123".into()));
+    }
+
+    #[test]
+    fn transport_caps_default() {
+        let caps = TransportCaps::default();
+        assert!(caps.compression.is_empty());
+        assert!(caps.max_frame_size.is_none());
+    }
+
+    #[test]
+    fn event_caps_default() {
+        let caps = EventCaps::default();
+        assert!(!caps.streaming);
+        assert!(!caps.replay);
+        assert_eq!(caps.min_buffer_events, 0);
+        assert!(!caps.requires_ack);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SessionId and CorrelationId Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn session_id_unique() {
+        let id1 = SessionId::new();
+        let id2 = SessionId::new();
+        assert_ne!(id1.0, id2.0);
+    }
+
+    #[test]
+    fn session_id_display() {
+        let id = SessionId::new();
+        let display = id.to_string();
+        assert!(!display.is_empty());
+    }
+
+    #[test]
+    fn correlation_id_unique() {
+        let id1 = CorrelationId::new();
+        let id2 = CorrelationId::new();
+        assert_ne!(id1.0, id2.0);
+    }
+
+    #[test]
+    fn correlation_id_display() {
+        let id = CorrelationId::new();
+        let display = id.to_string();
+        assert!(!display.is_empty());
+    }
 }

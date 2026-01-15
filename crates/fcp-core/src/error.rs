@@ -30,6 +30,9 @@ pub enum FcpError {
     #[error("Malformed frame: {message}")]
     MalformedFrame { code: u16, message: String },
 
+    #[error("Missing required field: {field}")]
+    MissingField { field: String },
+
     #[error("Checksum mismatch")]
     ChecksumMismatch,
 
@@ -262,6 +265,7 @@ impl FcpError {
             | Self::DependencyUnavailable { .. } => ErrorCategory::External,
 
             Self::Internal { .. } => ErrorCategory::Internal,
+            Self::MissingField { .. } => ErrorCategory::Protocol,
         }
     }
 
@@ -313,6 +317,7 @@ impl FcpError {
             Self::DependencyUnavailable { .. } => 7003,
 
             Self::Internal { .. } => 9001,
+            Self::MissingField { .. } => 1006,
         }
     }
 
@@ -522,6 +527,10 @@ impl FcpError {
             Self::Internal { .. } => (
                 "FCP-9001".into(),
                 Some("An internal error occurred. This is a bug. Please report with the error details and correlation ID if available.".into()),
+            ),
+            Self::MissingField { field } => (
+                "FCP-1006".into(),
+                Some(format!("The field '{field}' is missing from the request or structure. Verify the schema."))
             ),
         };
 

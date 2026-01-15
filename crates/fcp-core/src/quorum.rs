@@ -961,8 +961,16 @@ mod tests {
         // Regression test: ensure node_ids cache is rebuilt after deserialization
         // so that duplicate detection continues to work correctly.
         let mut set = SignatureSet::new();
-        set.add(NodeSignature::new(NodeId::new("node-alpha"), [0xAA; 64], 1000));
-        set.add(NodeSignature::new(NodeId::new("node-beta"), [0xBB; 64], 2000));
+        set.add(NodeSignature::new(
+            NodeId::new("node-alpha"),
+            [0xAA; 64],
+            1000,
+        ));
+        set.add(NodeSignature::new(
+            NodeId::new("node-beta"),
+            [0xBB; 64],
+            2000,
+        ));
 
         // Serialize and deserialize
         let json = serde_json::to_string(&set).unwrap();

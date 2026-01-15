@@ -508,7 +508,12 @@ mod tests {
         assert!(json.contains("1700000000"));
 
         let deserialized: RetentionClass = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, RetentionClass::Lease { expires_at: 1_700_000_000 }));
+        assert!(matches!(
+            deserialized,
+            RetentionClass::Lease {
+                expires_at: 1_700_000_000
+            }
+        ));
     }
 
     #[test]
