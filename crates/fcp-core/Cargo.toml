@@ -14,10 +14,13 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 base64 = "0.22"
+blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
+fcp-cbor = { path = "../fcp-cbor" }
 futures-util.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,4 +30,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+semver.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
