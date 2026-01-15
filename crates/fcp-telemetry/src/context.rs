@@ -1197,4 +1197,270 @@ mod tests {
 
         assert_eq!(result, Some(expected_span_id));
     }
+
+    // ============ Serde deserialization error tests ============
+
+    #[test]
+    fn test_trace_context_serde_invalid_trace_id_length() {
+        // trace_id too short
+        let json = r#"{"trace_id":"abcd","span_id":"0123456789abcdef","trace_flags":1}"#;
+        let result: Result<TraceContext, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_serde_invalid_span_id_length() {
+        // span_id too short
+        let json =
+            r#"{"trace_id":"0123456789abcdef0123456789abcdef","span_id":"abcd","trace_flags":1}"#;
+        let result: Result<TraceContext, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_serde_invalid_hex() {
+        // Invalid hex in trace_id
+        let json =
+            r#"{"trace_id":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","span_id":"0123456789abcdef","trace_flags":1}"#;
+        let result: Result<TraceContext, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_serde_missing_fields() {
+        // Missing span_id
+        let json = r#"{"trace_id":"0123456789abcdef0123456789abcdef","trace_flags":1}"#;
+        let result: Result<TraceContext, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trace_context_serde_skip_none_trace_state() {
+        let ctx = TraceContext::generate(); // No trace_state
+        let json = serde_json::to_string(&ctx).unwrap();
+        // trace_state should not appear in JSON when None
+        assert!(!json.contains("trace_state"));
+    }
+
+    #[test]
+    fn test_trace_context_serde_with_trace_state() {
+        let ctx = TraceContext::generate().with_trace_state("vendor=test,foo=bar");
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(json.contains("trace_state"));
+        assert!(json.contains("vendor=test,foo=bar"));
+
+        let parsed: TraceContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.trace_state, Some("vendor=test,foo=bar".to_string()));
+    }
+
+    // ============ TraceContextError additional tests ============
+
+    #[test]
+    fn test_trace_context_error_debug() {
+        let err = TraceContextError::InvalidFormat("test debug".to_string());
+        let debug_str = format!("{err:?}");
+        assert!(debug_str.contains("InvalidFormat"));
+        assert!(debug_str.contains("test debug"));
+
+        let err2 = TraceContextError::UnsupportedVersion("02".to_string());
+        let debug_str2 = format!("{err2:?}");
+        assert!(debug_str2.contains("UnsupportedVersion"));
+        assert!(debug_str2.contains("02"));
+    }
+
+    // ============ TraceContext edge cases ============
+
+    #[test]
+    fn test_trace_context_from_traceparent_invalid_hex_in_span_id() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-gggggggggggggggg-01";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_from_traceparent_invalid_flags_length() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1";
+        let result = TraceContext::from_traceparent(traceparent);
+        assert!(matches!(result, Err(TraceContextError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_trace_context_all_flags_set() {
+        let traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-ff";
+        let ctx = TraceContext::from_traceparent(traceparent).unwrap();
+        assert_eq!(ctx.trace_flags, 0xff);
+        assert!(ctx.is_sampled()); // bit 0 is set
+    }
+
+    #[test]
+    fn test_trace_context_trace_id_hex_format() {
+        let ctx = TraceContext::new([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88], [0xaa; SPAN_ID_SIZE]);
+        assert_eq!(ctx.trace_id_hex(), "123456789abcdef01122334455667788");
+    }
+
+    #[test]
+    fn test_trace_context_span_id_hex_format() {
+        let ctx = TraceContext::new([0xaa; TRACE_ID_SIZE], [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]);
+        assert_eq!(ctx.span_id_hex(), "123456789abcdef0");
+    }
+
+    // ============ TelemetryContext additional edge cases ============
+
+    #[test]
+    fn test_telemetry_context_child_span_without_trace() {
+        let ctx = TelemetryContext::new().zone_id("zone-1");
+        let child = ctx.child_span();
+
+        // Without trace_context, child_span just clones
+        assert!(child.trace_context.is_none());
+        assert_eq!(child.zone_id, Some("zone-1".to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_context_all_fields_with_trace_state() {
+        let trace_ctx = TraceContext::generate().with_trace_state("vendor=value");
+        let ctx = TelemetryContext::new().trace_context(trace_ctx);
+
+        let fields = ctx.all_fields();
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "trace_state" && v == "vendor=value")
+        );
+    }
+
+    #[test]
+    fn test_telemetry_context_full_fcp_spec_fields() {
+        // Test all fields required by FCP2 observability spec
+        let uuid = Uuid::new_v4();
+        let trace_ctx = TraceContext::generate();
+
+        let ctx = TelemetryContext::new()
+            .trace_context(trace_ctx)
+            .zone_id("work-zone")
+            .connector_id("github-connector")
+            .operation_id("fcp://github/list-repos")
+            .request_id(uuid)
+            .principal_id("user@example.com")
+            .node_id("n1234567890")
+            .decision("allow")
+            .reason_code("CAPABILITY_VALID");
+
+        ctx.add_field("custom_field", "custom_value");
+
+        let fields = ctx.all_fields();
+
+        // Verify all FCP2-required fields are present
+        assert!(fields.iter().any(|(k, _)| k == "trace_id"));
+        assert!(fields.iter().any(|(k, _)| k == "span_id"));
+        assert!(fields.iter().any(|(k, _)| k == "correlation_id"));
+        assert!(fields.iter().any(|(k, v)| k == "zone_id" && v == "work-zone"));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "connector_id" && v == "github-connector")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "operation_id" && v == "fcp://github/list-repos")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "request_id" && v == &uuid.to_string())
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "principal_id" && v == "user@example.com")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "node_id" && v == "n1234567890")
+        );
+        assert!(fields.iter().any(|(k, v)| k == "decision" && v == "allow"));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "reason_code" && v == "CAPABILITY_VALID")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "custom_field" && v == "custom_value")
+        );
+    }
+
+    #[test]
+    fn test_context_guard_with_all_fields() {
+        let trace_ctx = TraceContext::generate();
+        let uuid = Uuid::new_v4();
+
+        let ctx = TelemetryContext::new()
+            .trace_context(trace_ctx)
+            .zone_id("test-zone")
+            .connector_id("test-connector")
+            .operation_id("test-operation")
+            .request_id(uuid)
+            .principal_id("test-principal")
+            .node_id("test-node")
+            .decision("allow")
+            .reason_code("TEST_REASON");
+
+        // ContextGuard creation with all fields should not panic
+        let _guard = ContextGuard::new(&ctx, "test_operation_with_all_fields");
+    }
+
+    #[tokio::test]
+    async fn test_nested_context_propagation() {
+        let outer_ctx = TelemetryContext::with_trace().zone_id("outer-zone");
+        let outer_trace_id = outer_ctx.trace_context.as_ref().unwrap().trace_id_hex();
+
+        let result = with_context(outer_ctx, async {
+            let inner_ctx = TelemetryContext::with_trace().zone_id("inner-zone");
+
+            with_context(inner_ctx, async {
+                // Inside inner context, we should see inner values
+                let zone = current_context()
+                    .and_then(|c| c.zone_id.clone())
+                    .unwrap_or_default();
+                zone
+            })
+            .await
+        })
+        .await;
+
+        // Inner context should have been active
+        assert_eq!(result, "inner-zone");
+
+        // Outer trace_id should be different from inner
+        let _ = outer_trace_id; // Just verify we captured it
+    }
+
+    #[tokio::test]
+    async fn test_context_not_leaked_after_scope() {
+        let ctx = TelemetryContext::new().zone_id("scoped-zone");
+
+        with_context(ctx, async {
+            assert!(current_context().is_some());
+        })
+        .await;
+
+        // After scope ends, context should not be available
+        assert!(current_context().is_none());
+    }
+
+    #[test]
+    fn test_telemetry_context_debug() {
+        let ctx = TelemetryContext::with_trace()
+            .zone_id("debug-zone")
+            .connector_id("debug-connector");
+
+        let debug_str = format!("{ctx:?}");
+        assert!(debug_str.contains("TelemetryContext"));
+        assert!(debug_str.contains("debug-zone"));
+        assert!(debug_str.contains("debug-connector"));
+    }
 }

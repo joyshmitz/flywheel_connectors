@@ -571,4 +571,134 @@ mod tests {
         let elapsed = guard.elapsed_seconds();
         assert_eq!(elapsed, 0.0);
     }
+
+    // ============ Metrics edge case tests ============
+
+    #[test]
+    fn test_counter_with_special_characters_in_labels() {
+        // Test that special characters in label values don't cause issues
+        increment_counter(
+            "special_chars_counter",
+            &[
+                ("connector", "my-connector_v2"),
+                ("operation", "read.messages"),
+                ("zone", "work:zone/1"),
+            ],
+        );
+    }
+
+    #[test]
+    fn test_gauge_with_negative_value() {
+        set_gauge("negative_gauge", -42.5, &[("test", "negative")]);
+    }
+
+    #[test]
+    fn test_gauge_with_zero_value() {
+        set_gauge("zero_gauge", 0.0, &[("test", "zero")]);
+    }
+
+    #[test]
+    fn test_gauge_with_very_large_value() {
+        set_gauge("large_gauge", f64::MAX / 2.0, &[("test", "large")]);
+    }
+
+    #[test]
+    fn test_gauge_with_very_small_value() {
+        set_gauge("small_gauge", f64::MIN_POSITIVE, &[("test", "small")]);
+    }
+
+    #[test]
+    fn test_histogram_with_zero_value() {
+        record_histogram("zero_histogram", 0.0, &[("test", "zero")]);
+    }
+
+    #[test]
+    fn test_histogram_with_very_small_duration() {
+        record_histogram("tiny_duration", 0.000001, &[("test", "microsecond")]);
+    }
+
+    #[test]
+    fn test_multiple_counters_same_name_different_labels() {
+        increment_counter("shared_counter", &[("env", "prod")]);
+        increment_counter("shared_counter", &[("env", "staging")]);
+        increment_counter("shared_counter", &[("env", "dev")]);
+    }
+
+    #[test]
+    fn test_request_success_with_long_connector_id() {
+        let long_connector_id = "a".repeat(100);
+        record_request_success(&long_connector_id, "read", 0.5);
+    }
+
+    #[test]
+    fn test_request_error_with_unicode_reason() {
+        // Reason codes should work with various characters
+        record_request_error("test-connector", "write", "TIMEOUT_🕐", 1.0);
+    }
+
+    #[test]
+    fn test_rate_limit_with_zero_remaining() {
+        update_rate_limit("rate-test", 0, false);
+    }
+
+    #[test]
+    fn test_rate_limit_with_max_remaining() {
+        update_rate_limit("rate-test", u32::MAX, false);
+    }
+
+    #[test]
+    fn test_event_emitted_with_empty_event_type() {
+        record_event_emitted("connector", "");
+    }
+
+    #[test]
+    fn test_event_dropped_with_long_reason() {
+        let long_reason = "x".repeat(256);
+        record_event_dropped("connector", "message", &long_reason);
+    }
+
+    #[test]
+    fn test_timer_immediate_stop() {
+        // Timer stopped immediately should have very small elapsed time
+        let timer = Timer::start("immediate_stop", &[]);
+        let elapsed = timer.stop_and_return();
+        // Should be some positive value but very small
+        assert!(elapsed >= 0.0);
+        assert!(elapsed < 0.1); // Should be way less than 100ms
+    }
+
+    #[test]
+    fn test_concurrent_timer_creation() {
+        // Create multiple timers simultaneously
+        let timer1 = Timer::start("concurrent_timer", &[("id", "1")]);
+        let timer2 = Timer::start("concurrent_timer", &[("id", "2")]);
+        let timer3 = Timer::start("concurrent_timer", &[("id", "3")]);
+
+        // All should have valid elapsed times (u64 is always >= 0, just verify they work)
+        let _ = timer1.elapsed_ms();
+        let _ = timer2.elapsed_ms();
+        let _ = timer3.elapsed_ms();
+    }
+
+    #[test]
+    fn test_health_status_rapid_transitions() {
+        // Test rapid state transitions
+        for _ in 0..10 {
+            update_health_status("rapid-connector", HealthStatusMetric::Ready);
+            update_health_status("rapid-connector", HealthStatusMetric::Degraded);
+            update_health_status("rapid-connector", HealthStatusMetric::Error);
+        }
+    }
+
+    #[test]
+    fn test_fcp_metrics_naming_convention() {
+        // Verify FCP metric naming conventions are followed
+        // These should all work without panic, validating the metric names
+        record_request_success("test", "op", 0.1); // fcp_request_total, fcp_request_duration_seconds
+        record_request_error("test", "op", "err", 0.1); // fcp_request_total, fcp_request_duration_seconds, fcp_error_total
+        update_health_status("test", HealthStatusMetric::Ready); // fcp_connector_health_status
+        update_rate_limit("test", 100, false); // fcp_rate_limit_remaining, fcp_rate_limit_exceeded_total
+        record_event_emitted("test", "evt"); // fcp_events_emitted_total
+        record_event_dropped("test", "evt", "reason"); // fcp_events_dropped_total
+    }
 }

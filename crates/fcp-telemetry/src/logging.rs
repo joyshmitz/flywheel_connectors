@@ -418,4 +418,239 @@ mod tests {
         assert_eq!(redacted["response"]["access_token"], "[REDACTED]");
         assert_eq!(redacted["response"]["refresh_token"], "[REDACTED]");
     }
+
+    // ============ Unicode and edge case tests ============
+
+    #[test]
+    fn test_redact_unicode_field_names() {
+        let value = json!({
+            "密码": "secret123",  // Chinese for "password"
+            "パスワード": "secret456",  // Japanese for "password"
+            "пароль": "secret789",  // Russian for "password"
+            "normal_field": "visible"
+        });
+
+        // Should not redact these since our patterns are ASCII
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted["密码"], "secret123");
+        assert_eq!(redacted["パスワード"], "secret456");
+        assert_eq!(redacted["пароль"], "secret789");
+        assert_eq!(redacted["normal_field"], "visible");
+    }
+
+    #[test]
+    fn test_redact_unicode_field_values() {
+        let value = json!({
+            "password": "密码🔐secure",  // Unicode value with emoji
+            "message": "Hello 世界 🌍"
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted["password"], "[REDACTED]");
+        assert_eq!(redacted["message"], "Hello 世界 🌍");
+    }
+
+    #[test]
+    fn test_redact_empty_string_value() {
+        let value = json!({
+            "password": "",
+            "api_key": ""
+        });
+
+        let redacted = redact_sensitive(
+            &value,
+            &["password".to_string(), "api_key".to_string()],
+        );
+
+        // Empty strings in sensitive fields should still be redacted
+        assert_eq!(redacted["password"], "[REDACTED]");
+        assert_eq!(redacted["api_key"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_numeric_sensitive_values() {
+        let value = json!({
+            "password": 12345,  // Numeric password (bad practice but possible)
+            "token": 999999,
+            "user_id": 42
+        });
+
+        let redacted = redact_sensitive(
+            &value,
+            &["password".to_string(), "token".to_string()],
+        );
+
+        // Numeric values in sensitive fields should be redacted
+        assert_eq!(redacted["password"], "[REDACTED]");
+        assert_eq!(redacted["token"], "[REDACTED]");
+        assert_eq!(redacted["user_id"], 42);
+    }
+
+    #[test]
+    fn test_redact_boolean_sensitive_values() {
+        let value = json!({
+            "has_secret": true,  // Field name contains "secret"
+            "is_active": true
+        });
+
+        let redacted = redact_sensitive(&value, &["secret".to_string()]);
+
+        assert_eq!(redacted["has_secret"], "[REDACTED]");
+        assert_eq!(redacted["is_active"], true);
+    }
+
+    #[test]
+    fn test_redact_null_sensitive_values() {
+        let value = json!({
+            "password": null,
+            "name": null
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        // Null values in sensitive fields should be redacted
+        assert_eq!(redacted["password"], "[REDACTED]");
+        assert!(redacted["name"].is_null());
+    }
+
+    #[test]
+    fn test_redact_object_in_sensitive_field() {
+        let value = json!({
+            "secret_config": {
+                "key": "value",
+                "nested": "data"
+            },
+            "public_config": {
+                "setting": "visible"
+            }
+        });
+
+        let redacted = redact_sensitive(&value, &["secret".to_string()]);
+
+        // Entire object should be redacted when field name matches
+        assert_eq!(redacted["secret_config"], "[REDACTED]");
+        assert_eq!(redacted["public_config"]["setting"], "visible");
+    }
+
+    #[test]
+    fn test_redact_array_in_sensitive_field() {
+        let value = json!({
+            "api_keys": ["key1", "key2", "key3"],
+            "names": ["alice", "bob"]
+        });
+
+        let redacted = redact_sensitive(&value, &["key".to_string()]);
+
+        // Entire array should be redacted when field name matches
+        assert_eq!(redacted["api_keys"], "[REDACTED]");
+        assert_eq!(redacted["names"], json!(["alice", "bob"]));
+    }
+
+    #[test]
+    fn test_redact_very_long_field_name() {
+        let long_key = format!("password_{}", "x".repeat(1000));
+        let value = json!({
+            long_key.clone(): "secret"
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted[&long_key], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_very_long_value() {
+        let long_value = "secret".repeat(10000);
+        let value = json!({
+            "password": long_value
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted["password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_special_json_characters() {
+        let value = json!({
+            "password": "secret\"with\\special\nchars\t",
+            "message": "normal\"text"
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted["password"], "[REDACTED]");
+        assert_eq!(redacted["message"], "normal\"text");
+    }
+
+    #[test]
+    fn test_redact_preserves_object_key_order() {
+        // Note: serde_json uses BTreeMap internally, so order is alphabetical
+        let value = json!({
+            "zebra": "last",
+            "apple": "first",
+            "password": "secret",
+            "middle": "middle"
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        // All keys should still be present
+        assert!(redacted.get("zebra").is_some());
+        assert!(redacted.get("apple").is_some());
+        assert!(redacted.get("middle").is_some());
+        assert_eq!(redacted["password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_with_regex_like_patterns() {
+        // Field patterns that look like regex but should be treated literally
+        let value = json!({
+            "pass.*word": "should_not_match",
+            "password": "should_match"
+        });
+
+        // The pattern should match literally, not as regex
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        assert_eq!(redacted["pass.*word"], "should_not_match");
+        assert_eq!(redacted["password"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_concurrent_field_matches() {
+        // Field that matches multiple patterns
+        let value = json!({
+            "api_key_token_secret": "ultra_sensitive"
+        });
+
+        let redacted = redact_sensitive(
+            &value,
+            &[
+                "api".to_string(),
+                "key".to_string(),
+                "token".to_string(),
+                "secret".to_string(),
+            ],
+        );
+
+        // Should be redacted (matches all patterns, but only needs one)
+        assert_eq!(redacted["api_key_token_secret"], "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redact_whitespace_in_field_names() {
+        let value = json!({
+            "pass word": "with space",
+            "password": "no space"
+        });
+
+        let redacted = redact_sensitive(&value, &["password".to_string()]);
+
+        // "pass word" should not match "password" pattern
+        assert_eq!(redacted["pass word"], "with space");
+        assert_eq!(redacted["password"], "[REDACTED]");
+    }
 }
