@@ -66,13 +66,14 @@ impl OpenAIConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key = params
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing api_key in configuration".into(),
-            })?;
+        let api_key =
+            params
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing api_key in configuration".into(),
+                })?;
 
         let base_url = params.get("base_url").and_then(|v| v.as_str());
         let organization = params.get("organization").and_then(|v| v.as_str());
@@ -96,7 +97,10 @@ impl OpenAIConnector {
     }
 
     /// Handle handshake method.
-    pub async fn handle_handshake(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_handshake(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         Ok(json!({
             "connector_id": "fcp.openai",
             "connector_version": env!("CARGO_PKG_VERSION"),
@@ -123,7 +127,7 @@ impl OpenAIConnector {
         let introspection = Introspection {
             operations: vec![
                 OperationInfo {
-                    id: OperationId("openai.chat".into()),
+                    id: OperationId::from_static("openai.chat"),
                     summary: "Send a chat completion request".into(),
                     input_schema: json!({
                         "type": "object",
@@ -167,7 +171,7 @@ impl OpenAIConnector {
                             "cost_usd": { "type": "number" }
                         }
                     }),
-                    capability: CapabilityId("openai.chat".into()),
+                    capability: CapabilityId::from_static("openai.chat"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -187,7 +191,7 @@ impl OpenAIConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("openai.simple_chat".into()),
+                    id: OperationId::from_static("openai.simple_chat"),
                     summary: "Simple chat with GPT (single message)".into(),
                     input_schema: json!({
                         "type": "object",
@@ -218,7 +222,7 @@ impl OpenAIConnector {
                             "cost_usd": { "type": "number" }
                         }
                     }),
-                    capability: CapabilityId("openai.chat".into()),
+                    capability: CapabilityId::from_static("openai.chat"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -233,7 +237,7 @@ impl OpenAIConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("openai.get_usage".into()),
+                    id: OperationId::from_static("openai.get_usage"),
                     summary: "Get current usage and cost statistics".into(),
                     input_schema: json!({
                         "type": "object",
@@ -249,7 +253,7 @@ impl OpenAIConnector {
                             "requests_error": { "type": "integer" }
                         }
                     }),
-                    capability: CapabilityId("openai.chat".into()),
+                    capability: CapabilityId::from_static("openai.chat"),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -279,13 +283,14 @@ impl OpenAIConnector {
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
 
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing operation".into(),
-            })?;
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing operation".into(),
+                })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
@@ -324,7 +329,7 @@ impl OpenAIConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
                     message: format!("Unknown model: {model_str}"),
-                })
+                });
             }
         };
 
@@ -335,9 +340,11 @@ impl OpenAIConnector {
         })?;
 
         let messages: Vec<Message> =
-            serde_json::from_value(messages_json.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid messages format: {e}"),
+            serde_json::from_value(messages_json.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid messages format: {e}"),
+                }
             })?;
 
         if messages.is_empty() {
@@ -431,17 +438,18 @@ impl OpenAIConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
                     message: format!("Unknown model: {model_str}"),
-                })
+                });
             }
         };
 
-        let message = input
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing message".into(),
-            })?;
+        let message =
+            input
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing message".into(),
+                })?;
 
         let system = input.get("system").and_then(|v| v.as_str());
         let max_tokens = input.get("max_tokens").and_then(|v| v.as_u64()).map(|v| {
@@ -489,7 +497,10 @@ impl OpenAIConnector {
 
     async fn invoke_get_usage(&self) -> FcpResult<serde_json::Value> {
         let (prompt_tokens, completion_tokens) = if let Some(client) = &self.client {
-            (client.total_prompt_tokens(), client.total_completion_tokens())
+            (
+                client.total_prompt_tokens(),
+                client.total_completion_tokens(),
+            )
         } else {
             (0, 0)
         };
@@ -504,7 +515,10 @@ impl OpenAIConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("OpenAI connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }

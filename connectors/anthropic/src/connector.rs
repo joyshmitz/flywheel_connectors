@@ -62,18 +62,20 @@ impl AnthropicConnector {
 
     /// Handle configure method.
     #[instrument(skip(self, params))]
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let api_key = params
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing api_key in configuration".into(),
-            })?;
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let api_key =
+            params
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing api_key in configuration".into(),
+                })?;
 
-        let base_url = params
-            .get("base_url")
-            .and_then(|v| v.as_str());
+        let base_url = params.get("base_url").and_then(|v| v.as_str());
 
         let mut client = AnthropicClient::new(api_key).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
@@ -90,7 +92,10 @@ impl AnthropicConnector {
     }
 
     /// Handle handshake method.
-    pub async fn handle_handshake(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_handshake(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         Ok(json!({
             "connector_id": "fcp.anthropic",
             "connector_version": env!("CARGO_PKG_VERSION"),
@@ -117,7 +122,7 @@ impl AnthropicConnector {
         let introspection = Introspection {
             operations: vec![
                 OperationInfo {
-                    id: OperationId("anthropic.message".into()),
+                    id: OperationId::from_static("anthropic.message"),
                     summary: "Send a message to Claude".into(),
                     input_schema: json!({
                         "type": "object",
@@ -161,7 +166,7 @@ impl AnthropicConnector {
                             "cost_usd": { "type": "number" }
                         }
                     }),
-                    capability: CapabilityId("anthropic.messages".into()),
+                    capability: CapabilityId::from_static("anthropic.messages"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -181,7 +186,7 @@ impl AnthropicConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("anthropic.chat".into()),
+                    id: OperationId::from_static("anthropic.chat"),
                     summary: "Simple chat with Claude (single message)".into(),
                     input_schema: json!({
                         "type": "object",
@@ -211,7 +216,7 @@ impl AnthropicConnector {
                             "cost_usd": { "type": "number" }
                         }
                     }),
-                    capability: CapabilityId("anthropic.messages".into()),
+                    capability: CapabilityId::from_static("anthropic.messages"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -221,14 +226,12 @@ impl AnthropicConnector {
                     ai_hints: AgentHint {
                         when_to_use: "Simple single-turn chat with Claude.".into(),
                         common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"message": "What is 2+2?"}"#.into(),
-                        ],
+                        examples: vec![r#"{"message": "What is 2+2?"}"#.into()],
                         related: vec![],
                     },
                 },
                 OperationInfo {
-                    id: OperationId("anthropic.get_usage".into()),
+                    id: OperationId::from_static("anthropic.get_usage"),
                     summary: "Get current usage and cost statistics".into(),
                     input_schema: json!({
                         "type": "object",
@@ -244,7 +247,7 @@ impl AnthropicConnector {
                             "requests_error": { "type": "integer" }
                         }
                     }),
-                    capability: CapabilityId("anthropic.messages".into()),
+                    capability: CapabilityId::from_static("anthropic.messages"),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -274,13 +277,14 @@ impl AnthropicConnector {
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
 
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing operation".into(),
-            })?;
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing operation".into(),
+                })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
@@ -318,7 +322,7 @@ impl AnthropicConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
                     message: format!("Unknown model: {model_str}"),
-                })
+                });
             }
         };
 
@@ -329,9 +333,11 @@ impl AnthropicConnector {
         })?;
 
         let messages: Vec<Message> =
-            serde_json::from_value(messages_json.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid messages format: {e}"),
+            serde_json::from_value(messages_json.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid messages format: {e}"),
+                }
             })?;
 
         if messages.is_empty() {
@@ -374,7 +380,15 @@ impl AnthropicConnector {
             })?;
 
         let response = client
-            .message(model, messages, max_tokens, system, temperature, tools, tool_choice)
+            .message(
+                model,
+                messages,
+                max_tokens,
+                system,
+                temperature,
+                tools,
+                tool_choice,
+            )
             .await
             .map_err(|e: AnthropicError| e.to_fcp_error())?;
 
@@ -420,17 +434,18 @@ impl AnthropicConnector {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
                     message: format!("Unknown model: {model_str}"),
-                })
+                });
             }
         };
 
-        let message = input
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing message".into(),
-            })?;
+        let message =
+            input
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing message".into(),
+                })?;
 
         let system = input.get("system").and_then(|v| v.as_str());
         let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
@@ -493,7 +508,10 @@ impl AnthropicConnector {
     }
 
     /// Handle shutdown.
-    pub async fn handle_shutdown(&self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Anthropic connector shutting down");
         Ok(json!({ "status": "shutdown" }))
     }

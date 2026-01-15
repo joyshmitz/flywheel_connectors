@@ -49,7 +49,7 @@ impl DiscordConnector {
         let (event_tx, _) = broadcast::channel(1000);
 
         Self {
-            id: ConnectorId("discord".into()),
+            id: ConnectorId::from_static("discord"),
             config: None,
             api_client: None,
             gateway: None,
@@ -64,13 +64,15 @@ impl DiscordConnector {
     }
 
     /// Handle configure method.
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let config: DiscordConfig = serde_json::from_value(params).map_err(|e| {
-            FcpError::InvalidRequest {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let config: DiscordConfig =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid configuration: {e}"),
-            }
-        })?;
+            })?;
 
         if config.bot_token.is_empty() {
             return Err(FcpError::InvalidRequest {
@@ -87,15 +89,16 @@ impl DiscordConnector {
         let api_client = Arc::new(api_client);
 
         // Test connection by getting current user
-        let user = api_client.get_current_user().await.map_err(|e| {
-            FcpError::External {
+        let user = api_client
+            .get_current_user()
+            .await
+            .map_err(|e| FcpError::External {
                 service: "discord".into(),
                 message: format!("Failed to verify bot token: {e}"),
                 status_code: None,
                 retryable: e.is_retryable(),
                 retry_after: None,
-            }
-        })?;
+            })?;
 
         info!(
             user_id = %user.id,
@@ -118,13 +121,15 @@ impl DiscordConnector {
     }
 
     /// Handle handshake method.
-    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let req: HandshakeRequest = serde_json::from_value(params).map_err(|e| {
-            FcpError::InvalidRequest {
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
-            }
-        })?;
+            })?;
 
         // Verify bot is configured
         if self.api_client.is_none() {
@@ -207,7 +212,7 @@ impl DiscordConnector {
         let introspection = Introspection {
             operations: vec![
                 OperationInfo {
-                    id: OperationId("discord.send_message".into()),
+                    id: OperationId::from_static("discord.send_message"),
                     summary: "Send a message to a Discord channel".into(),
                     input_schema: json!({
                         "type": "object",
@@ -227,7 +232,7 @@ impl DiscordConnector {
                             "content": { "type": "string" }
                         }
                     }),
-                    capability: CapabilityId("discord.send".into()),
+                    capability: CapabilityId::from_static("discord.send"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -247,7 +252,7 @@ impl DiscordConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("discord.edit_message".into()),
+                    id: OperationId::from_static("discord.edit_message"),
                     summary: "Edit a message in a Discord channel".into(),
                     input_schema: json!({
                         "type": "object",
@@ -266,7 +271,7 @@ impl DiscordConnector {
                             "content": { "type": "string" }
                         }
                     }),
-                    capability: CapabilityId("discord.edit".into()),
+                    capability: CapabilityId::from_static("discord.edit"),
                     risk_level: RiskLevel::Medium,
                     description: None,
                     rate_limit: None,
@@ -281,7 +286,7 @@ impl DiscordConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("discord.delete_message".into()),
+                    id: OperationId::from_static("discord.delete_message"),
                     summary: "Delete a message from a Discord channel".into(),
                     input_schema: json!({
                         "type": "object",
@@ -297,7 +302,7 @@ impl DiscordConnector {
                             "deleted": { "type": "boolean" }
                         }
                     }),
-                    capability: CapabilityId("discord.delete".into()),
+                    capability: CapabilityId::from_static("discord.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -312,7 +317,7 @@ impl DiscordConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("discord.get_channel".into()),
+                    id: OperationId::from_static("discord.get_channel"),
                     summary: "Get information about a Discord channel".into(),
                     input_schema: json!({
                         "type": "object",
@@ -329,7 +334,7 @@ impl DiscordConnector {
                             "type": { "type": "integer" }
                         }
                     }),
-                    capability: CapabilityId("discord.read".into()),
+                    capability: CapabilityId::from_static("discord.read"),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -344,7 +349,7 @@ impl DiscordConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId("discord.get_guild".into()),
+                    id: OperationId::from_static("discord.get_guild"),
                     summary: "Get information about a Discord server (guild)".into(),
                     input_schema: json!({
                         "type": "object",
@@ -362,7 +367,7 @@ impl DiscordConnector {
                             "owner_id": { "type": "string" }
                         }
                     }),
-                    capability: CapabilityId("discord.read".into()),
+                    capability: CapabilityId::from_static("discord.read"),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -371,17 +376,13 @@ impl DiscordConnector {
                     idempotency: IdempotencyClass::Strict,
                     ai_hints: AgentHint {
                         when_to_use: "Get Discord server/guild metadata.".into(),
-                        common_mistakes: vec![
-                            "Using server name instead of guild ID".into(),
-                        ],
-                        examples: vec![
-                            r#"{"guild_id": "123456789012345678"}"#.into(),
-                        ],
+                        common_mistakes: vec!["Using server name instead of guild ID".into()],
+                        examples: vec![r#"{"guild_id": "123456789012345678"}"#.into()],
                         related: vec![],
                     },
                 },
                 OperationInfo {
-                    id: OperationId("discord.trigger_typing".into()),
+                    id: OperationId::from_static("discord.trigger_typing"),
                     summary: "Show typing indicator in a Discord channel".into(),
                     input_schema: json!({
                         "type": "object",
@@ -396,7 +397,7 @@ impl DiscordConnector {
                             "triggered": { "type": "boolean" }
                         }
                     }),
-                    capability: CapabilityId("discord.send".into()),
+                    capability: CapabilityId::from_static("discord.send"),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -404,30 +405,28 @@ impl DiscordConnector {
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
                     ai_hints: AgentHint {
-                        when_to_use: "Show typing indicator before sending a message (lasts 10 seconds).".into(),
+                        when_to_use:
+                            "Show typing indicator before sending a message (lasts 10 seconds)."
+                                .into(),
                         common_mistakes: vec![],
-                        examples: vec![
-                            r#"{"channel_id": "123456789012345678"}"#.into(),
-                        ],
+                        examples: vec![r#"{"channel_id": "123456789012345678"}"#.into()],
                         related: vec![],
                     },
                 },
             ],
-            events: vec![
-                EventInfo {
-                    topic: "discord.message".into(),
-                    schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "channel_id": { "type": "string" },
-                            "content": { "type": "string" },
-                            "author": { "type": "object" }
-                        }
-                    }),
-                    requires_ack: false,
-                },
-            ],
+            events: vec![EventInfo {
+                topic: "discord.message".into(),
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "channel_id": { "type": "string" },
+                        "content": { "type": "string" },
+                        "author": { "type": "object" }
+                    }
+                }),
+                requires_ack: false,
+            }],
             resource_types: vec![],
             auth_caps: None,
             event_caps: Some(EventCaps {
@@ -445,13 +444,14 @@ impl DiscordConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing operation".into(),
-            })?;
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing operation".into(),
+                })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
@@ -472,13 +472,14 @@ impl DiscordConnector {
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for better error messages
-        let channel_id = input
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing channel_id".into(),
-            })?;
+        let channel_id =
+            input
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing channel_id".into(),
+                })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = input
@@ -593,21 +594,23 @@ impl DiscordConnector {
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for better error messages
-        let channel_id = input
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing channel_id".into(),
-            })?;
+        let channel_id =
+            input
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing channel_id".into(),
+                })?;
 
-        let message_id = input
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing message_id".into(),
-            })?;
+        let message_id =
+            input
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing message_id".into(),
+                })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = input
@@ -711,23 +714,28 @@ impl DiscordConnector {
         })
     }
 
-    async fn invoke_delete_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_delete_message(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id = input
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing channel_id".into(),
-            })?;
+        let channel_id =
+            input
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing channel_id".into(),
+                })?;
 
-        let message_id = input
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing message_id".into(),
-            })?;
+        let message_id =
+            input
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing message_id".into(),
+                })?;
 
         let api = self.require_api()?;
 
@@ -746,25 +754,27 @@ impl DiscordConnector {
 
     async fn invoke_get_channel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id = input
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing channel_id".into(),
-            })?;
+        let channel_id =
+            input
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing channel_id".into(),
+                })?;
 
         let api = self.require_api()?;
 
-        let channel = api.get_channel(channel_id).await.map_err(|e| {
-            FcpError::External {
+        let channel = api
+            .get_channel(channel_id)
+            .await
+            .map_err(|e| FcpError::External {
                 service: "discord".into(),
                 message: e.to_string(),
                 status_code: None,
                 retryable: e.is_retryable(),
                 retry_after: None,
-            }
-        })?;
+            })?;
 
         serde_json::to_value(channel).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize channel: {e}"),
@@ -773,58 +783,67 @@ impl DiscordConnector {
 
     async fn invoke_get_guild(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let guild_id = input
-            .get("guild_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing guild_id".into(),
-            })?;
+        let guild_id =
+            input
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing guild_id".into(),
+                })?;
 
         let api = self.require_api()?;
 
-        let guild = api.get_guild(guild_id).await.map_err(|e| {
-            FcpError::External {
+        let guild = api
+            .get_guild(guild_id)
+            .await
+            .map_err(|e| FcpError::External {
                 service: "discord".into(),
                 message: e.to_string(),
                 status_code: None,
                 retryable: e.is_retryable(),
                 retry_after: None,
-            }
-        })?;
+            })?;
 
         serde_json::to_value(guild).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize guild: {e}"),
         })
     }
 
-    async fn invoke_trigger_typing(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_trigger_typing(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id = input
-            .get("channel_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing channel_id".into(),
-            })?;
+        let channel_id =
+            input
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing channel_id".into(),
+                })?;
 
         let api = self.require_api()?;
 
-        api.trigger_typing(channel_id).await.map_err(|e| {
-            FcpError::External {
+        api.trigger_typing(channel_id)
+            .await
+            .map_err(|e| FcpError::External {
                 service: "discord".into(),
                 message: e.to_string(),
                 status_code: None,
                 retryable: e.is_retryable(),
                 retry_after: None,
-            }
-        })?;
+            })?;
 
         Ok(json!({ "triggered": true }))
     }
 
     /// Handle subscribe method.
-    pub async fn handle_subscribe(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_subscribe(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let topics = params
             .get("topics")
             .and_then(|v| v.as_array())
@@ -842,7 +861,10 @@ impl DiscordConnector {
     }
 
     /// Handle shutdown method.
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Shutting down Discord connector");
 
         if let Some(task) = self.gateway_task.take() {
@@ -870,7 +892,9 @@ impl DiscordConnector {
 
         let task = tokio::spawn(async move {
             while let Some(gateway_event) = event_rx.recv().await {
-                if let Some(event) = gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id) {
+                if let Some(event) =
+                    gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
+                {
                     if event_tx.send(Ok(event)).is_err() {
                         tracing::info!("Event receiver dropped, stopping gateway event forwarding");
                         break;
@@ -906,42 +930,90 @@ fn gateway_event_to_fcp(
                 "session_id": ready.session_id,
                 "user": ready.user
             });
-            ("discord.ready", payload, ("bot".into(), ready.user.id.clone()))
+            (
+                "discord.ready",
+                payload,
+                ("bot".into(), ready.user.id.clone()),
+            )
         }
         GatewayEvent::Resumed => {
             // Session resumed - this is an internal state event, emit as system event
             let payload = json!({ "event": "session_resumed" });
-            ("discord.resumed", payload, ("system".into(), "gateway".into()))
+            (
+                "discord.resumed",
+                payload,
+                ("system".into(), "gateway".into()),
+            )
         }
         GatewayEvent::MessageCreate(data) => {
-            let author_id = data.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()).unwrap_or("unknown");
-            let author_name = data.get("author").and_then(|a| a.get("username")).and_then(|v| v.as_str());
-            ("discord.message", data.clone(), (author_name.unwrap_or("unknown").into(), author_id.into()))
+            let author_id = data
+                .get("author")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let author_name = data
+                .get("author")
+                .and_then(|a| a.get("username"))
+                .and_then(|v| v.as_str());
+            (
+                "discord.message",
+                data.clone(),
+                (author_name.unwrap_or("unknown").into(), author_id.into()),
+            )
         }
         GatewayEvent::MessageUpdate(data) => {
-            let author_id = data.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()).unwrap_or("unknown");
-            ("discord.message_update", data.clone(), ("unknown".into(), author_id.into()))
+            let author_id = data
+                .get("author")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            (
+                "discord.message_update",
+                data.clone(),
+                ("unknown".into(), author_id.into()),
+            )
         }
-        GatewayEvent::MessageDelete(data) => {
-            ("discord.message_delete", data.clone(), ("unknown".into(), "unknown".into()))
-        }
+        GatewayEvent::MessageDelete(data) => (
+            "discord.message_delete",
+            data.clone(),
+            ("unknown".into(), "unknown".into()),
+        ),
         GatewayEvent::GuildCreate(data) => {
             let guild_id = data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            ("discord.guild_create", data.clone(), ("system".into(), guild_id.into()))
+            (
+                "discord.guild_create",
+                data.clone(),
+                ("system".into(), guild_id.into()),
+            )
         }
         GatewayEvent::GuildUpdate(data) => {
             let guild_id = data.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            ("discord.guild_update", data.clone(), ("system".into(), guild_id.into()))
+            (
+                "discord.guild_update",
+                data.clone(),
+                ("system".into(), guild_id.into()),
+            )
         }
-        GatewayEvent::ChannelCreate(data) => {
-            ("discord.channel_create", data.clone(), ("system".into(), "unknown".into()))
-        }
-        GatewayEvent::ChannelUpdate(data) => {
-            ("discord.channel_update", data.clone(), ("system".into(), "unknown".into()))
-        }
+        GatewayEvent::ChannelCreate(data) => (
+            "discord.channel_create",
+            data.clone(),
+            ("system".into(), "unknown".into()),
+        ),
+        GatewayEvent::ChannelUpdate(data) => (
+            "discord.channel_update",
+            data.clone(),
+            ("system".into(), "unknown".into()),
+        ),
         GatewayEvent::TypingStart(data) => {
-            let user_id = data.get("user_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            ("discord.typing", data.clone(), ("unknown".into(), user_id.into()))
+            let user_id = data
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            (
+                "discord.typing",
+                data.clone(),
+                ("unknown".into(), user_id.into()),
+            )
         }
         GatewayEvent::Unknown { event_name, data } => {
             let topic = format!("discord.{}", event_name.to_lowercase());
@@ -997,19 +1069,28 @@ mod tests {
             "content": long_content
         });
 
-        let result = connector.handle_invoke(serde_json::json!({
-            "operation": "discord.send_message",
-            "input": input
-        })).await;
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "discord.send_message",
+                "input": input
+            }))
+            .await;
 
         // Validation happens before config check, so we get InvalidRequest for too-long content
         assert!(result.is_err());
         let err = result.unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("character limit"), "Expected content length error, got: {}", message);
+                assert!(
+                    message.contains("character limit"),
+                    "Expected content length error, got: {}",
+                    message
+                );
             }
-            _ => panic!("Expected InvalidRequest error for content too long, got: {:?}", err),
+            _ => panic!(
+                "Expected InvalidRequest error for content too long, got: {:?}",
+                err
+            ),
         }
     }
 
@@ -1021,10 +1102,12 @@ mod tests {
             "channel_id": "123456789"
         });
 
-        let result = connector.handle_invoke(serde_json::json!({
-            "operation": "discord.send_message",
-            "input": input
-        })).await;
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "discord.send_message",
+                "input": input
+            }))
+            .await;
 
         // Validation happens before config check, so we get InvalidRequest
         assert!(result.is_err());
@@ -1041,9 +1124,9 @@ mod tests {
     fn test_message_length_constants() {
         // Verify our constants match Discord's documented limits
         assert_eq!(2000, 2000); // MAX_CONTENT_LENGTH
-        assert_eq!(10, 10);     // MAX_EMBEDS
+        assert_eq!(10, 10); // MAX_EMBEDS
         assert_eq!(6000, 6000); // MAX_EMBED_TOTAL_CHARS
-        assert_eq!(256, 256);   // MAX_EMBED_TITLE
+        assert_eq!(256, 256); // MAX_EMBED_TITLE
         assert_eq!(4096, 4096); // MAX_EMBED_DESCRIPTION
     }
 }

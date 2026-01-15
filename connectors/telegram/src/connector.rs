@@ -2,13 +2,13 @@
 //!
 //! Implements the FcpConnector trait with Telegram-specific operations.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use fcp_core::*;
 use serde_json::json;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tracing::{error, info, warn};
 
 use crate::client::{SendMessageOptions, TelegramClient, TelegramError};
@@ -64,7 +64,7 @@ impl TelegramConnector {
         let (event_tx, _) = broadcast::channel(1000);
 
         Self {
-            id: ConnectorId("telegram".into()),
+            id: ConnectorId::from_static("telegram"),
             config: None,
             client: None,
             verifier: None,
@@ -83,9 +83,12 @@ impl TelegramConnector {
     }
 
     /// Handle configure method.
-    pub async fn handle_configure(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let config: TelegramConfig = serde_json::from_value(params)
-            .map_err(|e| FcpError::InvalidRequest {
+    pub async fn handle_configure(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let config: TelegramConfig =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid configuration: {e}"),
             })?;
@@ -109,22 +112,28 @@ impl TelegramConnector {
     }
 
     /// Handle handshake method.
-    pub async fn handle_handshake(&mut self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let req: HandshakeRequest = serde_json::from_value(params)
-            .map_err(|e| FcpError::InvalidRequest {
+    pub async fn handle_handshake(
+        &mut self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
         // Verify bot is reachable
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let bot_info = client.get_me().await.map_err(|e: TelegramError| FcpError::External {
-            service: "telegram".into(),
-            message: format!("Failed to verify bot: {e}"),
-            status_code: None,
-            retryable: e.is_retryable(),
-            retry_after: None,
-        })?;
+        let bot_info = client
+            .get_me()
+            .await
+            .map_err(|e: TelegramError| FcpError::External {
+                service: "telegram".into(),
+                message: format!("Failed to verify bot: {e}"),
+                status_code: None,
+                retryable: e.is_retryable(),
+                retry_after: None,
+            })?;
 
         info!(
             bot_username = ?bot_info.username,
@@ -209,7 +218,7 @@ impl TelegramConnector {
         let introspection = Introspection {
             operations: vec![
                 OperationInfo {
-                    id: OperationId("telegram.send_message".into()),
+                    id: OperationId::from_static("telegram.send_message"),
                     summary: "Send a text message to a Telegram chat".into(),
                     description: Some("Sends a text message to a specified Telegram chat, user, or group.".into()),
                     input_schema: json!({
@@ -229,7 +238,7 @@ impl TelegramConnector {
                             "chat_id": { "type": "integer" }
                         }
                     }),
-                    capability: CapabilityId("telegram.send".into()),
+                    capability: CapabilityId::from_static("telegram.send"),
                     risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Risky,
                     idempotency: IdempotencyClass::None,
@@ -249,7 +258,7 @@ impl TelegramConnector {
                     requires_approval: None,
                 },
                 OperationInfo {
-                    id: OperationId("telegram.get_file".into()),
+                    id: OperationId::from_static("telegram.get_file"),
                     summary: "Get file information for downloading".into(),
                     description: Some("Retrieves file information including download path for files attached to messages.".into()),
                     input_schema: json!({
@@ -267,7 +276,7 @@ impl TelegramConnector {
                             "file_size": { "type": "integer" }
                         }
                     }),
-                    capability: CapabilityId("telegram.read".into()),
+                    capability: CapabilityId::from_static("telegram.read"),
                     risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::Strict,
@@ -313,13 +322,14 @@ impl TelegramConnector {
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
 
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing operation".into(),
-            })?;
+        let operation =
+            params
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing operation".into(),
+                })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
@@ -340,13 +350,14 @@ impl TelegramConnector {
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking client) for better error messages
-        let chat_id = input
-            .get("chat_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing chat_id".into(),
-            })?;
+        let chat_id =
+            input
+                .get("chat_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing chat_id".into(),
+                })?;
 
         let text = input
             .get("text")
@@ -379,19 +390,20 @@ impl TelegramConnector {
             options.reply_to_message_id = Some(reply_to);
         }
 
-        let message = client
-            .send_message(chat_id, text, options)
-            .await
-            .map_err(|e: TelegramError| FcpError::External {
-                service: "telegram".into(),
-                message: e.to_string(),
-                status_code: match &e {
-                    TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                    _ => None,
-                },
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+        let message =
+            client
+                .send_message(chat_id, text, options)
+                .await
+                .map_err(|e: TelegramError| FcpError::External {
+                    service: "telegram".into(),
+                    message: e.to_string(),
+                    status_code: match &e {
+                        TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                        _ => None,
+                    },
+                    retryable: e.is_retryable(),
+                    retry_after: None,
+                })?;
 
         self.messages_sent.fetch_add(1, Ordering::Relaxed);
 
@@ -404,29 +416,31 @@ impl TelegramConnector {
     async fn invoke_get_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        let file_id = input
-            .get("file_id")
-            .and_then(|v| v.as_str())
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing file_id".into(),
-            })?;
+        let file_id =
+            input
+                .get("file_id")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing file_id".into(),
+                })?;
 
-        let file = client.get_file(file_id).await.map_err(|e: TelegramError| FcpError::External {
-            service: "telegram".into(),
-            message: e.to_string(),
-            status_code: match &e {
-                TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                _ => None,
-            },
-            retryable: e.is_retryable(),
-            retry_after: None,
-        })?;
+        let file =
+            client
+                .get_file(file_id)
+                .await
+                .map_err(|e: TelegramError| FcpError::External {
+                    service: "telegram".into(),
+                    message: e.to_string(),
+                    status_code: match &e {
+                        TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                        _ => None,
+                    },
+                    retryable: e.is_retryable(),
+                    retry_after: None,
+                })?;
 
-        let download_url = file
-            .file_path
-            .as_ref()
-            .map(|p| client.file_download_url(p));
+        let download_url = file.file_path.as_ref().map(|p| client.file_download_url(p));
 
         Ok(json!({
             "file_id": file.file_id,
@@ -438,7 +452,10 @@ impl TelegramConnector {
     }
 
     /// Handle subscribe method.
-    pub async fn handle_subscribe(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_subscribe(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let topics = params
             .get("topics")
             .and_then(|v| v.as_array())
@@ -456,7 +473,10 @@ impl TelegramConnector {
     }
 
     /// Handle shutdown method.
-    pub async fn handle_shutdown(&mut self, _params: serde_json::Value) -> FcpResult<serde_json::Value> {
+    pub async fn handle_shutdown(
+        &mut self,
+        _params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         info!("Shutting down Telegram connector");
 
         // Stop polling
@@ -511,11 +531,9 @@ impl TelegramConnector {
                             *last_update_id.write().await = Some(update.update_id);
 
                             // Convert to event
-                            if let Some(event) = update_to_event(
-                                &update,
-                                &connector_id,
-                                &instance_id,
-                            ) {
+                            if let Some(event) =
+                                update_to_event(&update, &connector_id, &instance_id)
+                            {
                                 messages_received.fetch_add(1, Ordering::Relaxed);
                                 if event_tx.send(Ok(event)).is_err() {
                                     info!("Event receiver dropped, closing polling loop");
@@ -559,14 +577,15 @@ fn update_to_event(
         UpdateKind::ChannelPost(msg) | UpdateKind::EditedChannelPost(msg) => {
             ("telegram.channel_post", message_to_json(msg))
         }
-        UpdateKind::CallbackQuery(cb) => {
-            ("telegram.callback_query", json!({
+        UpdateKind::CallbackQuery(cb) => (
+            "telegram.callback_query",
+            json!({
                 "id": cb.id,
                 "from": cb.from,
                 "data": cb.data,
                 "chat_instance": cb.chat_instance
-            }))
-        }
+            }),
+        ),
         UpdateKind::Unknown => return None,
     };
 
@@ -641,10 +660,12 @@ mod tests {
             "text": long_text
         });
 
-        let result = connector.handle_invoke(serde_json::json!({
-            "operation": "telegram.send_message",
-            "input": input
-        })).await;
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input
+            }))
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -670,10 +691,12 @@ mod tests {
             "text": exact_text
         });
 
-        let result = connector.handle_invoke(serde_json::json!({
-            "operation": "telegram.send_message",
-            "input": input
-        })).await;
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input
+            }))
+            .await;
 
         // Should fail with NotConfigured (passed validation)
         assert!(result.is_err());
@@ -689,10 +712,12 @@ mod tests {
             "chat_id": "123456789"
         });
 
-        let result = connector.handle_invoke(serde_json::json!({
-            "operation": "telegram.send_message",
-            "input": input
-        })).await;
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input
+            }))
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -712,10 +737,12 @@ mod tests {
             "text": "Hello"
         });
 
-        let result = connector.handle_invoke(serde_json::json!({
-            "operation": "telegram.send_message",
-            "input": input
-        })).await;
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input
+            }))
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
