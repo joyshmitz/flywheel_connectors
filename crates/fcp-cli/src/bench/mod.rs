@@ -23,6 +23,7 @@ mod types;
 
 pub use types::{BenchmarkReport, BenchmarkResult};
 
+use anyhow::{anyhow, bail};
 use clap::{Args, Subcommand};
 
 /// Arguments for the `fcp bench` command.
@@ -107,6 +108,13 @@ enum BenchCommand {
         target: CborTarget,
     },
 
+    /// Microbenchmarks for hot primitives (`ObjectId`, capability verification, session MAC).
+    Primitives {
+        /// Specific sub-benchmark (object-id, capability-verify, session-mac, fcps-frame, all).
+        #[arg(long, default_value = "all")]
+        target: PrimitiveTarget,
+    },
+
     /// Run all benchmarks and produce a complete report.
     All,
 }
@@ -125,7 +133,17 @@ enum CborTarget {
     All,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum PrimitiveTarget {
+    ObjectId,
+    CapabilityVerify,
+    SessionMac,
+    FcpsFrame,
+    All,
+}
+
 /// Run the benchmark command.
+#[allow(clippy::too_many_lines)]
 pub fn run(args: BenchArgs) -> anyhow::Result<()> {
     let env = environment::collect();
 
@@ -162,15 +180,14 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             )]
         }
         BenchCommand::Raptorq { size } => {
-            // TODO: Implement RaptorQ benchmarks once fcp-raptorq is ready.
-            tracing::warn!(
-                "raptorq --size={} benchmark not yet implemented (fcp-raptorq pending)",
-                size
-            );
-            vec![BenchmarkResult::placeholder(
-                format!("raptorq-{size}"),
-                "fcp-raptorq not yet implemented",
-            )]
+            let size_label = normalize_size_label(&size);
+            let size_bytes = parse_size_bytes(&size_label)?;
+            vec![bench_raptorq(
+                &size_label,
+                size_bytes,
+                args.iterations,
+                args.warmup,
+            )?]
         }
         BenchCommand::Secrets { k, n } => {
             // TODO: Implement secrets benchmarks once fcp-crypto Shamir is ready.
@@ -185,6 +202,7 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             )]
         }
         BenchCommand::Cbor { target } => cbor::run_benchmarks(target, args.iterations, args.warmup),
+        BenchCommand::Primitives { target } => run_primitives(target, args.iterations, args.warmup),
         BenchCommand::All => {
             let mut all_results = Vec::new();
 
@@ -194,6 +212,23 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
                 args.iterations,
                 args.warmup,
             ));
+
+            // Run hot primitive microbenches.
+            all_results.extend(run_primitives(
+                PrimitiveTarget::All,
+                args.iterations,
+                args.warmup,
+            ));
+
+            // Run default RaptorQ benchmark (1MB payload).
+            let raptorq_size = "1mb";
+            let raptorq_bytes = parse_size_bytes(raptorq_size)?;
+            all_results.push(bench_raptorq(
+                raptorq_size,
+                raptorq_bytes,
+                args.iterations,
+                args.warmup,
+            )?);
 
             // Add placeholders for unimplemented benchmarks.
             all_results.push(BenchmarkResult::placeholder(
@@ -213,10 +248,6 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
                 "fcp-mesh not yet implemented",
             ));
             all_results.push(BenchmarkResult::placeholder(
-                "raptorq-1mb",
-                "fcp-raptorq not yet implemented",
-            ));
-            all_results.push(BenchmarkResult::placeholder(
                 "secrets-3-of-5",
                 "fcp-crypto Shamir not yet implemented",
             ));
@@ -224,6 +255,18 @@ pub fn run(args: BenchArgs) -> anyhow::Result<()> {
             all_results
         }
     };
+
+    for result in &results {
+        tracing::info!(
+            bench = %result.name,
+            params = %result.parameters,
+            samples = result.sample_count,
+            warmup = result.warmup_count,
+            outliers = result.outliers_detected,
+            note = ?result.note,
+            "benchmark completed"
+        );
+    }
 
     let report = BenchmarkReport::new(env, results);
 
@@ -271,4 +314,367 @@ fn print_human_report(report: &BenchmarkReport) {
         println!("  Samples: {}", result.sample_count);
         println!();
     }
+}
+
+fn normalize_size_label(size: &str) -> String {
+    size.trim().to_ascii_lowercase()
+}
+
+fn parse_size_bytes(size: &str) -> anyhow::Result<usize> {
+    let size = size.trim().to_ascii_lowercase();
+    if size.is_empty() {
+        bail!("size must not be empty");
+    }
+
+    let (number, multiplier) = if let Some(stripped) = size.strip_suffix("kb") {
+        (stripped, 1024_u64)
+    } else if let Some(stripped) = size.strip_suffix("mb") {
+        (stripped, 1024_u64 * 1024)
+    } else if let Some(stripped) = size.strip_suffix("gb") {
+        (stripped, 1024_u64 * 1024 * 1024)
+    } else if let Some(stripped) = size.strip_suffix('b') {
+        (stripped, 1_u64)
+    } else {
+        (size.as_str(), 1_u64)
+    };
+
+    let number = number.trim().replace('_', "");
+    if number.is_empty() {
+        bail!("size value missing in '{size}'");
+    }
+
+    let value: u64 = number
+        .parse()
+        .map_err(|_| anyhow!("invalid size value '{number}'"))?;
+    let bytes = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow!("size overflow for '{size}'"))?;
+
+    if bytes == 0 {
+        bail!("size must be greater than zero");
+    }
+
+    usize::try_from(bytes).map_err(|_| anyhow!("size too large for platform"))
+}
+
+fn bench_raptorq(
+    size_label: &str,
+    size_bytes: usize,
+    iterations: u32,
+    warmup: u32,
+) -> anyhow::Result<BenchmarkResult> {
+    use fcp_raptorq::{RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
+
+    let config = RaptorQConfig::default();
+    if size_bytes > config.max_object_size as usize {
+        bail!(
+            "size {} exceeds RaptorQ max_object_size {}",
+            size_bytes,
+            config.max_object_size
+        );
+    }
+
+    let payload = vec![0xAB_u8; size_bytes];
+    let encoder = RaptorQEncoder::new(&payload, &config)
+        .map_err(|err| anyhow!("raptorq encode init failed: {err}"))?;
+
+    let symbol_size = encoder.symbol_size();
+    let source_symbols = encoder.source_symbols();
+    let repair_symbols = encoder.repair_symbols();
+    let total_symbols = encoder.total_symbols();
+
+    let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
+        let encoder = RaptorQEncoder::new(&payload, &config).expect("encoder init");
+        let symbols = encoder.encode_all();
+        let mut decoder = RaptorQDecoder::new(encoder.transmission_info(), &config);
+
+        for (esi, data) in symbols {
+            if let Some(decoded) = decoder
+                .add_symbol(esi, data)
+                .expect("raptorq decode should succeed")
+            {
+                return decoded.len();
+            }
+        }
+
+        panic!("raptorq decode did not complete");
+    });
+
+    let mut result = BenchmarkResult::new(
+        format!("raptorq-{size_label}"),
+        "RaptorQ encode + decode wall time",
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({
+        "size": size_label,
+        "size_bytes": size_bytes,
+        "symbol_size": symbol_size,
+        "source_symbols": source_symbols,
+        "repair_symbols": repair_symbols,
+        "total_symbols": total_symbols,
+        "decode_timeout_ms": config.decode_timeout.as_millis(),
+    }));
+
+    if size_bytes == 1024 * 1024 {
+        result = result.with_targets(types::Targets {
+            p50_target_ms: 50.0,
+            p99_target_ms: 250.0,
+        });
+    }
+
+    result.outliers_detected = outliers;
+    Ok(result)
+}
+
+fn run_primitives(target: PrimitiveTarget, iterations: u32, warmup: u32) -> Vec<BenchmarkResult> {
+    let mut results = Vec::new();
+
+    if target == PrimitiveTarget::ObjectId || target == PrimitiveTarget::All {
+        results.push(bench_object_id(iterations, warmup));
+    }
+
+    if target == PrimitiveTarget::CapabilityVerify || target == PrimitiveTarget::All {
+        results.push(bench_capability_verify(iterations, warmup));
+    }
+
+    if target == PrimitiveTarget::SessionMac || target == PrimitiveTarget::All {
+        results.push(bench_session_mac(iterations, warmup));
+    }
+
+    if target == PrimitiveTarget::FcpsFrame || target == PrimitiveTarget::All {
+        results.push(bench_fcps_frame_parse_mac(iterations, warmup));
+    }
+
+    results
+}
+
+fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
+    use fcp_cbor::SchemaId;
+    use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+    use semver::Version;
+
+    let zone = ZoneId::work();
+    let schema = SchemaId::new("fcp.bench", "ObjectIdPayload", Version::new(1, 0, 0));
+    let key = ObjectIdKey::from_bytes([0x11_u8; 32]);
+    let payload = vec![0xAB_u8; 1024];
+
+    let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
+        ObjectId::new(&payload, &zone, &schema, &key)
+    });
+
+    let mut result = BenchmarkResult::new(
+        "object-id-derive",
+        "Derive ObjectId from payload, zone, schema, and ObjectIdKey",
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({
+        "payload_bytes": payload.len(),
+        "zone": zone.as_str(),
+        "schema": format!("{}:{}@{}", schema.namespace, schema.name, schema.version),
+    }))
+    .with_targets(types::Targets {
+        p50_target_ms: 0.02,
+        p99_target_ms: 0.2,
+    });
+
+    result.outliers_detected = outliers;
+    result
+}
+
+fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
+    use ed25519_dalek::{Signer, SigningKey};
+    use fcp_core::{
+        CapabilityToken, CapabilityVerifier, ConnectorId, InstanceId, OperationId, ZoneId,
+    };
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct TokenPayload<'a> {
+        jti: &'a fcp_core::Uuid,
+        sub: &'a fcp_core::PrincipalId,
+        iss: &'a ZoneId,
+        aud: &'a ConnectorId,
+        instance: &'a Option<InstanceId>,
+        iat: u64,
+        exp: u64,
+        caps: &'a Vec<fcp_core::CapabilityGrant>,
+        constraints: &'a fcp_core::CapabilityConstraints,
+    }
+
+    let seed = [42_u8; 32];
+    let signing_key = SigningKey::from_bytes(&seed);
+    let verifying_key = signing_key.verifying_key();
+    let pub_bytes = verifying_key.to_bytes();
+
+    let mut token = CapabilityToken::test_token();
+    token.iss = ZoneId::work();
+    token.aud = "test-connector:v1:0.1"
+        .parse()
+        .expect("connector id must be canonical");
+    token.exp = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0) + 3_600;
+
+    let payload = TokenPayload {
+        jti: &token.jti,
+        sub: &token.sub,
+        iss: &token.iss,
+        aud: &token.aud,
+        instance: &token.instance,
+        iat: token.iat,
+        exp: token.exp,
+        caps: &token.caps,
+        constraints: &token.constraints,
+    };
+
+    let payload_value =
+        serde_json::to_value(&payload).expect("payload should serialize deterministically");
+    let payload_bytes =
+        serde_json::to_vec(&payload_value).expect("payload should serialize deterministically");
+
+    let signature = signing_key.sign(&payload_bytes);
+    token.sig = signature.to_bytes();
+
+    let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+    let op = OperationId::new("op.test").expect("operation id must be canonical");
+
+    let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
+        verifier
+            .verify(&token, &op, &[])
+            .expect("capability verification should succeed");
+    });
+
+    let mut result = BenchmarkResult::new(
+        "capability-verify",
+        "Verify capability token signature, expiry, zone binding, and grants",
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({
+        "caps": token.caps.len(),
+        "zone": token.iss.as_str(),
+        "instance_bound": token.instance.is_some(),
+    }))
+    .with_targets(types::Targets {
+        p50_target_ms: 0.2,
+        p99_target_ms: 1.5,
+    });
+
+    result.outliers_detected = outliers;
+    result
+}
+
+fn bench_session_mac(iterations: u32, warmup: u32) -> BenchmarkResult {
+    use fcp_crypto::{Blake3Mac, MacKey};
+
+    let key = MacKey::from_bytes([0x3C_u8; 32]);
+    let mac = Blake3Mac::new(&key);
+    let message = vec![0x5A_u8; 2048];
+    let tag = mac.compute(&message);
+
+    let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
+        mac.verify(&message, &tag)
+            .expect("session MAC should verify");
+    });
+
+    let mut result = BenchmarkResult::new(
+        "session-mac-verify",
+        "Verify BLAKE3 session MAC over frame payload",
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({
+        "message_bytes": message.len(),
+        "mac": "blake3",
+        "tag_bytes": fcp_crypto::mac::MAC_SIZE,
+    }))
+    .with_targets(types::Targets {
+        p50_target_ms: 0.05,
+        p99_target_ms: 0.5,
+    });
+
+    result.outliers_detected = outliers;
+    result
+}
+
+const FCPS_HEADER_LEN: usize = 114;
+
+#[derive(Clone, Copy)]
+struct FcpsHeader {
+    frame_seq: u64,
+}
+
+fn parse_fcps_header(bytes: &[u8]) -> Option<FcpsHeader> {
+    if bytes.len() < FCPS_HEADER_LEN {
+        return None;
+    }
+
+    let magic = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    if magic != u32::from_le_bytes(*b"FCPS") {
+        return None;
+    }
+
+    let frame_seq = u64::from_le_bytes(bytes[106..114].try_into().ok()?);
+
+    Some(FcpsHeader { frame_seq })
+}
+
+fn bench_fcps_frame_parse_mac(iterations: u32, warmup: u32) -> BenchmarkResult {
+    use fcp_crypto::{Blake3Mac, MacKey};
+
+    let symbol_size: u16 = 1024;
+    let payload_len: usize = 16 * symbol_size as usize;
+    let frame_len = FCPS_HEADER_LEN + payload_len;
+    let mut frame = vec![0u8; frame_len];
+
+    frame[0..4].copy_from_slice(b"FCPS");
+    frame[4..6].copy_from_slice(&1_u16.to_le_bytes());
+    frame[6..8].copy_from_slice(&0_u16.to_le_bytes());
+
+    let payload_len_u32 = u32::try_from(payload_len).expect("payload length fits u32");
+    let symbol_size_u32 = u32::from(symbol_size);
+    frame[8..12].copy_from_slice(&(payload_len_u32 / symbol_size_u32).to_le_bytes());
+    frame[12..16].copy_from_slice(&payload_len_u32.to_le_bytes());
+    frame[16..48].copy_from_slice(&[0x11_u8; 32]);
+    frame[48..50].copy_from_slice(&symbol_size.to_le_bytes());
+    frame[50..58].copy_from_slice(&42_u64.to_le_bytes());
+    frame[58..90].copy_from_slice(&[0x22_u8; 32]);
+    frame[90..98].copy_from_slice(&7_u64.to_le_bytes());
+    frame[98..106].copy_from_slice(&99_u64.to_le_bytes());
+    frame[106..114].copy_from_slice(&12345_u64.to_le_bytes());
+
+    let key = MacKey::from_bytes([0x9A_u8; 32]);
+    let mac = Blake3Mac::new(&key);
+    let tag = mac.compute(&frame);
+
+    let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
+        let header = parse_fcps_header(&frame).expect("valid header");
+        mac.verify(&frame, &tag).expect("frame MAC should verify");
+        header.frame_seq
+    });
+
+    let mut result = BenchmarkResult::new(
+        "fcps-frame-parse-mac",
+        "Parse FCPS header and verify session MAC",
+        iterations,
+        warmup,
+        percentiles,
+    )
+    .with_parameters(serde_json::json!({
+        "frame_bytes": frame_len,
+        "payload_bytes": payload_len,
+        "symbol_size": symbol_size,
+        "mac": "blake3",
+    }))
+    .with_targets(types::Targets {
+        p50_target_ms: 0.2,
+        p99_target_ms: 1.0,
+    });
+
+    result.outliers_detected = outliers;
+    result
 }
