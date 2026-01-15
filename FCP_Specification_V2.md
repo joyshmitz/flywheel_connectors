@@ -222,6 +222,8 @@ pub struct MeshIdentity {
 pub struct NodeKeyAttestation {
     /// Tailscale node being attested
     pub node_id: TailscaleNodeId,
+    /// Owner public key (binds attestation to specific owner identity)
+    pub owner_pubkey: Ed25519PublicKey,
     /// Node's signing public key
     pub node_sig_pubkey: Ed25519PublicKey,
     /// Key id for node_sig_pubkey (NORMATIVE)
@@ -238,8 +240,10 @@ pub struct NodeKeyAttestation {
     pub tags: Vec<String>,
     /// When attestation was issued
     pub issued_at: u64,
-    /// Optional expiry (None = no expiry)
-    pub expires_at: Option<u64>,
+    /// When attestation expires (NORMATIVE: MUST be present, MUST be > issued_at)
+    pub expires_at: u64,
+    /// Random 32-byte nonce ensuring freshness and preventing replay across contexts
+    pub attestation_nonce: [u8; 32],
     /// Optional device posture attestation (hardware-backed key binding)
     pub device_posture: Option<DevicePostureAttestation>,
     /// Owner signature (may be produced via threshold signing; verifiable with owner_pubkey)
@@ -254,6 +258,10 @@ pub struct DevicePostureAttestation {
     pub payload: Vec<u8>,
     /// When attestation was generated
     pub issued_at: u64,
+    /// When attestation expires (NORMATIVE: short validity window, ≤ 24 hours)
+    pub expires_at: u64,
+    /// Random 32-byte nonce preventing replay across contexts
+    pub nonce: [u8; 32],
 }
 
 /// Hardware attestation types (NORMATIVE)
@@ -267,6 +275,31 @@ pub enum DevicePostureKind {
     /// Platform-specific attestation type
     Custom(String),
 }
+```
+
+**NORMATIVE: Attestation Validation Requirements**
+
+1. **NodeKeyAttestation signatures**: `NodeKeyAttestation.signature` MUST be an Ed25519 signature by
+   the owner key over the canonical CBOR serialization with `signature` set to empty bytes.
+
+2. **Expiry enforcement**: `expires_at` MUST be present and MUST satisfy `expires_at > issued_at`.
+   The validity window SHOULD be short (≤ 30 days). Implementations MUST reject attestations
+   where the current time exceeds `expires_at`.
+
+3. **Device posture freshness**: `DevicePostureAttestation.expires_at - issued_at` SHOULD be ≤ 24
+   hours. Posture attestations outside this window MUST be rejected. Stale posture indicates
+   device state may have changed (OS updates, security patches, compromise).
+
+4. **Tag validation**: `tags` entries MUST be valid Canonical Identifier Grammar strings (§9) and
+   each entry MUST be ≤ 64 bytes. Invalid tags MUST cause attestation rejection.
+
+5. **Key ID derivation**: All `*_kid` values MUST be derived via domain-separated hash:
+   `kid = first8(BLAKE3-256("fcp.kid.v2" || pubkey_bytes))`. Implementations MUST verify
+   that provided KIDs match the derivation from provided public keys.
+
+6. **Nonce uniqueness**: `attestation_nonce` and `DevicePostureAttestation.nonce` provide
+   freshness binding. Implementations SHOULD track seen nonces within a validity window
+   to detect replay attempts (defense in depth alongside expiry checks).
 
 #### 2.2.1 Threshold Owner Signing (RECOMMENDED)
 
@@ -637,6 +670,33 @@ impl CanonicalSerializer {
 }
 ```
 
+**NORMATIVE: RFC 8949 Canonical CBOR Requirements**
+
+To ensure cross-implementation determinism and prevent signature ambiguity, canonical CBOR
+MUST follow these rules (all from RFC 8949 Section 4.2):
+
+1. **Definite-length items only**: All arrays and maps MUST use definite-length encoding.
+   Indefinite-length arrays, maps, byte strings, and text strings MUST be rejected.
+
+2. **Shortest-length integers**: Integers MUST be encoded in the shortest possible form.
+   For example, 23 uses 1 byte (0x17), not 2 bytes (0x18 0x17).
+
+3. **Sorted map keys**: Map keys MUST be sorted in bytewise lexicographic order of their
+   canonical encoding. Implementations MUST produce maps in this order and MUST reject
+   maps that are not sorted.
+
+4. **No duplicate map keys**: Maps MUST NOT contain duplicate keys. Implementations MUST
+   reject any map containing duplicate keys.
+
+5. **Float handling**: Floating-point values MUST NOT appear in durable mesh objects unless
+   the schema explicitly allows them. If allowed, NaN values MUST be rejected, and floats
+   MUST be encoded in the shortest canonical form (prefer float16 over float32 over float64
+   when lossless).
+
+6. **Non-canonical rejection**: Implementations MUST reject non-canonical encodings for any
+   object that is persisted, audited, cached, mirrored, or pinned. This is a fail-closed
+   requirement to prevent subtle interoperability bugs and signature verification failures.
+
 ### 3.5.1 Signature Canonicalization (NORMATIVE)
 
 For any mesh object that includes a `signature: Signature` field, verification MUST follow a single,
@@ -874,6 +934,16 @@ It is used for:
 - **Token binding:** CapabilityTokens bind to checkpoint_seq for freshness (see §7.5)
 
 ```rust
+/// Individual signer contribution to a quorum signature (NORMATIVE)
+pub struct QuorumSignature {
+    /// Signer's node identity
+    pub signer_node: TailscaleNodeId,
+    /// Key identifier used for this signature (derivation per §2.2 NORMATIVE)
+    pub signer_kid: [u8; 8],
+    /// Ed25519 signature over the checkpoint preimage
+    pub sig: Signature,
+}
+
 /// Quorum-signed zone checkpoint (NORMATIVE)
 ///
 /// The canonical snapshot of a zone's enforceable state. Serves as:
@@ -883,6 +953,10 @@ It is used for:
 pub struct ZoneCheckpoint {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
+
+    /// Optional backpointer for chain validation and fork detection (NORMATIVE)
+    /// MUST reference the immediately previous checkpoint for this zone.
+    pub prev_checkpoint: Option<ObjectId>,
 
     /// Enforceable heads (NORMATIVE):
     pub rev_head: ObjectId,
@@ -900,11 +974,32 @@ pub struct ZoneCheckpoint {
     pub checkpoint_seq: u64,
     pub as_of_epoch: EpochId,
 
-    /// Quorum signatures (NORMATIVE; sorted by node_id per §3.5.1)
+    /// Quorum signatures (NORMATIVE; sorted by (signer_node, signer_kid))
     /// A checkpoint is valid when it has signatures from a quorum of zone members.
-    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+    pub quorum_signatures: Vec<QuorumSignature>,
 }
 ```
+
+**NORMATIVE: Quorum Signature and Rollback Requirements**
+
+1. **Signature preimage**: Each `QuorumSignature.sig` MUST be an Ed25519 signature over a domain-
+   separated hash of the canonical checkpoint with `quorum_signatures` set to empty:
+   `BLAKE3-256("fcp.zonecheckpoint.v2" || checkpoint_bytes_without_signatures)`.
+
+2. **Signature ordering**: `quorum_signatures` MUST be sorted by `(signer_node, signer_kid)` in
+   lexicographic byte order and MUST NOT contain duplicates. Non-conformant checkpoints MUST be
+   rejected.
+
+3. **Quorum threshold**: The required quorum threshold and eligible signers MUST be defined in zone
+   policy (referenced by `zone_policy_head`). Checkpoint validation MUST enforce that threshold.
+
+4. **Rollback protection**: Receivers MUST persist the highest accepted `(checkpoint_seq, as_of_epoch)`
+   per zone and MUST reject checkpoints with lower values, even if signatures verify. This prevents
+   replay of older valid checkpoints.
+
+5. **Fork detection**: If `prev_checkpoint` is present, implementations MUST verify it chains to their
+   known checkpoint history. Multiple checkpoints at the same `checkpoint_seq` with different content
+   indicate a fork and MUST trigger alerts (see Fork Detection below).
 
 **Implementation Requirements (NORMATIVE):**
 1. Store ZoneCheckpoint objects as normal mesh objects (content-addressed)
@@ -1329,6 +1424,32 @@ Symbol-native frame format:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**NORMATIVE: Frame Validation and DoS Resistance**
+
+1. **Version handling**: Implementations MUST reject frames with an unsupported `Version` field.
+   Current mandatory-to-implement version is `0x0001`. Unknown versions MUST cause frame rejection
+   (fail closed) to prevent silent misparse.
+
+2. **Flags handling**: Unknown or unsupported bits in `Flags` MUST cause frame rejection (fail closed)
+   unless the bit is explicitly marked as ignorable in this specification. Reserved flags MUST be
+   set to zero by senders.
+
+3. **Parse-time hard limits** (DoS resistance):
+   - `Symbol Count` MUST be ≤ 256 unless explicitly configured for high-throughput scenarios.
+   - `Symbol Size` MUST be ≥ 256 and ≤ 16384 bytes. Values outside this range MUST be rejected.
+   - `Total Payload Length` MUST match the actual datagram payload length and be internally
+     consistent with `Symbol Count` and `Symbol Size`. Mismatches MUST cause rejection.
+   - Implementations MUST reject frames where any header field would cause allocation larger than
+     their configured maximum (default: 4 MiB per frame).
+
+4. **Sequence consistency**: The datagram envelope `seq` (bytes 16-23 in FCPS_DATAGRAM) MUST equal
+   the frame header `Frame Seq` (bytes 106-113). Receivers MUST reject datagrams where these differ.
+   This prevents confusion between session-layer and frame-layer sequence tracking.
+
+5. **Sender Instance ID freshness**: `Sender Instance ID` MUST be generated randomly at process start
+   and MUST change on restart. Receivers MUST maintain replay windows keyed by `(session_id,
+   sender_instance_id)` and reject duplicate or excessively-old `Frame Seq` values.
+
 ### 4.3.1 MTU Safety and Frame Size Limits (NORMATIVE)
 
 FCP nodes MUST avoid IP fragmentation in default configurations.
@@ -1552,6 +1673,25 @@ Both axes are enforced mechanically (not by prompt, convention, or agent complia
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+**NORMATIVE: Zone Level Semantics**
+
+1. **Level ordering**: `integrity_level` and `confidentiality_level` are ordered from 0 (lowest/least
+   trusted/least secret) to 255 (highest/most trusted/most secret). Standard zones use 0-100 range
+   to leave headroom for custom zones.
+
+2. **Hierarchy monotonicity**: Child zones MUST NOT exceed their parent zone's levels. If zone B is
+   a child of zone A, then `B.integrity_level <= A.integrity_level` and `B.confidentiality_level <=
+   A.confidentiality_level`. This ensures monotonically non-increasing protections down the hierarchy.
+
+3. **Membership via policy**: Zone membership and authorization MUST be defined by the zone policy
+   object (referenced by `policy_object_id` in `ZoneDefinitionObject`), not by embedding potentially
+   large allowlists in the zone definition itself. This keeps definitions stable and cacheable.
+
+4. **Labels are conventions**: Zone hierarchy labels (`z:owner`, `z:private`, etc.) are conventional
+   examples for documentation. Implementations MUST enforce semantics based on numeric levels and
+   policy objects, not string names. Custom zone hierarchies are permitted as long as level
+   monotonicity is preserved.
+
 ### 5.2 Zone Definition
 
 ```rust
@@ -1738,7 +1878,36 @@ pub enum ConstraintOp {
     Suffix,
     Contains,
 }
+```
 
+**NORMATIVE: ApprovalScope.Execution Determinism**
+
+1. **Request binding**: `request_object_id` MUST be present for Interactive approvals on
+   Risky/Dangerous operations. This binds the approval to a specific audited InvokeRequest
+   object, making approvals reproducible and reviewable. Pre-granted blanket approvals
+   (without request binding) are only permitted for Safe operations.
+
+2. **Method pattern grammar**: `method_pattern` MUST use a restricted, anchored glob syntax:
+   - Allowed wildcards: `*` (matches 0 or more characters) and `?` (matches exactly 1 character).
+   - No regex features, character classes, or alternation.
+   - Patterns are anchored to the full method name (implicit `^...$` semantics).
+   - Maximum length: 128 bytes. Longer patterns MUST be rejected.
+   - Patterns are ASCII-only; non-ASCII bytes MUST cause rejection.
+
+3. **JSON Pointer validation**: `json_pointer` values MUST follow RFC 6901 strictly. Invalid
+   pointers MUST cause constraint rejection. Implementations MUST validate pointer syntax
+   before evaluation.
+
+4. **Default-deny for unconstrained fields**: If `input_hash` is `None`, then `input_constraints`
+   MUST be non-empty. Implementations MUST apply default-deny for fields not covered by
+   constraints: requests containing non-sensitive-default fields not explicitly constrained
+   SHOULD be rejected. This prevents approval confusion where unreviewed fields affect behavior.
+
+5. **Constraint limits**: Implementations MUST cap `input_constraints` length (recommended: ≤ 64)
+   and MUST reject constraint `value` fields exceeding a configured size limit (default: 4 KiB)
+   to prevent DoS via large approval objects.
+
+```rust
 impl ApprovalToken {
     /// Default TTL: 5 minutes
     pub const DEFAULT_TTL_SECS: u64 = 300;
@@ -2259,6 +2428,19 @@ pub struct ResourceObject {
     /// Original URI (for connector-internal use)
     pub resource_uri: String,
 
+    /// Optional content digest for immutability and safe mirroring (NORMATIVE when pinned)
+    pub resource_digest: Option<[u8; 32]>,
+    /// Digest algorithm identifier (required if resource_digest is present)
+    pub resource_digest_alg: Option<String>,  // e.g., "blake3-256"
+    /// Optional size metadata for budgets and caching
+    pub resource_size_bytes: Option<u64>,
+    /// Optional content type hint (IANA media type)
+    pub resource_content_type: Option<String>,
+    /// When resource was retrieved (Unix timestamp)
+    pub retrieved_at: Option<u64>,
+    /// When cached copy expires (Unix timestamp)
+    pub expires_at: Option<u64>,
+
     /// External resource classification (NORMATIVE)
     /// Used for information-flow enforcement when writing to external systems.
     ///
@@ -2271,7 +2453,27 @@ pub struct ResourceObject {
     /// Connector signature over resource metadata
     pub signature: Signature,
 }
+```
 
+**NORMATIVE: ResourceObject Integrity and Caching**
+
+1. **Digest requirement for persistence**: If a `ResourceObject` is persisted, audited, cached,
+   mirrored, or pinned, `resource_digest` MUST be present and MUST match the fetched bytes.
+   This prevents TOCTOU attacks where mutable URIs change between fetch and use.
+
+2. **URI canonicalization**: `resource_uri` MUST be canonicalized according to its scheme
+   (lowercase host, normalized path). When `require_host_canonicalization` is enabled for
+   egress, implementations MUST reject non-canonical URIs.
+
+3. **Cache expiry enforcement**: If `expires_at` is present, implementations MUST NOT serve
+   cached bytes past expiry without revalidation. Stale resources MUST be re-fetched and
+   re-validated against the digest (if present).
+
+4. **Digest algorithm**: `resource_digest_alg` MUST be "blake3-256" for new resources.
+   Implementations MAY accept "sha256" for compatibility with external systems but SHOULD
+   prefer BLAKE3 for internal use.
+
+```rust
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TrustGrade {
     /// Direct owner access
@@ -2776,8 +2978,62 @@ pub struct NetworkConstraints {
     /// NORMATIVE: hostnames MUST be canonicalized (lowercase, IDNA2008, no trailing dot)
     /// Prevents SSRF bypasses via encoding tricks.
     pub require_host_canonicalization: bool,
-}
 
+    /// Maximum DNS A/AAAA answers permitted for a single resolution (default: 16)
+    pub dns_max_ips: u16,
+    /// Maximum HTTP redirects permitted (default: 5)
+    pub max_redirects: u8,
+    /// Connection establishment timeout in milliseconds (default: 10_000)
+    pub connect_timeout_ms: u32,
+    /// Overall request budget in milliseconds (connect + transfer) (default: 60_000)
+    pub total_timeout_ms: u32,
+    /// Maximum bytes permitted in an egress response body (default: 10_485_760 = 10 MiB)
+    pub max_response_bytes: u64,
+}
+```
+
+**NORMATIVE: NetworkConstraints Evaluation Order**
+
+To prevent SSRF and DNS rebinding attacks, implementations MUST follow this evaluation order:
+
+1. **IP literal check**: If `deny_ip_literals` is true, reject host inputs that parse as IP
+   literals (IPv4 or IPv6) before any further processing.
+
+2. **Host canonicalization**: If `require_host_canonicalization` is true, canonicalize hosts
+   using IDNA2008 to ASCII (A-label), lowercase, and remove trailing dots. All subsequent
+   checks use the canonicalized form.
+
+3. **Host allowlist**: Enforce `host_allow` against the canonicalized host BEFORE DNS resolution.
+   Wildcards in `host_allow` MUST be limited to a single left-most `*.` form (e.g., `*.example.com`).
+   Embedded wildcards MUST be rejected.
+
+4. **Port allowlist**: Enforce `port_allow` BEFORE any network connection.
+
+5. **DNS resolution**: Resolve the hostname. If the number of A/AAAA records exceeds `dns_max_ips`,
+   reject the request (prevents amplification attacks).
+
+6. **IP denylist**: Apply `deny_localhost`, `deny_private_ranges`, `deny_tailnet_ranges`, and
+   `cidr_deny` against EVERY resolved IP address. If ANY resolution yields a denied IP, reject.
+
+7. **IP allowlist**: If `ip_allow` is non-empty, ALL resolved IPs MUST be within `ip_allow`.
+
+8. **Connection**: Connect to a resolved IP (not the hostname) to prevent DNS rebinding where
+   TTL expires and hostname resolves to a different IP mid-request.
+
+**Redirect handling (HTTP egress)**:
+- Every redirect target MUST be re-validated under the same constraints from step 1.
+- Implementations MUST enforce `max_redirects` and MUST NOT follow redirects to denied IPs.
+
+**TLS and SPKI pins**:
+- If `require_sni` is true, the SNI MUST match the canonicalized host.
+- `spki_pins` entries MUST be encoded as `base64(sha256(SPKI_DER))`. If pins are present,
+  the validated certificate chain MUST contain at least one pinned SPKI.
+
+**Timeouts**: Implementations MUST enforce `connect_timeout_ms`, `total_timeout_ms`, and
+`max_response_bytes`. Absence of configured timeouts MUST be treated as a configuration
+error (fail closed).
+
+```rust
 /// Credential identifier (NORMATIVE)
 pub struct CredentialId(pub String); // e.g., "cred:telegram.bot_token"
 
@@ -2958,7 +3214,32 @@ pub struct CapabilityToken {
     /// Ed25519 signature (by iss_node's issuance key)
     pub sig: [u8; 64],
 }
+```
 
+**NORMATIVE: CapabilityToken Validation Requirements**
+
+1. **Audience enforcement**: Connectors MUST reject tokens whose `aud` does not match their
+   ConnectorId. When `aud_binary` is present (REQUIRED for Risky/Dangerous operations), connectors
+   MUST additionally verify their binary ObjectId matches `aud_binary`.
+
+2. **Token lifetime limits**: Token lifetimes SHOULD be short. Implementations SHOULD reject tokens
+   with `exp - iat > 86400` (24 hours). For execution and elevation operations, tokens SHOULD have
+   validity windows of 5-15 minutes (use `DEFAULT_TTL_SECS` as guidance).
+
+3. **Checkpoint binding**: `chk_id` and `chk_seq` MUST be present for any token granting capabilities
+   outside `z:public`. Verifiers MUST ensure they have a validated checkpoint with `checkpoint_seq >=
+   chk_seq` before accepting the token. Tokens without checkpoint binding are only valid for
+   `z:public` zone operations.
+
+4. **Proof-of-possession**: When `holder_node` is present (REQUIRED for Risky/Dangerous operations),
+   each privileged request MUST include a proof signature by the holder's node signature key over a
+   domain-separated transcript: `BLAKE3-256("fcp.token.pop.v2" || jti || request_object_id || nonce)`.
+   The `nonce` MUST be fresh (from the verifier or current epoch) to prevent replay.
+
+5. **Canonical serialization**: Tokens MUST be serialized canonically (deterministic CBOR per §3.5).
+   Signatures MUST be verified against the canonical bytes with `sig` set to empty.
+
+```rust
 pub struct CapabilityGrant {
     /// Granted capability
     pub capability: CapabilityId,
@@ -4245,10 +4526,16 @@ If `singleton_writer = true` and two different `ConnectorStateObject` share the 
 ```toml
 [manifest]
 format = "fcp-connector-manifest"
-schema_version = "2.0"
-min_mesh_version = "2.0.0"              # NORMATIVE: minimum compatible mesh version
-min_protocol = "fcp2-sym"               # NORMATIVE: required protocol features
-interface_hash = "blake3:..."           # NORMATIVE: hash of API surface (ops + schemas + caps)
+schema_version = "2.1"
+min_mesh_version = "2.0.0"              # NORMATIVE: minimum compatible mesh version (SemVer)
+min_protocol = "fcp2-sym/2.0"           # NORMATIVE: required protocol + version
+protocol_features = [                   # NORMATIVE: required capabilities
+  "fcps.aead.xchacha20poly1305",
+  "fcps.session_mac.hmacsha256.trunc16",
+  "egress.dns_rebind_protection",
+]
+max_datagram_bytes = 1200               # NORMATIVE: transport size limit
+interface_hash = "blake3-256:fcp.interface.v2:..."  # NORMATIVE: domain-separated API hash
 
 [connector]
 id = "fcp.telegram"
@@ -4338,6 +4625,30 @@ require_attestation_types = ["in-toto"]
 min_slsa_level = 2
 trusted_builders = ["github-actions", "internal-ci"]
 ```
+
+**NORMATIVE: Manifest Negotiation Requirements**
+
+1. **SemVer comparison**: `min_mesh_version` MUST be evaluated using SemVer (Semantic Versioning)
+   rules. Implementations MUST NOT compare version strings lexicographically. The mesh version
+   MUST be ≥ `min_mesh_version` for the connector to be considered compatible.
+
+2. **Protocol versioning**: `min_protocol` MUST include a version component (e.g., "fcp2-sym/2.0").
+   Implementations MUST reject connectors that require unsupported major protocol versions.
+   Minor version differences within the same major version SHOULD be negotiable.
+
+3. **Required features**: `protocol_features` entries MUST be treated as required capabilities
+   unless explicitly documented as optional in this specification. Missing required features MUST
+   cause the mesh node to refuse to run the connector (fail closed). Unknown feature strings
+   MUST be treated as unsatisfied requirements.
+
+4. **Transport limits**: `max_datagram_bytes` defines the maximum FCPS datagram size the connector
+   expects. The mesh node MUST respect this limit when sending frames to the connector. If the
+   mesh node's minimum supported datagram size exceeds this value, the connector is incompatible.
+
+5. **Interface hash**: `interface_hash` MUST be computed over a canonical, schema-defined connector
+   interface descriptor with explicit domain separation. The format is `algorithm:domain:digest`
+   (e.g., "blake3-256:fcp.interface.v2:abc123..."). Implementations MUST reject manifests with
+   invalid or unparseable interface hashes.
 
 ### 11.2 Sandbox Profiles (NORMATIVE)
 
@@ -4553,11 +4864,15 @@ pub enum RegistrySource {
     Remote {
         url: Url,
         trusted_keys: Vec<Ed25519PublicKey>,
+        /// Minimum signatures required (MUST be in [1, len(trusted_keys)])
+        trusted_keys_threshold: u8,
     },
     /// Self-hosted registry
     SelfHosted {
         url: Url,
         trusted_keys: Vec<Ed25519PublicKey>,
+        /// Minimum signatures required (MUST be in [1, len(trusted_keys)])
+        trusted_keys_threshold: u8,
     },
     /// Mesh-native (connectors are objects)
     MeshMirror {
@@ -4575,9 +4890,37 @@ pub struct RegistrySecurityProfile {
     /// If present, registry clients MUST enforce TUF snapshot/timestamp semantics.
     /// The referenced object contains TUF root metadata pinned in z:owner.
     pub tuf_root_object_id: Option<ObjectId>,
+    /// If true, TUF metadata MUST be present and validated (SHOULD be true for Remote/SelfHosted)
+    pub tuf_required: bool,
+    /// Minimum valid signatures required for registry metadata (TUF and/or package sigs)
+    pub signature_threshold: u8,
+    /// Maximum acceptable age for registry metadata in seconds (anti-freeze protection)
+    pub max_metadata_age_secs: u64,
     /// If true, verify Sigstore/cosign signatures in addition to publisher/registry keys.
     pub require_sigstore: bool,
 }
+```
+
+**NORMATIVE: Registry Trust and Freshness Requirements**
+
+1. **Key threshold enforcement**: For `Remote` and `SelfHosted` sources, `trusted_keys_threshold`
+   MUST be in the range `[1, len(trusted_keys)]`. Signature verification MUST enforce that at least
+   `trusted_keys_threshold` valid signatures are present. Single-key configurations (threshold=1)
+   are vulnerable to single key compromise and SHOULD be avoided in production.
+
+2. **TUF requirement**: `tuf_required` SHOULD be true for all `Remote` and `SelfHosted` registries.
+   If `tuf_required` is true, `tuf_root_object_id` MUST be present and trusted as an immutable root.
+   Implementations MUST enforce TUF snapshot and timestamp semantics to prevent freeze and rollback.
+
+3. **Metadata freshness**: Implementations MUST enforce `max_metadata_age_secs` to prevent freeze
+   attacks where an attacker replays old metadata. When metadata is older than this threshold,
+   implementations MUST reject it (fail closed) and attempt to fetch fresh metadata.
+
+4. **MeshMirror validation**: For `MeshMirror` sources, the mirrored `index_object_id` MUST be
+   signed under zone policy. The index SHOULD include immutable content digests for all referenced
+   artifacts to ensure integrity even when fetched from local cache.
+
+```rust
 
 impl RegistrySource {
     /// Fetch connector binary
@@ -5610,22 +5953,73 @@ Map connector operations to MCP-compatible tools:
 
 ---
 
-## 23. Observability and Audit
+## 23. Observability and Audit (NORMATIVE)
 
-### 23.1 Metrics
+Implementations MUST be debuggable without compromising secrets. This section defines minimum
+requirements for metrics, logs, and error codes to ensure operational reliability and
+cross-implementation comparability.
 
-Required metrics:
-- Request counts, latencies, error rates
-- Resource usage
-- Rate-limit denials
-- Zone/taint denials
+### 23.1 Required Metrics (NORMATIVE)
 
-### 23.2 Structured Logs
+Implementations MUST expose the following counters/metrics at minimum:
+
+**FCPS Layer:**
+- `fcps_datagrams_rx_total` - Total FCPS datagrams received
+- `fcps_datagrams_mac_fail_total` - Datagrams failing session MAC verification
+- `fcps_symbols_aead_fail_total` - Symbols failing AEAD decryption
+- `fcps_replay_drop_total` - Frames dropped due to replay detection
+
+**Capability Layer:**
+- `capability_token_verify_fail_total` - Token signature/validity failures
+- `capability_denied_total` - Operations denied due to insufficient capability
+
+**Egress Layer:**
+- `egress_allowed_total` - Egress requests permitted
+- `egress_denied_total` - Egress requests denied by NetworkConstraints
+- `egress_timeout_total` - Egress requests failing due to timeout
+
+**General:**
+- Request counts, latencies (p50, p95, p99), and error rates per connector/operation
+- Resource usage (memory, CPU, file handles)
+- Rate-limit denials and zone/taint denials
+
+### 23.2 Structured Logs (NORMATIVE)
+
+Structured logs MUST be emitted for: authentication failures, capability denials, egress denials,
+MAC/AEAD failures, replay drops, and checkpoint validation failures.
 
 Logs MUST:
-- Be structured (JSON)
-- Redact secrets
-- Include correlation_id, zone_id, connector_id
+- Be structured (JSON or equivalent machine-parseable format)
+- Include stable identifiers where available: `zone_id`, `checkpoint_seq`, `object_id`, `jti`,
+  `correlation_id`, `connector_id`
+- MUST NOT include raw secrets, private keys, or decrypted payload bytes by default
+
+Implementations SHOULD support a "diagnostic mode" that records additional context and reason
+codes while preserving redaction. Diagnostic mode MUST be explicitly enabled and SHOULD log
+that it is active.
+
+### 23.2.1 Stable Error Codes (NORMATIVE)
+
+Implementations MUST use stable error/reason codes for interoperability and alerting. The following
+codes are RECOMMENDED as a baseline (implementations MAY extend with additional codes):
+
+| Code | Description |
+|------|-------------|
+| `FCP_ERR_UNSUPPORTED_VERSION` | Frame version not supported |
+| `FCP_ERR_BAD_FLAGS` | Unknown or invalid flags in frame header |
+| `FCP_ERR_MAC_INVALID` | Session MAC verification failed |
+| `FCP_ERR_AEAD_INVALID` | Symbol AEAD decryption failed |
+| `FCP_ERR_REPLAY` | Frame sequence indicates replay |
+| `FCP_ERR_TOKEN_EXPIRED` | Capability token has expired |
+| `FCP_ERR_TOKEN_NOT_YET_VALID` | Capability token not yet valid (nbf) |
+| `FCP_ERR_TOKEN_AUD_MISMATCH` | Token audience does not match connector |
+| `FCP_ERR_TOKEN_SIG_INVALID` | Token signature verification failed |
+| `FCP_ERR_CHECKPOINT_STALE` | Checkpoint sequence too old |
+| `FCP_ERR_CAPABILITY_DENIED` | Required capability not present |
+| `FCP_ERR_EGRESS_DENIED` | Egress blocked by NetworkConstraints |
+| `FCP_ERR_EGRESS_TIMEOUT` | Egress request timed out |
+| `FCP_ERR_ATTESTATION_EXPIRED` | Node attestation has expired |
+| `FCP_ERR_ZONE_POLICY_VIOLATION` | Operation violates zone policy |
 
 ### 23.3 Audit Events
 
@@ -5740,10 +6134,12 @@ pub enum Decision {
 ///
 /// Quorum-signed checkpoint of zone state for efficient synchronization and GC roots.
 /// Nodes can compare checkpoints to quickly determine staleness.
-/// See §3.8 for the full definition with policy/config heads and quorum signatures.
+/// See §3.8 for the full definition with policy/config heads, QuorumSignature, and rollback rules.
 pub struct ZoneCheckpoint {
     pub header: ObjectHeader,
     pub zone_id: ZoneId,
+    /// Backpointer for chain validation and fork detection
+    pub prev_checkpoint: Option<ObjectId>,
     /// Enforceable heads (NORMATIVE):
     pub rev_head: ObjectId,
     pub rev_seq: u64,
@@ -5756,8 +6152,8 @@ pub struct ZoneCheckpoint {
     /// Monotonic checkpoint sequence (NORMATIVE; per-zone)
     pub checkpoint_seq: u64,
     pub as_of_epoch: EpochId,
-    /// Quorum signatures (NORMATIVE; sorted by node_id per §3.5.1)
-    pub quorum_signatures: Vec<(TailscaleNodeId, Signature)>,
+    /// Quorum signatures (NORMATIVE; sorted by (signer_node, signer_kid))
+    pub quorum_signatures: Vec<QuorumSignature>,
 }
 ```
 
