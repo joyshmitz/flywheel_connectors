@@ -1,0 +1,24 @@
+[package]
+name = "fcp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+fcp-protocol = { path = "../crates/fcp-protocol" }
+fcp-crypto = { path = "../crates/fcp-crypto" }
+
+[[bin]]
+name = "fuzz_capability"
+path = "fuzz_targets/capability.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
