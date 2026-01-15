@@ -1936,16 +1936,12 @@ deny_ptrace = true
         assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "sandbox.cpu_percent"));
     }
 
-    mod embed_tests {
-        use super::*;
-
-        embed_manifest!("../../../tests/vectors/manifest/manifest_minimal.toml");
-
-        #[test]
-        fn embedded_manifest_matches_fixture() {
-            let path = vector_manifest_path("manifest_minimal.toml");
-            let raw = std::fs::read(&path).expect("read manifest fixture");
-            assert_eq!(embedded_manifest_bytes(), raw.as_slice());
-        }
+    #[test]
+    fn embedded_manifest_fixture_bytes_match() {
+        let path = vector_manifest_path("manifest_minimal.toml");
+        let raw = std::fs::read(&path).expect("read manifest fixture");
+        static EMBEDDED: &[u8] =
+            include_bytes!("../../../tests/vectors/manifest/manifest_minimal.toml");
+        assert_eq!(EMBEDDED, raw.as_slice());
     }
 }
