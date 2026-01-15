@@ -698,6 +698,178 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_validate_lease_subject_mismatch() {
+        let subject = test_object_id("subject");
+        let wrong_subject = test_object_id("wrong-subject");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(5, 2000, subject);
+
+        let result = validate_lease(
+            &lease,
+            &wrong_subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            5,
+            1500,
+            0,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LeaseValidationError::SubjectMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_lease_zone_mismatch() {
+        let subject = test_object_id("subject");
+        // Lease is created with test_zone() (work), but we validate against private
+        let wrong_zone = ZoneId::private();
+        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &wrong_zone,
+            LeasePurpose::OperationExecution,
+            5,
+            1500,
+            0,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LeaseValidationError::ZoneMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_lease_insufficient_quorum() {
+        let subject = test_object_id("subject");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            5,
+            1500,
+            3, // requires 3 signatures, but lease has none
+        );
+
+        assert!(matches!(
+            result,
+            Err(LeaseValidationError::InsufficientQuorum { required: 3, got: 0 })
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseValidationError Display Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lease_validation_error_display() {
+        let err = LeaseValidationError::Expired {
+            expired_at: 1000,
+            now: 2000,
+        };
+        assert!(err.to_string().contains("expired"));
+
+        let err = LeaseValidationError::Superseded {
+            held_seq: 5,
+            current_seq: 10,
+        };
+        assert!(err.to_string().contains("superseded"));
+
+        let err = LeaseValidationError::InsufficientQuorum {
+            required: 3,
+            got: 1,
+        };
+        assert!(err.to_string().contains("quorum"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HRW Coordinator Additional Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hrw_node_addition_minimal_disruption() {
+        let zone = test_zone();
+        let subject = test_object_id("test-subject");
+
+        let original_nodes = vec![
+            test_node("node-a"),
+            test_node("node-b"),
+            test_node("node-c"),
+        ];
+
+        let coord_before = select_coordinator(&zone, &subject, &original_nodes);
+
+        // Add a new node
+        let mut nodes_with_new = original_nodes.clone();
+        nodes_with_new.push(test_node("node-d"));
+
+        let coord_after = select_coordinator(&zone, &subject, &nodes_with_new);
+
+        // Either coordinator is the same OR it's the new node
+        // (HRW provides minimal disruption on node addition)
+        assert!(
+            coord_before == coord_after || coord_after == Some(test_node("node-d")),
+            "HRW should provide minimal disruption on node addition"
+        );
+    }
+
+    #[test]
+    fn test_hrw_failover_ordering() {
+        let zone = test_zone();
+        let subject = test_object_id("test-subject");
+        let nodes = vec![
+            test_node("node-a"),
+            test_node("node-b"),
+            test_node("node-c"),
+        ];
+
+        let ranked = rank_nodes_by_hrw(&zone, &subject, &nodes);
+        assert_eq!(ranked.len(), 3);
+
+        // If primary (ranked[0]) fails, secondary (ranked[1]) should be next
+        let remaining_nodes: Vec<_> = nodes
+            .iter()
+            .filter(|n| *n != &ranked[0])
+            .cloned()
+            .collect();
+
+        let new_coord = select_coordinator(&zone, &subject, &remaining_nodes);
+        assert_eq!(new_coord, Some(ranked[1].clone()));
+    }
+
+    #[test]
+    fn test_hrw_stable_across_node_order() {
+        let zone = test_zone();
+        let subject = test_object_id("test-subject");
+
+        let nodes1 = vec![
+            test_node("node-a"),
+            test_node("node-b"),
+            test_node("node-c"),
+        ];
+
+        // Same nodes, different order
+        let nodes2 = vec![
+            test_node("node-c"),
+            test_node("node-a"),
+            test_node("node-b"),
+        ];
+
+        let coord1 = select_coordinator(&zone, &subject, &nodes1);
+        let coord2 = select_coordinator(&zone, &subject, &nodes2);
+
+        assert_eq!(coord1, coord2, "HRW should be stable regardless of input order");
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // LeasePurpose Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -724,6 +896,9 @@ mod tests {
             LeasePurpose::OperationExecution,
             LeasePurpose::ConnectorStateWrite,
             LeasePurpose::ComputationMigration,
+            LeasePurpose::CoordinatorElection,
+            LeasePurpose::Migration,
+            LeasePurpose::ResourceAccess,
         ];
 
         for purpose in purposes {
@@ -731,6 +906,352 @@ mod tests {
             let deserialized: LeasePurpose = serde_json::from_str(&json).unwrap();
             assert_eq!(purpose, deserialized);
         }
+    }
+
+    #[test]
+    fn test_lease_purpose_all_variants_display() {
+        // Test all LeasePurpose variants have correct Display output
+        assert_eq!(LeasePurpose::CoordinatorElection.to_string(), "coordinator_election");
+        assert_eq!(LeasePurpose::Migration.to_string(), "migration");
+        assert_eq!(LeasePurpose::ResourceAccess.to_string(), "resource_access");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lease Serde Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lease_serde_roundtrip() {
+        let lease = create_test_lease(42);
+
+        let json = serde_json::to_string(&lease).unwrap();
+        let deserialized: Lease = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(lease.holder, deserialized.holder);
+        assert_eq!(lease.lease_seq, deserialized.lease_seq);
+        assert_eq!(lease.exp, deserialized.exp);
+        assert_eq!(lease.subject_object_id, deserialized.subject_object_id);
+        assert_eq!(lease.purpose, deserialized.purpose);
+    }
+
+    #[test]
+    fn test_lease_serde_preserves_all_fields() {
+        let subject = test_object_id("specific-subject");
+        let lease = create_test_lease_with_subject(100, 9999, subject.clone());
+
+        let json = serde_json::to_string_pretty(&lease).unwrap();
+
+        // Verify JSON contains expected fields
+        assert!(json.contains("holder"));
+        assert!(json.contains("lease_seq"));
+        assert!(json.contains("exp"));
+        assert!(json.contains("subject_object_id"));
+        assert!(json.contains("purpose"));
+        assert!(json.contains("quorum_signatures"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseRequest Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lease_request_creation() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("subject"),
+            zone_id: test_zone(),
+            requester: test_node("requester"),
+            requested_ttl: 300,
+            renew_seq: None,
+        };
+
+        assert_eq!(request.requester.as_str(), "requester");
+        assert_eq!(request.requested_ttl, 300);
+        assert!(request.renew_seq.is_none());
+    }
+
+    #[test]
+    fn test_lease_request_renewal() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("subject"),
+            zone_id: test_zone(),
+            requester: test_node("requester"),
+            requested_ttl: 300,
+            renew_seq: Some(42),
+        };
+
+        assert_eq!(request.renew_seq, Some(42));
+    }
+
+    #[test]
+    fn test_lease_request_serde_roundtrip() {
+        let request = LeaseRequest {
+            subject_object_id: test_object_id("subject"),
+            zone_id: test_zone(),
+            requester: test_node("requester"),
+            requested_ttl: 600,
+            renew_seq: Some(10),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: LeaseRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(request.subject_object_id, deserialized.subject_object_id);
+        assert_eq!(request.zone_id, deserialized.zone_id);
+        assert_eq!(request.requester, deserialized.requester);
+        assert_eq!(request.requested_ttl, deserialized.requested_ttl);
+        assert_eq!(request.renew_seq, deserialized.renew_seq);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LeaseResponse Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lease_response_granted() {
+        let lease = create_test_lease(1);
+        let response = LeaseResponse::Granted(Box::new(lease.clone()));
+
+        if let LeaseResponse::Granted(granted_lease) = response {
+            assert_eq!(granted_lease.lease_seq, lease.lease_seq);
+        } else {
+            panic!("Expected Granted variant");
+        }
+    }
+
+    #[test]
+    fn test_lease_response_denied() {
+        let response = LeaseResponse::Denied {
+            current_holder: test_node("holder"),
+            expires_at: 3000,
+            current_seq: 5,
+        };
+
+        if let LeaseResponse::Denied {
+            current_holder,
+            expires_at,
+            current_seq,
+        } = response
+        {
+            assert_eq!(current_holder.as_str(), "holder");
+            assert_eq!(expires_at, 3000);
+            assert_eq!(current_seq, 5);
+        } else {
+            panic!("Expected Denied variant");
+        }
+    }
+
+    #[test]
+    fn test_lease_response_invalid() {
+        let response = LeaseResponse::Invalid {
+            reason: "wrong zone".to_string(),
+        };
+
+        if let LeaseResponse::Invalid { reason } = response {
+            assert_eq!(reason, "wrong zone");
+        } else {
+            panic!("Expected Invalid variant");
+        }
+    }
+
+    #[test]
+    fn test_lease_response_serde_granted() {
+        let lease = create_test_lease(42);
+        let response = LeaseResponse::Granted(Box::new(lease));
+
+        let json = serde_json::to_string(&response).unwrap();
+        let deserialized: LeaseResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(deserialized, LeaseResponse::Granted(_)));
+    }
+
+    #[test]
+    fn test_lease_response_serde_denied() {
+        let response = LeaseResponse::Denied {
+            current_holder: test_node("holder"),
+            expires_at: 5000,
+            current_seq: 10,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let deserialized: LeaseResponse = serde_json::from_str(&json).unwrap();
+
+        if let LeaseResponse::Denied {
+            current_holder,
+            expires_at,
+            current_seq,
+        } = deserialized
+        {
+            assert_eq!(current_holder.as_str(), "holder");
+            assert_eq!(expires_at, 5000);
+            assert_eq!(current_seq, 10);
+        } else {
+            panic!("Expected Denied variant after deserialization");
+        }
+    }
+
+    #[test]
+    fn test_lease_response_serde_invalid() {
+        let response = LeaseResponse::Invalid {
+            reason: "test reason".to_string(),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let deserialized: LeaseResponse = serde_json::from_str(&json).unwrap();
+
+        if let LeaseResponse::Invalid { reason } = deserialized {
+            assert_eq!(reason, "test reason");
+        } else {
+            panic!("Expected Invalid variant after deserialization");
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lease Conflict Resolution Tests (Fencing Token Semantics)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fencing_token_prevents_zombie_lease() {
+        // Scenario: Node A has lease seq 10, but node B acquired seq 15
+        // Node A's lease should be rejected even if not expired
+        let subject = test_object_id("shared-resource");
+        let zone = test_zone();
+
+        let zombie_lease = create_test_lease_with_subject(10, 5000, subject.clone());
+
+        // Current known seq is 15 (someone else got a newer lease)
+        let result = validate_lease(
+            &zombie_lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            15, // current_known_seq > zombie_lease.lease_seq
+            1000,
+            0,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LeaseValidationError::Superseded {
+                held_seq: 10,
+                current_seq: 15
+            })
+        ));
+    }
+
+    #[test]
+    fn test_higher_seq_wins_regardless_of_expiry() {
+        // Even if old lease hasn't expired, higher seq wins
+        let subject = test_object_id("resource");
+        let zone = test_zone();
+
+        // Old lease: seq 5, expires far in future
+        let old_lease = create_test_lease_with_subject(5, 99999, subject.clone());
+
+        // New lease: seq 10
+        let new_lease = create_test_lease_with_subject(10, 2000, subject.clone());
+
+        // Old lease should fail validation
+        let old_result = validate_lease(
+            &old_lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            10, // current known is new lease's seq
+            1000,
+            0,
+        );
+        assert!(old_result.is_err());
+
+        // New lease should pass
+        let new_result = validate_lease(
+            &new_lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            10,
+            1000,
+            0,
+        );
+        assert!(new_result.is_ok());
+    }
+
+    #[test]
+    fn test_lease_at_exact_seq_is_valid() {
+        // Lease with seq == current_known_seq should be valid
+        let subject = test_object_id("resource");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(10, 2000, subject.clone());
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            10, // exact match
+            1000,
+            0,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_lease_ahead_of_known_seq_is_valid() {
+        // Lease with seq > current_known_seq should be valid
+        // (node might have received newer lease info)
+        let subject = test_object_id("resource");
+        let zone = test_zone();
+        let lease = create_test_lease_with_subject(15, 2000, subject.clone());
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            10, // lease.seq > current_known
+            1000,
+            0,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lease::new Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lease_new_sets_expiry_correctly() {
+        use fcp_cbor::SchemaId;
+        use semver::Version;
+        use crate::Provenance;
+
+        let zone = test_zone();
+        let subject = test_object_id("subject");
+        let ttl_secs = 300;
+
+        let params = LeaseParams {
+            schema: SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0)),
+            zone_id: zone.clone(),
+            holder: test_node("holder"),
+            lease_seq: 1,
+            ttl_secs,
+            subject_object_id: subject.clone(),
+            provenance: Provenance::new(zone),
+            purpose: LeasePurpose::OperationExecution,
+            quorum_signatures: SignatureSet::default(),
+        };
+
+        let lease = Lease::new(params);
+
+        // exp should be created_at + ttl_secs
+        assert_eq!(lease.exp, lease.header.created_at + u64::from(ttl_secs));
+
+        // subject should be in refs
+        assert!(lease.header.refs.contains(&subject));
+
+        // ttl_secs should be set in header
+        assert_eq!(lease.header.ttl_secs, Some(u64::from(ttl_secs)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
