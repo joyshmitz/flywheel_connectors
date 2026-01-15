@@ -1,41 +1,35 @@
-//! Distributed lease primitives for FCP2.
+//! Distributed lease coordination (NORMATIVE).
 //!
-//! This module implements leases as defined in `FCP_Specification_V2.md` §16.
-//! Leases provide a unified distributed coordination primitive used for:
-//!
-//! - Operation execution (prevent duplicate side effects)
-//! - ConnectorState writes (singleton_writer fencing)
-//! - Computation migration (safe handoffs)
+//! Implements the lease semantics defined in `FCP_Specification_V2.md` §10.
 //!
 //! # Core Concepts
 //!
-//! ## Fencing Tokens
+//! - **Lease**: Exclusive, timed ownership of a (zone, subject) pair.
+//! - **Fencing Token**: `lease_seq` ensures monotonicity and fencing of stale writes.
+//! - **Granularity**: Leases are per-object or per-singleton-role.
 //!
-//! The `lease_seq` field is critical for safety:
-//! - Monotonically increases per (zone_id, subject_object_id)
-//! - Higher lease_seq wins deterministically, regardless of wall-clock expiry
-//! - Prevents "zombie lease" problems where an old lease holder believes it still owns
+//! # Invariants
 //!
-//! ## Coordinator Selection
-//!
-//! Coordinators are selected using HRW/Rendezvous hashing for deterministic,
-//! consistent selection without a central coordinator. This ensures:
-//! - No single point of failure
-//! - Consistent selection across nodes
-//! - Automatic failover when coordinator becomes unavailable
-//!
-//! ## Quorum Rules
-//!
-//! Different risk tiers require different quorum signatures:
-//! - Safe ops: Single coordinator signature may be sufficient
-//! - Risky ops: Require f+1 signatures
-//! - Dangerous ops: Require n-f signatures
-
-use std::cmp::Ordering;
-
+//! - `ConnectorState` writes (`singleton_writer` fencing)
+//! - `ZoneCheckpoint` advancement (coordinator election)
+//! - Exclusive resource access (e.g., specific hardware)
+use fcp_cbor::SchemaId;
 use serde::{Deserialize, Serialize};
 
 use crate::{ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
+
+/// Get current Unix timestamp in seconds.
+///
+/// # Panics
+/// Panics if system time is before Unix epoch (should be impossible).
+#[must_use]
+pub fn current_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before Unix epoch")
+        .as_secs()
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lease Purpose (NORMATIVE)
@@ -48,7 +42,7 @@ use crate::{ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
 /// - `OperationExecution`: Prevents duplicate execution of operations with side effects.
 ///   Used by the exactly-once semantics system (see §15 OperationIntent/Receipt).
 ///
-/// - `ConnectorStateWrite`: Serializes writes to SingleWriter connector state.
+/// - `ConnectorStateWrite`: Serializes writes to `SingleWriter` connector state.
 ///   Only the lease holder may write to the associated state object.
 ///
 /// - `ComputationMigration`: Coordinates computation migration between nodes.
@@ -58,10 +52,16 @@ use crate::{ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
 pub enum LeasePurpose {
     /// Prevents duplicate execution of operations with side effects.
     OperationExecution,
-    /// Serializes writes to SingleWriter connector state.
+    /// Serializes writes to `SingleWriter` connector state.
     ConnectorStateWrite,
     /// Coordinates computation migration between nodes.
     ComputationMigration,
+    /// Elects a coordinator for a zone.
+    CoordinatorElection,
+    /// Locks a computation for migration.
+    Migration,
+    /// Exclusive access to a resource.
+    ResourceAccess,
 }
 
 impl std::fmt::Display for LeasePurpose {
@@ -70,6 +70,9 @@ impl std::fmt::Display for LeasePurpose {
             Self::OperationExecution => write!(f, "operation_execution"),
             Self::ConnectorStateWrite => write!(f, "connector_state_write"),
             Self::ComputationMigration => write!(f, "computation_migration"),
+            Self::CoordinatorElection => write!(f, "coordinator_election"),
+            Self::Migration => write!(f, "migration"),
+            Self::ResourceAccess => write!(f, "resource_access"),
         }
     }
 }
@@ -86,7 +89,7 @@ impl std::fmt::Display for LeasePurpose {
 /// # Fencing Token Semantics
 ///
 /// The `lease_seq` is critical for safety:
-/// - Monotonically increases per (zone_id, subject_object_id)
+/// - Monotonically increases per (`zone_id`, `subject_object_id`)
 /// - Higher `lease_seq` wins deterministically, regardless of wall-clock expiry
 /// - Prevents "zombie lease" problems
 ///
@@ -103,84 +106,88 @@ impl std::fmt::Display for LeasePurpose {
 /// - Dangerous ops: Require n-f signatures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lease {
-    /// Standard object header with schema, zone, provenance.
+    /// Object header (includes zone, schema, etc).
     pub header: ObjectHeader,
 
-    /// The subject being leased (request, state object, computation).
+    /// Node holding the lease.
+    pub holder: TailscaleNodeId,
+
+    /// Lease sequence number (monotonic).
+    ///
+    /// - Monotonically increases per (`zone_id`, `subject_object_id`)
+    /// - Higher `lease_seq` wins deterministically, regardless of wall-clock expiry
+    pub lease_seq: u64,
+
+    /// Expiration timestamp (Unix seconds).
+    pub exp: u64,
+
+    /// Subject being leased (e.g., connector state ID).
     pub subject_object_id: ObjectId,
 
     /// What this lease authorizes.
     pub purpose: LeasePurpose,
 
-    /// Fencing token (NORMATIVE): monotonically increases per (zone_id, subject_object_id).
-    ///
-    /// The highest `lease_seq` wins deterministically, regardless of wall-clock `exp`.
-    /// This is the critical safety property that prevents zombie leases.
-    pub lease_seq: u64,
-
-    /// Which node currently owns execution/write.
-    pub owner_node: TailscaleNodeId,
-
-    /// Lease issued at (Unix timestamp seconds).
-    pub iat: u64,
-
-    /// Lease expires at (Unix timestamp seconds).
-    ///
-    /// Short-lived by design; holder must renew before expiry.
-    pub exp: u64,
-
-    /// Deterministic coordinator for this lease (NORMATIVE).
-    ///
-    /// Selected via HRW/Rendezvous hashing over `(zone_id, subject_object_id)`.
-    pub coordinator: TailscaleNodeId,
-
     /// Quorum signatures (NORMATIVE for Risky/Dangerous).
-    ///
-    /// The required number of signatures depends on the risk tier of the
-    /// associated operation.
+    pub quorum_signatures: SignatureSet,
+}
+
+/// Input parameters for creating a new lease.
+#[derive(Debug, Clone)]
+pub struct LeaseParams {
+    pub schema: SchemaId,
+    pub zone_id: ZoneId,
+    pub holder: TailscaleNodeId,
+    pub lease_seq: u64,
+    pub ttl_secs: u32,
+    pub subject_object_id: ObjectId,
+    pub provenance: crate::Provenance,
+    pub purpose: LeasePurpose,
     pub quorum_signatures: SignatureSet,
 }
 
 impl Lease {
-    /// Check if this lease is expired based on the given current timestamp.
+    /// Create a new lease.
     #[must_use]
-    pub fn is_expired(&self, now: u64) -> bool {
+    pub fn new(params: LeaseParams) -> Self {
+        let created_at = current_timestamp();
+        let exp = created_at + u64::from(params.ttl_secs);
+
+        Self {
+            header: ObjectHeader {
+                schema: params.schema,
+                zone_id: params.zone_id,
+                created_at,
+                provenance: params.provenance,
+                refs: vec![params.subject_object_id], // Lease implicitly refs subject
+                foreign_refs: vec![],
+                ttl_secs: Some(u64::from(params.ttl_secs)),
+                placement: None,
+            },
+            holder: params.holder,
+            lease_seq: params.lease_seq,
+            exp,
+            subject_object_id: params.subject_object_id,
+            purpose: params.purpose,
+            quorum_signatures: params.quorum_signatures,
+        }
+    }
+
+    /// Fencing token (NORMATIVE): monotonically increases per (`zone_id`, `subject_object_id`).
+    #[must_use]
+    pub const fn fencing_token(&self) -> u64 {
+        self.lease_seq
+    }
+
+    /// Check if expired.
+    #[must_use]
+    pub const fn is_expired(&self, now: u64) -> bool {
         now >= self.exp
     }
 
-    /// Check if this lease is active (not expired) at the given timestamp.
+    /// Get the zone ID.
     #[must_use]
-    pub fn is_active(&self, now: u64) -> bool {
-        !self.is_expired(now)
-    }
-
-    /// Get the zone ID from the header.
-    #[must_use]
-    pub fn zone_id(&self) -> &ZoneId {
+    pub const fn zone_id(&self) -> &ZoneId {
         &self.header.zone_id
-    }
-
-    /// Compare two leases for the same subject to determine which wins.
-    ///
-    /// # Conflict Resolution Rules (NORMATIVE)
-    ///
-    /// The lease with the higher `lease_seq` wins, regardless of expiry times.
-    /// This ensures deterministic conflict resolution across all nodes.
-    ///
-    /// Returns:
-    /// - `Ordering::Greater` if `self` wins
-    /// - `Ordering::Less` if `other` wins
-    /// - `Ordering::Equal` if they are the same (same seq)
-    #[must_use]
-    pub fn compare_priority(&self, other: &Self) -> Ordering {
-        // Higher lease_seq wins
-        self.lease_seq.cmp(&other.lease_seq)
-    }
-
-    /// Check if this lease supersedes another lease for the same subject.
-    #[must_use]
-    pub fn supersedes(&self, other: &Self) -> bool {
-        self.compare_priority(other) == Ordering::Greater
     }
 }
 
@@ -191,60 +198,42 @@ impl Lease {
 /// Request to acquire or renew a lease.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaseRequest {
-    /// The subject to lease.
+    /// Subject to lease.
     pub subject_object_id: ObjectId,
 
-    /// What the lease is for.
-    pub purpose: LeasePurpose,
-
-    /// Zone context.
+    /// Zone ID.
     pub zone_id: ZoneId,
 
     /// Requesting node.
     pub requester: TailscaleNodeId,
 
-    /// Requested duration in seconds.
-    pub requested_duration_secs: u64,
+    /// Requested TTL in seconds.
+    pub requested_ttl: u32,
 
-    /// If renewing, the current lease_seq being held.
-    /// If None, this is a new lease request.
-    pub current_lease_seq: Option<u64>,
+    /// If renewing, the current `lease_seq` being held.
+    pub renew_seq: Option<u64>,
 }
 
 /// Response to a lease request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LeaseResponse {
     /// Lease granted.
-    Granted(Lease),
+    Granted(Box<Lease>),
 
-    /// Lease denied - another holder has it.
+    /// Lease denied (held by another or stale renew).
     Denied {
         /// Current lease holder.
         current_holder: TailscaleNodeId,
         /// When the current lease expires.
         expires_at: u64,
-        /// Current lease_seq (for information).
+        /// Current `lease_seq` (for information).
         current_seq: u64,
     },
 
-    /// Lease conflict detected (for dangerous operations).
-    Conflict {
-        /// The conflicting leases.
-        conflicting_leases: Vec<LeaseConflictInfo>,
-        /// Whether manual resolution is required.
-        requires_manual_resolution: bool,
+    /// Request invalid (e.g., wrong zone).
+    Invalid {
+        reason: String,
     },
-}
-
-/// Information about a conflicting lease.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaseConflictInfo {
-    /// Holder of the conflicting lease.
-    pub holder: TailscaleNodeId,
-    /// Lease sequence number.
-    pub lease_seq: u64,
-    /// Expiry time.
-    pub exp: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,7 +266,7 @@ fn hrw_hash(zone_id: &ZoneId, subject_id: &ObjectId, node_id: &TailscaleNodeId) 
 ///
 /// * `zone_id` - The zone context
 /// * `subject_id` - The object being leased
-/// * `nodes` - Available nodes in the zone
+/// * `nodes` - List of eligible nodes
 ///
 /// # Returns
 ///
@@ -407,7 +396,7 @@ impl std::error::Error for LeaseValidationError {}
 /// * `expected_subject` - Expected subject object ID
 /// * `expected_zone` - Expected zone ID
 /// * `expected_purpose` - Expected purpose
-/// * `current_known_seq` - The highest lease_seq known for this subject
+/// * `current_known_seq` - The highest `lease_seq` known for this subject
 /// * `now` - Current timestamp
 /// * `required_signatures` - Minimum required quorum signatures
 ///
@@ -588,108 +577,39 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Lease Priority Tests
+    // Lease Fencing Token Tests
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_lease_priority_higher_seq_wins() {
-        let header = create_test_header();
-        let subject = test_object_id("subject");
+    fn test_lease_fencing_token_higher_wins() {
+        let lease1 = create_test_lease(10);
+        let lease2 = create_test_lease(20);
 
-        let lease1 = Lease {
-            header: header.clone(),
-            subject_object_id: subject.clone(),
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 10,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
-
-        let lease2 = Lease {
-            header: header.clone(),
-            subject_object_id: subject,
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 20,
-            owner_node: test_node("node-b"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
-
-        // Higher seq wins
-        assert!(lease2.supersedes(&lease1));
-        assert!(!lease1.supersedes(&lease2));
-        assert_eq!(lease1.compare_priority(&lease2), Ordering::Less);
-        assert_eq!(lease2.compare_priority(&lease1), Ordering::Greater);
+        // Higher fencing token wins
+        assert!(lease2.fencing_token() > lease1.fencing_token());
     }
 
     #[test]
-    fn test_lease_priority_equal_seq() {
-        let header = create_test_header();
-        let subject = test_object_id("subject");
+    fn test_lease_fencing_token_equal() {
+        let lease1 = create_test_lease(10);
+        let lease2 = create_test_lease(10);
 
-        let lease1 = Lease {
-            header: header.clone(),
-            subject_object_id: subject.clone(),
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 10,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
-
-        let lease2 = Lease {
-            header,
-            subject_object_id: subject,
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 10,
-            owner_node: test_node("node-b"),
-            iat: 1000,
-            exp: 3000, // Different expiry, but same seq
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
-
-        // Same seq = equal priority (neither supersedes)
-        assert!(!lease1.supersedes(&lease2));
-        assert!(!lease2.supersedes(&lease1));
-        assert_eq!(lease1.compare_priority(&lease2), Ordering::Equal);
+        // Same fencing token
+        assert_eq!(lease1.fencing_token(), lease2.fencing_token());
     }
 
     #[test]
     fn test_lease_expiry() {
-        let header = create_test_header();
-        let subject = test_object_id("subject");
-
-        let lease = Lease {
-            header,
-            subject_object_id: subject,
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 1,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
+        let lease = create_test_lease_with_exp(1, 2000);
 
         // Before expiry
         assert!(!lease.is_expired(1500));
-        assert!(lease.is_active(1500));
 
         // At expiry
         assert!(lease.is_expired(2000));
-        assert!(!lease.is_active(2000));
 
         // After expiry
         assert!(lease.is_expired(2500));
-        assert!(!lease.is_active(2500));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -698,21 +618,9 @@ mod tests {
 
     #[test]
     fn test_validate_lease_success() {
-        let header = create_test_header();
         let subject = test_object_id("subject");
         let zone = test_zone();
-
-        let lease = Lease {
-            header,
-            subject_object_id: subject.clone(),
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 5,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
+        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
 
         let result = validate_lease(
             &lease,
@@ -729,21 +637,9 @@ mod tests {
 
     #[test]
     fn test_validate_lease_expired() {
-        let header = create_test_header();
         let subject = test_object_id("subject");
         let zone = test_zone();
-
-        let lease = Lease {
-            header,
-            subject_object_id: subject.clone(),
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 5,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
+        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
 
         let result = validate_lease(
             &lease,
@@ -760,21 +656,9 @@ mod tests {
 
     #[test]
     fn test_validate_lease_superseded() {
-        let header = create_test_header();
         let subject = test_object_id("subject");
         let zone = test_zone();
-
-        let lease = Lease {
-            header,
-            subject_object_id: subject.clone(),
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 5,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
+        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
 
         let result = validate_lease(
             &lease,
@@ -794,21 +678,9 @@ mod tests {
 
     #[test]
     fn test_validate_lease_purpose_mismatch() {
-        let header = create_test_header();
         let subject = test_object_id("subject");
         let zone = test_zone();
-
-        let lease = Lease {
-            header,
-            subject_object_id: subject.clone(),
-            purpose: LeasePurpose::OperationExecution,
-            lease_seq: 5,
-            owner_node: test_node("node-a"),
-            iat: 1000,
-            exp: 2000,
-            coordinator: test_node("coord"),
-            quorum_signatures: SignatureSet::default(),
-        };
+        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
 
         let result = validate_lease(
             &lease,
@@ -865,21 +737,37 @@ mod tests {
     // Helper Functions
     // ─────────────────────────────────────────────────────────────────────────
 
-    fn create_test_header() -> ObjectHeader {
+    fn create_test_lease(lease_seq: u64) -> Lease {
+        create_test_lease_with_exp(lease_seq, 2000)
+    }
+
+    fn create_test_lease_with_exp(lease_seq: u64, exp: u64) -> Lease {
+        create_test_lease_with_subject(lease_seq, exp, test_object_id("subject"))
+    }
+
+    fn create_test_lease_with_subject(lease_seq: u64, exp: u64, subject: ObjectId) -> Lease {
         use fcp_cbor::SchemaId;
         use semver::Version;
         use crate::Provenance;
 
         let zone = test_zone();
-        ObjectHeader {
-            schema: SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0)),
-            zone_id: zone.clone(),
-            created_at: 1000,
-            provenance: Provenance::new(zone),
-            refs: vec![],
-            foreign_refs: vec![],
-            ttl_secs: None,
-            placement: None,
+        Lease {
+            header: ObjectHeader {
+                schema: SchemaId::new("fcp.lease", "lease", Version::new(1, 0, 0)),
+                zone_id: zone.clone(),
+                created_at: 1000,
+                provenance: Provenance::new(zone),
+                refs: vec![subject.clone()],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            },
+            holder: test_node("holder-node"),
+            lease_seq,
+            exp,
+            subject_object_id: subject,
+            purpose: LeasePurpose::OperationExecution,
+            quorum_signatures: SignatureSet::default(),
         }
     }
 }

@@ -1,0 +1,14 @@
+[
+  {
+    "name": "hello_missing_signature",
+    "error": "missing signature"
+  },
+  {
+    "name": "ack_invalid_signature",
+    "error": "signature verification failed"
+  },
+  {
+    "name": "no_mutual_suite",
+    "error": "no mutually supported session crypto suite"
+  }
+]

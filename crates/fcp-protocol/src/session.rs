@@ -447,6 +447,7 @@ fn decode_canonical_cbor<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Resul
     let mut cursor = Cursor::new(bytes);
     let value: T =
         ciborium::from_reader(&mut cursor).map_err(SerializationError::CborDeserialize)?;
+    #[allow(clippy::cast_possible_truncation)] // cursor position always <= bytes.len()
     if cursor.position() as usize != bytes.len() {
         return Err(SessionError::Cbor(SerializationError::TrailingBytes));
     }
@@ -503,6 +504,10 @@ fn map_attestation_error(err: TailscaleError) -> SessionError {
 }
 
 /// Get current Unix timestamp in seconds.
+///
+/// # Panics
+/// Panics if the system clock is set before the Unix epoch.
+#[must_use]
 pub fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -528,11 +533,7 @@ pub fn verify_hello_attested(
 
     // Verify timestamp freshness
     let now = current_timestamp();
-    let skew = if hello.timestamp > now {
-        hello.timestamp - now
-    } else {
-        now - hello.timestamp
-    };
+    let skew = hello.timestamp.abs_diff(now);
 
     if skew > time_policy.max_skew_secs {
         return Err(SessionError::TimestampSkew {
@@ -566,11 +567,7 @@ pub fn verify_ack_attested(
 
     // Verify timestamp freshness
     let now = current_timestamp();
-    let skew = if ack.timestamp > now {
-        ack.timestamp - now
-    } else {
-        now - ack.timestamp
-    };
+    let skew = ack.timestamp.abs_diff(now);
 
     if skew > time_policy.max_skew_secs {
         return Err(SessionError::TimestampSkew {
@@ -629,6 +626,7 @@ impl ReplayWindow {
     /// Check if sequence is valid (not a replay) and update window.
     ///
     /// Returns `true` if accepted, `false` if replayed or too old.
+    #[allow(clippy::branches_sharing_code)] // both branches intentionally return true at end
     pub fn check_and_update(&mut self, seq: u64) -> bool {
         if seq == 0 {
             return false;
@@ -1410,12 +1408,12 @@ mod tests {
             NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).expect("attest");
 
         let identity = MeshIdentity::new(
-            node_id.clone(),
+            node_id,
             "host".to_string(),
             Vec::new(),
-            tags.clone(),
+            tags,
             owner_key.verifying_key(),
-            node_keys.clone(),
+            node_keys,
         )
         .with_attestation(attestation);
 
@@ -1425,7 +1423,7 @@ mod tests {
             eph_pubkey: node_encryption.public_key(),
             nonce: SessionNonce([0xAB_u8; 16]),
             cookie: None,
-            timestamp: 1_704_067_200,
+            timestamp: current_timestamp(),
             suites: vec![SessionCryptoSuite::Suite1],
             transport_limits: None,
             signature: None,
@@ -1476,17 +1474,18 @@ mod tests {
             Vec::new(),
             tags,
             owner_key.verifying_key(),
-            node_keys.clone(),
+            node_keys,
         )
         .with_attestation(attestation);
 
+        let ts = current_timestamp();
         let mut hello = MeshSessionHello {
             from: TailscaleNodeId::new("node-initiator"),
             to: TailscaleNodeId::new("node-responder"),
             eph_pubkey: X25519SecretKey::generate().public_key(),
             nonce: SessionNonce([0x11_u8; 16]),
             cookie: None,
-            timestamp: 1_704_067_200,
+            timestamp: ts,
             suites: vec![SessionCryptoSuite::Suite1],
             transport_limits: None,
             signature: None,
@@ -1500,12 +1499,12 @@ mod tests {
             nonce: SessionNonce([0x22_u8; 16]),
             session_id: MeshSessionId([0x10_u8; 16]),
             suite: SessionCryptoSuite::Suite1,
-            timestamp: 1_704_067_205,
+            timestamp: ts + 5,
             signature: None,
         };
         ack.sign(&hello, &node_signing).expect("sign ack");
 
-        let mut mismatched = identity.clone();
+        let mut mismatched = identity;
         mismatched.node_id = NodeId::new("node-other");
         let context = LogContext::new("handshake", "attestation_verify").with_reason("FCP-3006");
         run_logged_test("ack_attestation_detects_node_mismatch", 1, &context, || {
