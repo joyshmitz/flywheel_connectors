@@ -104,6 +104,10 @@ This is not a cloud alternative. This is **digital sovereignty**.
 
 ### 1.4 Comparison: FCP V1 vs V2
 
+(INFORMATIVE) This comparison is provided for historical context only. Backwards compatibility
+with FCP V1/FCP1 is explicitly out of scope for this project, and this specification does not
+define any FCP1 interoperability mode.
+
 | Aspect | FCP V1 (Hub-Spoke) | FCP V2 (Mesh-Native) |
 |--------|--------------------|-----------------------|
 | Architecture | Central Hub process | Mesh IS the Hub |
@@ -3583,12 +3587,15 @@ When quarantine limits are reached, objects MUST be evicted in the following ord
 
 ### 9.1 Protocol Modes
 
-FCP V2 supports two protocol modes:
+FCP V2 defines a single canonical protocol mode:
 
 | Mode | Encoding | Use Case |
 |------|----------|----------|
 | **FCP2-SYM (Canonical)** | FCPS frames + RaptorQ | Production mesh-native |
-| **FCP1 (Compatibility)** | CBOR/JSON-RPC frames | Legacy connectors |
+
+(INFORMATIVE) Backwards compatibility with any legacy/earlier protocol (including FCP1/JSON-RPC)
+is intentionally not supported by this project. Do a clean cutover to FCP2-SYM rather than
+building dual-stack translators.
 
 ### 9.2 Message Types
 
@@ -5839,36 +5846,15 @@ This spec defines two conformance profiles to enable incremental shipping.
 
 ---
 
-## 26. Compatibility and Migration
+## 26. Compatibility and Migration (INFORMATIVE)
 
-### 26.1 FCP1 Compatibility
+FCP V2 makes **no backwards-compatibility guarantees** with FCP V1/FCP1, and the reference
+implementation is V2-only.
 
-```rust
-/// Hybrid translator (NORMATIVE)
-pub struct HybridTranslator {
-    pub peer_protocol: ProtocolVersion,
-}
-
-impl HybridTranslator {
-    pub fn translate_outgoing(&self, msg: MeshObject) -> OutgoingFrame {
-        match self.peer_protocol {
-            ProtocolVersion::Fcp1 => self.to_json_rpc(msg),
-            ProtocolVersion::Fcp2Sym => self.to_symbol_frame(msg),
-        }
-    }
-}
-```
-
-### 26.2 Migration Path
-
-```
-Step 1: Add Tailscale to all nodes
-Step 2: Deploy MeshNode alongside Hub
-Step 3: Enable hybrid mode
-Step 4: Migrate capabilities
-Step 5: Enable zone encryption
-Step 6: Disable FCP1 endpoints
-```
+- There is no "FCP1 compatibility" protocol mode.
+- There is no hybrid/translator layer in scope.
+- If migrating from an earlier design, do a clean cutover: stand up FCP2-SYM, switch traffic,
+  and decommission legacy endpoints.
 
 ---
 
@@ -6057,4 +6043,3 @@ FCP V2 transforms the protocol from hub-spoke to mesh-native:
 | Secrets on devices | Threshold secrets (k-of-n) |
 
 **The Vision:** Your personal AI runs on YOUR devices. Your data exists as symbols across YOUR mesh. This is **digital sovereignty**.
-

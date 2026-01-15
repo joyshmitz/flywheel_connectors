@@ -55,7 +55,7 @@
 ## 1. Scope and Alignment
 
 - This document covers connector-facing requirements from FCP Specification V2.
-- Canonical protocol mode is FCP2-SYM (FCPS frames + RaptorQ). FCP1 CBOR/JSON-RPC is compatibility only.
+- Canonical protocol mode is FCP2-SYM (FCPS frames + RaptorQ). Backwards compatibility with FCP1/JSON-RPC is explicitly out of scope.
 - All normative language uses MUST/SHOULD/MAY in the RFC 2119 sense.
 
 ---
@@ -290,7 +290,6 @@ same `prev` (competing seq), nodes MUST treat this as a safety incident:
 | Mode | Encoding | Use Case |
 |------|----------|----------|
 | FCP2-SYM (Canonical) | FCPS frames + RaptorQ | Production mesh-native |
-| FCP1 (Compatibility) | CBOR/JSON-RPC frames | Legacy connectors |
 
 ### 3.2 Message Types (Wire Protocol)
 
@@ -2642,6 +2641,6 @@ At least one corpus MUST include "decode DoS" adversarial inputs designed to max
 
 ## Notes
 
-- This document intentionally avoids FCP1-only constructs except where marked as compatibility.
+- This document is V2-only; backwards compatibility with FCP1 is not a goal.
 - For mesh, symbol, audit, and trust-anchor details, refer to `FCP_Specification_V2.md`.
 - All normative structures in this document are aligned with FCP Specification V2.
