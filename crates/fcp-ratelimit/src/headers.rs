@@ -213,9 +213,9 @@ impl RateLimitHeaders {
         result
     }
 
-    /// Get suggested wait time.
+    /// Get the suggested wait time from headers.
     #[must_use]
-    pub fn suggested_wait(&self) -> Option<Duration> {
+    pub const fn suggested_wait(&self) -> Option<Duration> {
         // Prefer retry_after if present
         if let Some(retry) = self.retry_after {
             return Some(retry);
@@ -291,7 +291,7 @@ pub enum Provider {
     Twitter,
     /// Stripe API.
     Stripe,
-    /// OpenAI API.
+    /// `OpenAI` API.
     OpenAI,
     /// Anthropic API.
     Anthropic,

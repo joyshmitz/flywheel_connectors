@@ -49,13 +49,15 @@ impl SlidingWindow {
                 break;
             }
         }
+        drop(timestamps);
     }
 
     /// Calculate remaining capacity.
     fn calculate_remaining(&self) -> u32 {
         self.cleanup();
-        let timestamps = self.timestamps.lock();
-        self.limit.saturating_sub(timestamps.len() as u32)
+        let len = self.timestamps.lock().len();
+        let len_u32 = u32::try_from(len).unwrap_or(u32::MAX);
+        self.limit.saturating_sub(len_u32)
     }
 }
 
@@ -113,9 +115,10 @@ impl RateLimiter for SlidingWindow {
         if let Some(oldest) = timestamps.front() {
             let elapsed = Instant::now().duration_since(*oldest);
             if elapsed < self.window {
-                return self.window - elapsed;
+                return self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
             }
         }
+        drop(timestamps);
 
         Duration::ZERO
     }
@@ -128,18 +131,14 @@ impl RateLimiter for SlidingWindow {
         self.cleanup();
 
         let timestamps = self.timestamps.lock();
-        let remaining = self.limit.saturating_sub(timestamps.len() as u32);
+        let len = u32::try_from(timestamps.len()).unwrap_or(u32::MAX);
+        let remaining = self.limit.saturating_sub(len);
 
-        let reset_after = if let Some(oldest) = timestamps.front() {
+        let reset_after = timestamps.front().map_or(self.window, |oldest| {
             let elapsed = Instant::now().duration_since(*oldest);
-            if elapsed < self.window {
-                self.window - elapsed
-            } else {
-                Duration::ZERO
-            }
-        } else {
-            self.window
-        };
+            self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
+        });
+        drop(timestamps);
 
         RateLimitState {
             limit: self.limit,
@@ -244,11 +243,7 @@ impl RateLimiter for FixedWindow {
         let window_start = *self.window_start.lock();
         let elapsed = Instant::now().duration_since(window_start);
 
-        if elapsed < self.window {
-            self.window - elapsed
-        } else {
-            Duration::ZERO
-        }
+        self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
     }
 
     async fn reset(&self) {
@@ -264,11 +259,7 @@ impl RateLimiter for FixedWindow {
 
         let window_start = *self.window_start.lock();
         let elapsed = Instant::now().duration_since(window_start);
-        let reset_after = if elapsed < self.window {
-            self.window - elapsed
-        } else {
-            Duration::ZERO
-        };
+        let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 
         RateLimitState {
             limit: self.limit,

@@ -12,8 +12,8 @@ use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use crate::{FcpError, FcpResult};
 use crate::object::ObjectId;
+use crate::{FcpError, FcpResult};
 use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
 
 /// Canonical identifier validation error (NORMATIVE).
@@ -616,6 +616,7 @@ impl TailscaleNodeId {
         Self(id.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -665,7 +666,7 @@ pub struct RoleObject {
     /// Capabilities included in this role
     pub caps: Vec<CapabilityGrant>,
 
-    /// Inherited roles (ObjectIds of other RoleObjects)
+    /// Inherited roles (`ObjectIds` of other `RoleObjects`)
     #[serde(default)]
     pub includes: Vec<ObjectId>,
 }
@@ -673,7 +674,7 @@ pub struct RoleObject {
 /// Role Assignment - binds a role to a principal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleAssignment {
-    /// The role being assigned (ObjectId of RoleObject)
+    /// The role being assigned (`ObjectId` of `RoleObject`)
     pub role_id: ObjectId,
 
     /// The principal receiving the role
@@ -686,10 +687,10 @@ pub struct RoleAssignment {
 
 /// Flywheel Capability Token (FCT) - cryptographically signed authorization.
 ///
-/// Wraps a COSE_Sign1 token containing FCP2 claims.
+/// Wraps a `COSE_Sign1` token containing FCP2 claims.
 #[derive(Debug, Clone)]
 pub struct CapabilityToken {
-    /// The raw COSE_Sign1 token
+    /// The raw `COSE_Sign1` token
     pub raw: CoseToken,
     /// The parsed claims (cached)
     pub claims: CwtClaims,
@@ -785,7 +786,7 @@ impl<'de> Deserialize<'de> for CapabilityToken {
         // It doesn't parse the payload (which is inside protected bucket).
         // I'll update struct to `pub struct CapabilityToken { pub raw: CoseToken }`.
 
-        Ok(CapabilityToken {
+        Ok(Self {
             raw,
             claims: CwtClaims::new(),
         }) // Dummy claims for now, fix struct
@@ -796,17 +797,21 @@ impl CapabilityToken {
     /// Create a test token with minimal fields for testing.
     ///
     /// This token has a dummy signature and should only be used in tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if token signing fails during test token construction.
     #[must_use]
     pub fn test_token() -> Self {
         // Construct a dummy CoseToken from raw bytes (invalid signature but structurally okay)
         // Or better, generate a real one with a throwaway key.
         use fcp_crypto::cose::CapabilityTokenBuilder;
         use fcp_crypto::ed25519::Ed25519SigningKey;
-        
+
         let signing_key = Ed25519SigningKey::generate();
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::hours(1);
-        
+
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.all")
             .zone_id("z:work")
@@ -815,7 +820,7 @@ impl CapabilityToken {
             .validity(now, expires)
             .sign(&signing_key)
             .expect("Failed to create test token");
-            
+
         Self {
             raw: cose_token,
             claims: CwtClaims::new(), // empty claims, verified on use
@@ -901,32 +906,44 @@ impl CapabilityVerifier {
     }
 
     /// Helper to deserialize CBOR value
-    fn deserialize_cbor<T: serde::de::DeserializeOwned>(value: ciborium::Value) -> FcpResult<T> {
+    fn deserialize_cbor<T: serde::de::DeserializeOwned>(value: &ciborium::Value) -> FcpResult<T> {
         let mut bytes = Vec::new();
-        ciborium::into_writer(&value, &mut bytes)
-            .map_err(|e| FcpError::Internal { message: format!("Serialization error: {e}") })?;
-        ciborium::from_reader(&bytes[..])
-            .map_err(|e| FcpError::Internal { message: format!("Deserialization error: {e}") })
+        ciborium::into_writer(value, &mut bytes).map_err(|e| FcpError::Internal {
+            message: format!("Serialization error: {e}"),
+        })?;
+        ciborium::from_reader(&bytes[..]).map_err(|e| FcpError::Internal {
+            message: format!("Deserialization error: {e}"),
+        })
     }
 
     /// Verify a capability token.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signature is invalid, claims are missing/expired,
+    /// zone binding fails, or the operation is not granted.
     pub fn verify(
         &self,
         token: &CapabilityToken,
         operation: &OperationId,
         resource_uris: &[String],
     ) -> FcpResult<CwtClaims> {
-        let verifying_key = Ed25519VerifyingKey::from_bytes(&self.host_public_key)
-            .map_err(|_| FcpError::Internal { message: "Invalid host key".into() })?;
+        let verifying_key =
+            Ed25519VerifyingKey::from_bytes(&self.host_public_key).map_err(|_| {
+                FcpError::Internal {
+                    message: "Invalid host key".into(),
+                }
+            })?;
 
         // 1. Verify signature and extract claims
-        let claims = token.raw.verify(&verifying_key)
+        let claims = token
+            .raw
+            .verify(&verifying_key)
             .map_err(|_| FcpError::InvalidSignature)?;
 
         // 2. Validate timing
         let now = Utc::now();
-        CoseToken::validate_timing(&claims, now)
-            .map_err(|_| FcpError::TokenExpired)?;
+        CoseToken::validate_timing(&claims, now).map_err(|_| FcpError::TokenExpired)?;
 
         // 3. Check zone binding
         if let Some(iss) = claims.get_zone_id() {
@@ -947,34 +964,40 @@ impl CapabilityVerifier {
         // Extract 'caps' claim and check if operation is allowed
         // 'caps' is array of CapabilityGrant
         if let Some(caps_val) = claims.get(fcp2_claims::GRANTS) {
-             // Deserialize CapabilityGrant array
-             let grants: Vec<CapabilityGrant> = Self::deserialize_cbor(caps_val.clone())?;
-                
-             let op_allowed = grants.iter().any(|g| {
-                 g.operation.as_ref().is_none_or(|op| op == operation)
-             });
-             
-             if !op_allowed {
-                 return Err(FcpError::OperationNotGranted { operation: operation.0.clone() });
-             }
+            // Deserialize CapabilityGrant array
+            let grants: Vec<CapabilityGrant> = Self::deserialize_cbor(caps_val)?;
+
+            let op_allowed = grants
+                .iter()
+                .any(|g| g.operation.as_ref().is_none_or(|op| op == operation));
+
+            if !op_allowed {
+                return Err(FcpError::OperationNotGranted {
+                    operation: operation.0.clone(),
+                });
+            }
         } else {
-             // Fallback to checking fcp2_claims::OPERATIONS if legacy/simplified?
-             // The builder uses fcp2_claims::OPERATIONS for string list.
-             // Let's check that too.
-             if let Some(ops_val) = claims.get(fcp2_claims::OPERATIONS) {
-                 // Array of strings
-                 let ops: Vec<String> = Self::deserialize_cbor(ops_val.clone())?;
-                 if !ops.contains(&operation.0) {
-                      return Err(FcpError::OperationNotGranted { operation: operation.0.clone() });
-                 }
-             } else {
-                  return Err(FcpError::MissingField { field: "caps/operations".into() });
-             }
+            // Fallback to checking fcp2_claims::OPERATIONS if legacy/simplified?
+            // The builder uses fcp2_claims::OPERATIONS for string list.
+            // Let's check that too.
+            if let Some(ops_val) = claims.get(fcp2_claims::OPERATIONS) {
+                // Array of strings
+                let ops: Vec<String> = Self::deserialize_cbor(ops_val)?;
+                if !ops.contains(&operation.0) {
+                    return Err(FcpError::OperationNotGranted {
+                        operation: operation.0.clone(),
+                    });
+                }
+            } else {
+                return Err(FcpError::MissingField {
+                    field: "caps/operations".into(),
+                });
+            }
         }
 
         // 5. Enforce constraints
         if let Some(constr_val) = claims.get(fcp2_claims::CONSTRAINTS) {
-            let constraints: CapabilityConstraints = Self::deserialize_cbor(constr_val.clone())?;
+            let constraints: CapabilityConstraints = Self::deserialize_cbor(constr_val)?;
             Self::enforce_resource_constraints(&constraints, resource_uris)?;
         }
 
@@ -1037,6 +1060,8 @@ pub enum SafetyTier {
     Risky,
     /// Requires interactive approval
     Dangerous,
+    /// Critical system operation (requires quorum/elevation)
+    Critical,
     /// Never allowed
     Forbidden,
 }
@@ -1359,9 +1384,9 @@ impl Provenance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use chrono::Duration;
 
     // ─────────────────────────────────────────────────────────────────────────
     // Canonical ID Validation Tests (FCP Spec §3.4.2)
@@ -1411,20 +1436,18 @@ mod tests {
         // 3. Wrap in CapabilityToken
         let token = CapabilityToken {
             raw: cose_token,
-            claims: CwtClaims::new(), 
+            claims: CwtClaims::new(),
         };
 
         // 4. Verify
-        let verifier = CapabilityVerifier::new(
-            pub_bytes,
-            ZoneId::work(),
-            InstanceId::new(),
-        );
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
 
         let op = OperationId::new("op.test").unwrap();
-        
-        let claims = verifier.verify(&token, &op, &[]).expect("Verification failed");
-        
+
+        let claims = verifier
+            .verify(&token, &op, &[])
+            .expect("Verification failed");
+
         assert_eq!(claims.get_capability_id(), Some("cap.test"));
     }
 
@@ -1445,7 +1468,10 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token, claims: CwtClaims::new() };
+        let token = CapabilityToken {
+            raw: cose_token,
+            claims: CwtClaims::new(),
+        };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
 
@@ -1470,7 +1496,10 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token, claims: CwtClaims::new() };
+        let token = CapabilityToken {
+            raw: cose_token,
+            claims: CwtClaims::new(),
+        };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
 

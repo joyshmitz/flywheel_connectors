@@ -55,15 +55,18 @@ impl LeakyBucket {
 
     /// Leak water based on elapsed time.
     fn leak(&self) {
+        let now = Instant::now();
         let mut last_leak = self.last_leak.lock();
         let mut level = self.level.lock();
 
-        let now = Instant::now();
         let elapsed = now.duration_since(*last_leak);
         let leaked = elapsed.as_secs_f64() * self.leak_rate;
 
-        *level = (*level - leaked).max(0.0);
-        *last_leak = now;
+        if leaked > 0.0 {
+            *level = (*level - leaked).max(0.0);
+            drop(level); // drop lock before acquiring last_leak lock? No, I hold both.
+            *last_leak = now;
+        }
     }
 
     /// Calculate time until bucket has room.
@@ -118,6 +121,7 @@ impl RateLimiter for LeakyBucket {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn remaining(&self) -> u32 {
         self.leak();
         let level = *self.level.lock();
@@ -140,6 +144,7 @@ impl RateLimiter for LeakyBucket {
 
         let level = *self.level.lock();
         let capacity = f64::from(self.capacity);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let remaining = (capacity - level).max(0.0) as u32;
 
         RateLimitState {
@@ -185,7 +190,8 @@ impl RateLimiter for SmoothPacer {
         let mut last = self.last_request.lock();
         let now = Instant::now();
 
-        if let Some(last_time) = *last {
+        let last_time_val = *last;
+        if let Some(last_time) = last_time_val {
             if now.duration_since(last_time) < self.min_interval {
                 return false;
             }
@@ -218,22 +224,20 @@ impl RateLimiter for SmoothPacer {
     }
 
     fn remaining(&self) -> u32 {
-        if let Some(last) = *self.last_request.lock() {
-            if Instant::now().duration_since(last) >= self.min_interval {
-                1
-            } else {
-                0
-            }
-        } else {
-            1
-        }
+        self.last_request.lock().map_or(1, |last| {
+            u32::from(Instant::now().duration_since(last) >= self.min_interval)
+        })
     }
 
     async fn wait_time(&self) -> Duration {
-        if let Some(last) = *self.last_request.lock() {
+        let last_time_val = *self.last_request.lock();
+        if let Some(last) = last_time_val {
             let elapsed = Instant::now().duration_since(last);
             if elapsed < self.min_interval {
-                return self.min_interval - elapsed;
+                return self
+                    .min_interval
+                    .checked_sub(elapsed)
+                    .unwrap_or(Duration::ZERO);
             }
         }
         Duration::ZERO

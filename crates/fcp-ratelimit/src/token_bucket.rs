@@ -110,8 +110,20 @@ impl TokenBucket {
                 // CAS failed, retry with fresh value
             }
 
-            // Update last refill time
-            *last_refill = now;
+            // Update last refill time, preserving phase (remainder) to avoid drift
+            // If bucket is full, we clamp last_refill to now - remainder to prevent ancient history from causing bursts
+            // If not full, we just advance by the number of periods processed
+            let current = self.tokens.load(Ordering::Acquire);
+            if current == self.capacity {
+                let remainder = elapsed.as_nanos() % self.refill_interval.as_nanos();
+                let rem_secs = u64::try_from(remainder / 1_000_000_000).unwrap_or(0);
+                let rem_nanos = (remainder % 1_000_000_000) as u32;
+                *last_refill = now
+                    .checked_sub(Duration::new(rem_secs, rem_nanos))
+                    .unwrap_or(now);
+            } else {
+                *last_refill += periods * self.refill_interval;
+            }
         }
     }
 
@@ -152,11 +164,9 @@ impl TokenBucket {
         let last_refill = *self.last_refill.lock();
         let elapsed = Instant::now().duration_since(last_refill);
 
-        if elapsed >= self.refill_interval {
-            Duration::ZERO
-        } else {
-            self.refill_interval - elapsed
-        }
+        self.refill_interval
+            .checked_sub(elapsed)
+            .unwrap_or(Duration::ZERO)
     }
 }
 

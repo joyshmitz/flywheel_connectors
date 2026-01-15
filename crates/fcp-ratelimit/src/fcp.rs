@@ -177,7 +177,11 @@ impl ConcurrencyLimiter {
         Arc::clone(&self.semaphore).try_acquire_owned().ok()
     }
 
-    /// Try to acquire, returning a structured `FcpError::RateLimited` with `ThrottleViolation`.
+    /// Try to acquire a permit or return a throttle violation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FcpError::RateLimited` if the request is throttled.
     pub fn try_acquire_or_violation(
         &self,
         ctx: &ThrottleContext,
@@ -294,17 +298,16 @@ fn backpressure_from_state(
     thresholds: BackpressureThresholds,
 ) -> fcp_core::BackpressureSignal {
     let utilization_bps = utilization_bps(state.limit, state.remaining);
-    let mut level = fcp_core::BackpressureLevel::Normal;
-
-    if utilization_bps >= thresholds.warning_bps {
-        level = fcp_core::BackpressureLevel::Warning;
-    }
-    if utilization_bps >= thresholds.soft_limit_bps {
-        level = fcp_core::BackpressureLevel::SoftLimit;
-    }
-    if utilization_bps >= thresholds.hard_limit_bps || state.is_limited {
-        level = fcp_core::BackpressureLevel::HardLimit;
-    }
+    // Calculate backpressure level
+    let level = if utilization_bps >= thresholds.hard_limit_bps || state.is_limited {
+        fcp_core::BackpressureLevel::HardLimit
+    } else if utilization_bps >= thresholds.soft_limit_bps {
+        fcp_core::BackpressureLevel::SoftLimit
+    } else if utilization_bps >= thresholds.warning_bps {
+        fcp_core::BackpressureLevel::Warning
+    } else {
+        fcp_core::BackpressureLevel::Normal
+    };
 
     let retry_after_ms = match level {
         fcp_core::BackpressureLevel::SoftLimit | fcp_core::BackpressureLevel::HardLimit => {
@@ -422,6 +425,69 @@ mod tests {
         assert_eq!(resp.code, "FCP-3002");
         assert!(resp.details.is_some());
         assert!(resp.details.unwrap().get("throttle_violation").is_some());
+    }
+
+    #[test]
+    fn backpressure_levels_transition_and_clear() {
+        let thresholds = BackpressureThresholds::standard();
+
+        let state_normal = RateLimitState {
+            limit: 100,
+            remaining: 60,
+            reset_after: Duration::from_secs(30),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state_normal, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::Normal);
+        assert!(signal.retry_after_ms.is_none());
+
+        let state_warning = RateLimitState {
+            limit: 100,
+            remaining: 15,
+            reset_after: Duration::from_secs(30),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state_warning, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::Warning);
+
+        let state_soft = RateLimitState {
+            limit: 100,
+            remaining: 5,
+            reset_after: Duration::from_secs(30),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state_soft, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::SoftLimit);
+        assert!(signal.retry_after_ms.is_some());
+
+        let state_hard = RateLimitState {
+            limit: 100,
+            remaining: 0,
+            reset_after: Duration::from_secs(30),
+            is_limited: true,
+        };
+        let signal = backpressure_from_state(&state_hard, thresholds);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::HardLimit);
+        assert!(signal.retry_after_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn enforce_quota_violation_includes_retry_after() {
+        let limiter = TokenBucket::new(1, Duration::from_millis(50));
+        assert!(limiter.try_acquire().await);
+
+        let ctx = ThrottleContext {
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: Some("fcp.test:quota:0.1.0".parse().unwrap()),
+            operation_id: Some("quota.op".parse().unwrap()),
+            limit_type: fcp_core::LimitType::Quota,
+        };
+
+        let out = enforce(&limiter, 1, &ctx, BackpressureThresholds::standard()).await;
+        assert!(!out.allowed);
+        let violation = out.violation.expect("expected violation");
+        assert_eq!(violation.limit_type, fcp_core::LimitType::Quota);
+        assert!(violation.retry_after_ms > 0);
     }
 
     #[test]

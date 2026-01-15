@@ -3,6 +3,7 @@
 //! Based on FCP Specification Section 4 (System Architecture).
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use futures_util::Stream;
@@ -149,11 +150,24 @@ pub struct BaseConnector {
     /// Connector ID
     pub id: ConnectorId,
     /// Whether configured
-    pub configured: bool,
+    pub configured: AtomicBool,
     /// Whether handshake completed
-    pub handshaken: bool,
-    /// Metrics
-    pub metrics: ConnectorMetrics,
+    pub handshaken: AtomicBool,
+    /// Metrics (internal atomic storage)
+    metrics: AtomicConnectorMetrics,
+}
+
+#[derive(Debug, Default)]
+struct AtomicConnectorMetrics {
+    requests_total: AtomicU64,
+    requests_success: AtomicU64,
+    requests_error: AtomicU64,
+    connections_active: AtomicU64,
+    events_emitted: AtomicU64,
+    latency_p50_ms: AtomicU64,
+    latency_p99_ms: AtomicU64,
+    bytes_sent: AtomicU64,
+    bytes_received: AtomicU64,
 }
 
 impl BaseConnector {
@@ -162,9 +176,9 @@ impl BaseConnector {
     pub fn new(id: impl Into<ConnectorId>) -> Self {
         Self {
             id: id.into(),
-            configured: false,
-            handshaken: false,
-            metrics: ConnectorMetrics::default(),
+            configured: AtomicBool::new(false),
+            handshaken: AtomicBool::new(false),
+            metrics: AtomicConnectorMetrics::default(),
         }
     }
 
@@ -175,29 +189,56 @@ impl BaseConnector {
     /// Returns:
     /// - `FcpError::NotConfigured` if `configure` has not completed.
     /// - `FcpError::NotHandshaken` if `handshake` has not completed.
-    pub const fn check_ready(&self) -> FcpResult<()> {
-        if !self.configured {
+    pub fn check_ready(&self) -> FcpResult<()> {
+        if !self.configured.load(Ordering::Acquire) {
             return Err(crate::FcpError::NotConfigured);
         }
-        if !self.handshaken {
+        if !self.handshaken.load(Ordering::Acquire) {
             return Err(crate::FcpError::NotHandshaken);
         }
         Ok(())
     }
 
+    /// Set configured state.
+    pub fn set_configured(&self, configured: bool) {
+        self.configured.store(configured, Ordering::Release);
+    }
+
+    /// Set handshaken state.
+    pub fn set_handshaken(&self, handshaken: bool) {
+        self.handshaken.store(handshaken, Ordering::Release);
+    }
+
     /// Increment request count.
-    pub const fn record_request(&mut self, success: bool) {
-        self.metrics.requests_total += 1;
+    pub fn record_request(&self, success: bool) {
+        self.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
         if success {
-            self.metrics.requests_success += 1;
+            self.metrics
+                .requests_success
+                .fetch_add(1, Ordering::Relaxed);
         } else {
-            self.metrics.requests_error += 1;
+            self.metrics.requests_error.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// Increment event count.
-    pub const fn record_event(&mut self) {
-        self.metrics.events_emitted += 1;
+    pub fn record_event(&self) {
+        self.metrics.events_emitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get a snapshot of current metrics.
+    pub fn metrics(&self) -> ConnectorMetrics {
+        ConnectorMetrics {
+            requests_total: self.metrics.requests_total.load(Ordering::Relaxed),
+            requests_success: self.metrics.requests_success.load(Ordering::Relaxed),
+            requests_error: self.metrics.requests_error.load(Ordering::Relaxed),
+            connections_active: self.metrics.connections_active.load(Ordering::Relaxed),
+            events_emitted: self.metrics.events_emitted.load(Ordering::Relaxed),
+            latency_p50_ms: self.metrics.latency_p50_ms.load(Ordering::Relaxed),
+            latency_p99_ms: self.metrics.latency_p99_ms.load(Ordering::Relaxed),
+            bytes_sent: self.metrics.bytes_sent.load(Ordering::Relaxed),
+            bytes_received: self.metrics.bytes_received.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -258,9 +299,9 @@ mod tests {
         let base = BaseConnector::new(id);
 
         assert_eq!(base.id.as_str(), "my:connector:v1");
-        assert!(!base.configured);
-        assert!(!base.handshaken);
-        assert_eq!(base.metrics.requests_total, 0);
+        assert!(!base.configured.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!base.handshaken.load(std::sync::atomic::Ordering::Relaxed));
+        assert_eq!(base.metrics().requests_total, 0);
     }
 
     #[test]
@@ -290,8 +331,8 @@ mod tests {
 
     #[test]
     fn base_connector_check_ready_not_handshaken() {
-        let mut base = BaseConnector::new(test_connector_id());
-        base.configured = true;
+        let base = BaseConnector::new(test_connector_id());
+        base.set_configured(true);
 
         let result = base.check_ready();
 
@@ -304,9 +345,9 @@ mod tests {
 
     #[test]
     fn base_connector_check_ready_success() {
-        let mut base = BaseConnector::new(test_connector_id());
-        base.configured = true;
-        base.handshaken = true;
+        let base = BaseConnector::new(test_connector_id());
+        base.set_configured(true);
+        base.set_handshaken(true);
 
         let result = base.check_ready();
 
@@ -315,29 +356,29 @@ mod tests {
 
     #[test]
     fn base_connector_record_request_success() {
-        let mut base = BaseConnector::new(test_connector_id());
+        let base = BaseConnector::new(test_connector_id());
 
         base.record_request(true);
 
-        assert_eq!(base.metrics.requests_total, 1);
-        assert_eq!(base.metrics.requests_success, 1);
-        assert_eq!(base.metrics.requests_error, 0);
+        assert_eq!(base.metrics().requests_total, 1);
+        assert_eq!(base.metrics().requests_success, 1);
+        assert_eq!(base.metrics().requests_error, 0);
     }
 
     #[test]
     fn base_connector_record_request_failure() {
-        let mut base = BaseConnector::new(test_connector_id());
+        let base = BaseConnector::new(test_connector_id());
 
         base.record_request(false);
 
-        assert_eq!(base.metrics.requests_total, 1);
-        assert_eq!(base.metrics.requests_success, 0);
-        assert_eq!(base.metrics.requests_error, 1);
+        assert_eq!(base.metrics().requests_total, 1);
+        assert_eq!(base.metrics().requests_success, 0);
+        assert_eq!(base.metrics().requests_error, 1);
     }
 
     #[test]
     fn base_connector_record_request_multiple() {
-        let mut base = BaseConnector::new(test_connector_id());
+        let base = BaseConnector::new(test_connector_id());
 
         base.record_request(true);
         base.record_request(true);
@@ -345,20 +386,20 @@ mod tests {
         base.record_request(true);
         base.record_request(false);
 
-        assert_eq!(base.metrics.requests_total, 5);
-        assert_eq!(base.metrics.requests_success, 3);
-        assert_eq!(base.metrics.requests_error, 2);
+        assert_eq!(base.metrics().requests_total, 5);
+        assert_eq!(base.metrics().requests_success, 3);
+        assert_eq!(base.metrics().requests_error, 2);
     }
 
     #[test]
     fn base_connector_record_event() {
-        let mut base = BaseConnector::new(test_connector_id());
+        let base = BaseConnector::new(test_connector_id());
 
         base.record_event();
         base.record_event();
         base.record_event();
 
-        assert_eq!(base.metrics.events_emitted, 3);
+        assert_eq!(base.metrics().events_emitted, 3);
     }
 
     #[test]
@@ -375,17 +416,17 @@ mod tests {
     #[test]
     fn base_connector_lifecycle() {
         // Test typical connector lifecycle
-        let mut base = BaseConnector::new(ConnectorId::from_static("lifecycle:connector:v1"));
+        let base = BaseConnector::new(ConnectorId::from_static("lifecycle:connector:v1"));
 
         // Initially not ready
         assert!(base.check_ready().is_err());
 
         // After configuration
-        base.configured = true;
+        base.set_configured(true);
         assert!(base.check_ready().is_err());
 
         // After handshake
-        base.handshaken = true;
+        base.set_handshaken(true);
         assert!(base.check_ready().is_ok());
 
         // Record some activity
@@ -395,9 +436,9 @@ mod tests {
         base.record_event();
         base.record_event();
 
-        assert_eq!(base.metrics.requests_total, 3);
-        assert_eq!(base.metrics.requests_success, 2);
-        assert_eq!(base.metrics.requests_error, 1);
-        assert_eq!(base.metrics.events_emitted, 2);
+        assert_eq!(base.metrics().requests_total, 3);
+        assert_eq!(base.metrics().requests_success, 2);
+        assert_eq!(base.metrics().requests_error, 1);
+        assert_eq!(base.metrics().events_emitted, 2);
     }
 }

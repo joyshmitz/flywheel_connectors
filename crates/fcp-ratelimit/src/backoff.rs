@@ -29,7 +29,7 @@ pub struct ExponentialBackoff {
     pub multiplier: f64,
 
     /// Whether to add jitter.
-    pub jitter: bool,
+    pub jitter: Option<f64>,
 }
 
 impl ExponentialBackoff {
@@ -40,7 +40,7 @@ impl ExponentialBackoff {
             initial,
             max,
             multiplier: 2.0,
-            jitter: true,
+            jitter: Some(0.5),
         }
     }
 
@@ -53,7 +53,7 @@ impl ExponentialBackoff {
 
     /// Enable or disable jitter.
     #[must_use]
-    pub const fn with_jitter(mut self, jitter: bool) -> Self {
+    pub const fn with_jitter(mut self, jitter: Option<f64>) -> Self {
         self.jitter = jitter;
         self
     }
@@ -85,18 +85,18 @@ impl Default for ExponentialBackoff {
 
 impl BackoffStrategy for ExponentialBackoff {
     fn next_backoff(&mut self, attempt: u32) -> Duration {
+        #[allow(clippy::cast_possible_wrap)]
         let base = self.initial.as_secs_f64() * self.multiplier.powi(attempt as i32);
         let capped = base.min(self.max.as_secs_f64());
 
-        let duration = if self.jitter {
-            // Add random jitter (0.5x to 1.5x)
-            let jitter_factor = 0.5 + (random_float() * 1.0);
-            capped * jitter_factor
-        } else {
-            capped
-        };
-
-        Duration::from_secs_f64(duration)
+        self.jitter.map_or_else(
+            || Duration::from_secs_f64(capped),
+            |jitter| {
+                let random_float = || rand::random::<f64>();
+                let jitter_factor = random_float().mul_add(jitter * 2.0, 1.0 - jitter);
+                Duration::from_secs_f64(capped * jitter_factor)
+            },
+        )
     }
 
     fn reset(&mut self) {
@@ -142,9 +142,9 @@ impl BackoffStrategy for DecorrelatedJitter {
         let prev_secs = self.previous.as_secs_f64();
         let max_secs = self.max.as_secs_f64();
 
-        let range = prev_secs * 3.0 - base_secs;
+        let range = prev_secs.mul_add(3.0, -base_secs);
         let next = if range > 0.0 {
-            base_secs + (random_float() * range)
+            random_float().mul_add(range, base_secs)
         } else {
             base_secs
         };
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_exponential_backoff() {
         let mut backoff = ExponentialBackoff::new(Duration::from_secs(1), Duration::from_secs(60))
-            .with_jitter(false);
+            .with_jitter(None);
 
         assert_eq!(backoff.next_backoff(0), Duration::from_secs(1));
         assert_eq!(backoff.next_backoff(1), Duration::from_secs(2));
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_retry_config() {
-        let mut config = RetryConfig::new(3, ExponentialBackoff::default().with_jitter(false));
+        let mut config = RetryConfig::new(3, ExponentialBackoff::default().with_jitter(None));
 
         assert_eq!(config.max_retries, 3);
 
