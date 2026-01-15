@@ -1,10 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/fcp-audit",
+    "crates/fcp-cbor",
     "crates/fcp-core",
+    "crates/fcp-cli",
+    "crates/fcp-conformance",
+    "crates/fcp-crypto",
+    "crates/fcp-manifest",
+    "crates/fcp-mesh",
     "crates/fcp-oauth",
+    "crates/fcp-protocol",
+    "crates/fcp-raptorq",
     "crates/fcp-ratelimit",
+    "crates/fcp-sandbox",
+    "crates/fcp-sdk",
     "crates/fcp-streaming",
+    "crates/fcp-store",
+    "crates/fcp-tailscale",
     "crates/fcp-telemetry",
     "crates/fcp-testkit",
     "crates/fcp-webhook",
@@ -12,6 +25,24 @@ members = [
     "connectors/discord",
     "connectors/openai",
     "connectors/telegram",
+]
+
+# Default to the FCP2 platform core crates (connectors are explicitly targeted).
+default-members = [
+    "crates/fcp-audit",
+    "crates/fcp-cbor",
+    "crates/fcp-core",
+    "crates/fcp-crypto",
+    "crates/fcp-manifest",
+    "crates/fcp-mesh",
+    "crates/fcp-protocol",
+    "crates/fcp-raptorq",
+    "crates/fcp-sandbox",
+    "crates/fcp-sdk",
+    "crates/fcp-store",
+    "crates/fcp-tailscale",
+    "crates/fcp-conformance",
+    "crates/fcp-cli",
 ]
 
 [workspace.package]
@@ -31,6 +62,8 @@ futures-util = "0.3"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+ciborium = "0.2.2"
+semver = { version = "1.0.27", features = ["serde"] }
 
 # Error handling
 thiserror = "2.0"
@@ -41,7 +74,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Cryptography
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets", "zeroize"] }
+blake3 = "1.8.3"
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20poly1305 = "0.10"
+hpke = "0.12"
+coset = "0.3"
+zeroize = { version = "1.8", features = ["derive"] }
+subtle = "2.6"
+rand = "0.8"
+rand_core = "0.6"
 
 # Identifiers
 uuid = { version = "1.11", features = ["v4", "serde"] }
@@ -49,7 +93,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Bytes
 bytes = "1.9"
-hex = "0.4"
+hex = { version = "0.4", features = ["serde"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

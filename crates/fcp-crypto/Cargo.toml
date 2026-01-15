@@ -1,0 +1,61 @@
+[package]
+name = "fcp-crypto"
+description = "FCP2 crypto primitives and helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Signatures
+ed25519-dalek.workspace = true
+
+# Key exchange
+x25519-dalek.workspace = true
+
+# Hashing
+blake3.workspace = true
+sha2.workspace = true
+
+# Key derivation
+hkdf.workspace = true
+
+# AEAD
+chacha20poly1305.workspace = true
+
+# HPKE (RFC 9180)
+hpke.workspace = true
+
+# COSE/CWT
+coset.workspace = true
+
+# Serialization (for COSE/CBOR)
+ciborium.workspace = true
+serde.workspace = true
+
+# Memory safety
+zeroize.workspace = true
+subtle.workspace = true
+
+# Randomness
+rand.workspace = true
+rand_core.workspace = true
+
+# Bytes
+bytes.workspace = true
+hex.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Time (for token validation)
+chrono.workspace = true
+
+[dev-dependencies]
+# Testing
+serde_json.workspace = true
