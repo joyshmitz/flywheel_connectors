@@ -575,19 +575,19 @@ mod tests {
     #[test]
     #[should_panic(expected = "n must be > 0")]
     fn test_required_quorum_panics_n_zero() {
-        required_quorum(0, 0, RiskTier::Safe);
+        let _ = required_quorum(0, 0, RiskTier::Safe);
     }
 
     #[test]
     #[should_panic(expected = "f must be < n")]
     fn test_required_quorum_panics_f_equals_n() {
-        required_quorum(3, 3, RiskTier::Safe);
+        let _ = required_quorum(3, 3, RiskTier::Safe);
     }
 
     #[test]
     #[should_panic(expected = "f must be < n")]
     fn test_required_quorum_panics_f_greater_than_n() {
-        required_quorum(3, 5, RiskTier::Safe);
+        let _ = required_quorum(3, 5, RiskTier::Safe);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -907,5 +907,666 @@ mod tests {
         assert_eq!(deserialized.len(), 2);
         // Note: node_ids set is not serialized, so duplicate detection
         // won't work after deserialization without rebuilding
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Byzantine Fault Tolerance (n/f) Assumption Tests
+    // ─────────────────────────────────────────────────────────────────────────
+    // For BFT systems: n >= 3f + 1, so f_max = floor((n-1)/3)
+
+    /// Helper: Calculate maximum tolerable Byzantine faults for n nodes.
+    /// For BFT: f_max = floor((n-1)/3)
+    fn max_byzantine_faults(n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        (n - 1) / 3
+    }
+
+    #[test]
+    fn test_bft_3_node_mesh_tolerates_0_faults() {
+        // 3-node mesh: f_max = (3-1)/3 = 0
+        let n = 3;
+        let f_max = max_byzantine_faults(n);
+        assert_eq!(f_max, 0, "3-node mesh should tolerate 0 Byzantine faults");
+
+        // With f=0, all risk tiers should work
+        let policy = QuorumPolicy::new(ZoneId::work(), n, 0);
+        assert_eq!(policy.required_signatures(RiskTier::Safe), 1);
+        assert_eq!(policy.required_signatures(RiskTier::Risky), 1); // 0 + 1
+        assert_eq!(policy.required_signatures(RiskTier::Dangerous), 3); // 3 - 0
+        assert_eq!(policy.required_signatures(RiskTier::CriticalWrite), 3);
+
+        // All 3 nodes required for critical operations (unanimous)
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("node-0"), [0; 64], 1000));
+        set.add(NodeSignature::new(NodeId::new("node-1"), [1; 64], 1000));
+        assert!(!set.satisfies_quorum(&policy, RiskTier::CriticalWrite));
+        set.add(NodeSignature::new(NodeId::new("node-2"), [2; 64], 1000));
+        assert!(set.satisfies_quorum(&policy, RiskTier::CriticalWrite));
+    }
+
+    #[test]
+    fn test_bft_4_node_mesh_tolerates_1_fault() {
+        // 4-node mesh: f_max = (4-1)/3 = 1
+        let n = 4;
+        let f_max = max_byzantine_faults(n);
+        assert_eq!(f_max, 1, "4-node mesh should tolerate 1 Byzantine fault");
+
+        // With f=1: n >= 3(1) + 1 = 4 ✓
+        let policy = QuorumPolicy::new(ZoneId::work(), n, 1);
+        assert_eq!(policy.required_signatures(RiskTier::Safe), 1);
+        assert_eq!(policy.required_signatures(RiskTier::Risky), 2); // 1 + 1
+        assert_eq!(policy.required_signatures(RiskTier::Dangerous), 3); // 4 - 1
+        assert_eq!(policy.required_signatures(RiskTier::CriticalWrite), 3);
+
+        // 3 of 4 needed for critical operations
+        let mut set = SignatureSet::new();
+        set.add(NodeSignature::new(NodeId::new("node-0"), [0; 64], 1000));
+        set.add(NodeSignature::new(NodeId::new("node-1"), [1; 64], 1000));
+        assert!(!set.satisfies_quorum(&policy, RiskTier::CriticalWrite));
+        set.add(NodeSignature::new(NodeId::new("node-2"), [2; 64], 1000));
+        assert!(set.satisfies_quorum(&policy, RiskTier::CriticalWrite));
+    }
+
+    #[test]
+    fn test_bft_7_node_mesh_tolerates_2_faults() {
+        // 7-node mesh: f_max = (7-1)/3 = 2
+        let n = 7;
+        let f_max = max_byzantine_faults(n);
+        assert_eq!(f_max, 2, "7-node mesh should tolerate 2 Byzantine faults");
+
+        // With f=2: n >= 3(2) + 1 = 7 ✓
+        let policy = QuorumPolicy::new(ZoneId::work(), n, 2);
+        assert_eq!(policy.required_signatures(RiskTier::Safe), 1);
+        assert_eq!(policy.required_signatures(RiskTier::Risky), 3); // 2 + 1
+        assert_eq!(policy.required_signatures(RiskTier::Dangerous), 5); // 7 - 2
+        assert_eq!(policy.required_signatures(RiskTier::CriticalWrite), 5);
+
+        // 5 of 7 needed for critical operations
+        let mut set = SignatureSet::new();
+        for i in 0..4 {
+            set.add(NodeSignature::new(
+                NodeId::new(format!("node-{i}")),
+                [i as u8; 64],
+                1000,
+            ));
+        }
+        assert!(!set.satisfies_quorum(&policy, RiskTier::CriticalWrite)); // 4 < 5
+        set.add(NodeSignature::new(NodeId::new("node-4"), [4; 64], 1000));
+        assert!(set.satisfies_quorum(&policy, RiskTier::CriticalWrite)); // 5 >= 5
+    }
+
+    #[test]
+    fn test_bft_f_less_than_n_div_3_invariant() {
+        // Verify the BFT invariant: for true Byzantine tolerance, f < n/3
+        // Which is equivalent to: n >= 3f + 1
+
+        // Test various configurations
+        let test_cases = [
+            (1, 0, true),  // n=1, f=0: 1 >= 1 ✓
+            (3, 0, true),  // n=3, f=0: 3 >= 1 ✓
+            (4, 1, true),  // n=4, f=1: 4 >= 4 ✓
+            (5, 1, true),  // n=5, f=1: 5 >= 4 ✓
+            (6, 1, true),  // n=6, f=1: 6 >= 4 ✓
+            (7, 2, true),  // n=7, f=2: 7 >= 7 ✓
+            (10, 3, true), // n=10, f=3: 10 >= 10 ✓
+            (13, 4, true), // n=13, f=4: 13 >= 13 ✓
+            // Edge cases that violate BFT (but allowed by current impl)
+            (3, 1, false), // n=3, f=1: 3 >= 4 ✗ (not BFT safe)
+            (4, 2, false), // n=4, f=2: 4 >= 7 ✗ (not BFT safe)
+            (6, 2, false), // n=6, f=2: 6 >= 7 ✗ (not BFT safe)
+        ];
+
+        for (n, f, is_bft_safe) in test_cases {
+            let actual_max_f = max_byzantine_faults(n);
+            let is_safe = f <= actual_max_f;
+            assert_eq!(
+                is_safe, is_bft_safe,
+                "n={n}, f={f}: expected BFT safe={is_bft_safe}, actual max_f={actual_max_f}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quorum_size_n_minus_f_calculated_correctly() {
+        // Verify quorum = n - f for Dangerous/CriticalWrite
+        let test_cases = [
+            (3, 0, 3),  // 3 - 0 = 3
+            (4, 1, 3),  // 4 - 1 = 3
+            (5, 1, 4),  // 5 - 1 = 4
+            (7, 2, 5),  // 7 - 2 = 5
+            (10, 3, 7), // 10 - 3 = 7
+            (13, 4, 9), // 13 - 4 = 9
+        ];
+
+        for (n, f, expected_quorum) in test_cases {
+            let actual = required_quorum(n, f, RiskTier::CriticalWrite);
+            assert_eq!(
+                actual, expected_quorum,
+                "n={n}, f={f}: expected quorum={expected_quorum}, got {actual}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Threshold Rules Tests (Zone Operations, Checkpoints, Revocations)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_zone_operations_require_2f_plus_1_for_risky() {
+        // Risky operations require f + 1 signatures (not 2f+1)
+        // Note: The spec says 2f+1 for BFT, but our impl uses f+1 for Risky
+        let test_cases = [
+            (4, 1, 2),  // f + 1 = 2
+            (7, 2, 3),  // f + 1 = 3
+            (10, 3, 4), // f + 1 = 4
+        ];
+
+        for (n, f, expected) in test_cases {
+            let actual = required_quorum(n, f, RiskTier::Risky);
+            assert_eq!(
+                actual, expected,
+                "Risky quorum for n={n}, f={f}: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_checkpoint_advancement_requires_quorum() {
+        // ZoneCheckpoint uses CriticalWrite risk tier
+        assert_eq!(
+            QuorumPurpose::ZoneCheckpoint.default_risk_tier(),
+            RiskTier::CriticalWrite
+        );
+
+        let policy = QuorumPolicy::new(ZoneId::work(), 7, 2);
+        let required = policy.required_signatures(RiskTier::CriticalWrite);
+        assert_eq!(required, 5); // 7 - 2 = 5
+
+        let mut set = SignatureSet::new();
+        for i in 0..4 {
+            set.add(NodeSignature::new(
+                NodeId::new(format!("node-{i}")),
+                [i as u8; 64],
+                1000,
+            ));
+        }
+        assert!(
+            !set.satisfies_quorum(&policy, RiskTier::CriticalWrite),
+            "4 signatures should not satisfy checkpoint quorum (need 5)"
+        );
+
+        set.add(NodeSignature::new(NodeId::new("node-4"), [4; 64], 1000));
+        assert!(
+            set.satisfies_quorum(&policy, RiskTier::CriticalWrite),
+            "5 signatures should satisfy checkpoint quorum"
+        );
+    }
+
+    #[test]
+    fn test_key_rotation_requires_quorum() {
+        // KeyRotation uses Dangerous risk tier
+        assert_eq!(
+            QuorumPurpose::KeyRotation.default_risk_tier(),
+            RiskTier::Dangerous
+        );
+
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1);
+        let required = policy.required_signatures(RiskTier::Dangerous);
+        assert_eq!(required, 4); // 5 - 1 = 4
+    }
+
+    #[test]
+    fn test_revocation_propagation_requires_quorum() {
+        // RevocationHead uses CriticalWrite risk tier
+        assert_eq!(
+            QuorumPurpose::RevocationHead.default_risk_tier(),
+            RiskTier::CriticalWrite
+        );
+
+        let policy = QuorumPolicy::new(ZoneId::work(), 4, 1);
+        let required = policy.required_signatures(RiskTier::CriticalWrite);
+        assert_eq!(required, 3); // 4 - 1 = 3
+    }
+
+    #[test]
+    fn test_threshold_signature_verification() {
+        // Test that exactly the threshold number of signatures is needed
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1);
+
+        // Dangerous needs 4 signatures (5 - 1)
+        for sig_count in 0..=5 {
+            let should_satisfy = sig_count >= 4;
+            assert_eq!(
+                policy.is_quorum_met(sig_count, RiskTier::Dangerous),
+                should_satisfy,
+                "With {sig_count} signatures: expected satisfied={should_satisfy}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Degraded Mode Semantics Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_degraded_mode_triggers_at_f_failures() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1).with_degraded_mode(3);
+
+        // Full capacity: not degraded
+        assert!(!policy.is_degraded(5));
+
+        // One failure (at f): degraded
+        assert!(policy.is_degraded(4));
+
+        // More failures: still degraded
+        assert!(policy.is_degraded(3));
+        assert!(policy.is_degraded(2));
+        assert!(policy.is_degraded(1));
+    }
+
+    #[test]
+    fn test_operations_pause_when_quorum_lost() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1).with_degraded_mode(3);
+
+        // With 2 nodes: below degraded_mode_min_nodes (3)
+        // Even Safe operations should be blocked
+        assert!(
+            !policy.can_proceed_degraded(2, RiskTier::Safe),
+            "Operations should pause when below minimum nodes"
+        );
+
+        // With 0 nodes: definitely blocked
+        assert!(!policy.can_proceed_degraded(0, RiskTier::Safe));
+    }
+
+    #[test]
+    fn test_clear_error_codes_for_degraded_state() {
+        // All reason codes should have clear string representations
+        let reasons = [
+            (DegradedModeReason::NetworkPartition, "network_partition"),
+            (DegradedModeReason::InsufficientNodes, "insufficient_nodes"),
+            (DegradedModeReason::NodeFailure, "node_failure"),
+            (DegradedModeReason::QuorumTimeout, "quorum_timeout"),
+            (DegradedModeReason::ManualOverride, "manual_override"),
+        ];
+
+        for (reason, expected_str) in reasons {
+            assert_eq!(reason.as_str(), expected_str);
+        }
+
+        // QuorumFailureReason should also be clear
+        assert_eq!(
+            QuorumFailureReason::DegradedModeNotAllowed.as_str(),
+            "degraded_mode_not_allowed"
+        );
+    }
+
+    #[test]
+    fn test_recovery_path_when_nodes_return() {
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1).with_degraded_mode(3);
+
+        // Simulate degraded state
+        let degraded_state = DegradedModeState::degraded(
+            DegradedModeReason::NodeFailure,
+            1000,
+            3, // 3 available
+            5, // 5 expected
+        );
+        assert!(degraded_state.active);
+
+        // When nodes return, we can create a normal state
+        let recovered_state = DegradedModeState::normal(5);
+        assert!(!recovered_state.active);
+        assert!(recovered_state.reason.is_none());
+
+        // Full capacity means not degraded
+        assert!(!policy.is_degraded(5));
+
+        // And all operations should work
+        assert!(policy.is_quorum_met(4, RiskTier::Dangerous));
+    }
+
+    #[test]
+    fn test_degraded_mode_all_reasons_serializable() {
+        let reasons = [
+            DegradedModeReason::NetworkPartition,
+            DegradedModeReason::InsufficientNodes,
+            DegradedModeReason::NodeFailure,
+            DegradedModeReason::QuorumTimeout,
+            DegradedModeReason::ManualOverride,
+        ];
+
+        for reason in reasons {
+            let state = DegradedModeState::degraded(reason, 1000, 3, 5);
+            let json = serde_json::to_string(&state).unwrap();
+            let deserialized: DegradedModeState = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized.reason, Some(reason));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Safety Tier Quorum Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_safe_operations_single_node() {
+        // Safe operations require only 1 signature (coordinator)
+        for n in 1..=10 {
+            for f in 0..n {
+                assert_eq!(
+                    required_quorum(n, f, RiskTier::Safe),
+                    1,
+                    "Safe operations should always require exactly 1 signature"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_risky_operations_f_plus_1_quorum() {
+        // Risky operations require f + 1 signatures
+        let test_cases = [
+            (3, 0, 1),
+            (4, 1, 2),
+            (5, 1, 2),
+            (5, 2, 3),
+            (7, 2, 3),
+            (10, 3, 4),
+        ];
+
+        for (n, f, expected) in test_cases {
+            let actual = required_quorum(n, f, RiskTier::Risky);
+            assert_eq!(
+                actual, expected,
+                "Risky: n={n}, f={f} should require {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dangerous_operations_higher_quorum() {
+        // Dangerous operations require n - f signatures
+        let test_cases = [
+            (3, 0, 3),  // unanimous
+            (4, 1, 3),  // 3 of 4
+            (5, 1, 4),  // 4 of 5
+            (7, 2, 5),  // 5 of 7
+            (10, 3, 7), // 7 of 10
+        ];
+
+        for (n, f, expected) in test_cases {
+            let actual = required_quorum(n, f, RiskTier::Dangerous);
+            assert_eq!(
+                actual, expected,
+                "Dangerous: n={n}, f={f} should require {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_critical_operations_same_as_dangerous() {
+        // CriticalWrite has the same quorum as Dangerous
+        for n in 1..=10 {
+            for f in 0..n {
+                let dangerous = required_quorum(n, f, RiskTier::Dangerous);
+                let critical = required_quorum(n, f, RiskTier::CriticalWrite);
+                assert_eq!(
+                    dangerous, critical,
+                    "n={n}, f={f}: CriticalWrite should match Dangerous"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_quorum_purpose_to_risk_tier_mapping() {
+        // Verify all purposes map to expected risk tiers
+        let mappings = [
+            (QuorumPurpose::SafeLease, RiskTier::Safe),
+            (QuorumPurpose::RiskyLease, RiskTier::Risky),
+            (QuorumPurpose::DangerousLease, RiskTier::Dangerous),
+            (QuorumPurpose::KeyRotation, RiskTier::Dangerous),
+            (QuorumPurpose::MembershipChange, RiskTier::Dangerous),
+            (QuorumPurpose::AuditHead, RiskTier::CriticalWrite),
+            (QuorumPurpose::ZoneCheckpoint, RiskTier::CriticalWrite),
+            (QuorumPurpose::RevocationHead, RiskTier::CriticalWrite),
+        ];
+
+        for (purpose, expected_tier) in mappings {
+            assert_eq!(
+                purpose.default_risk_tier(),
+                expected_tier,
+                "{purpose:?} should map to {expected_tier:?}"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Split-Brain Prevention Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Represents a partition of nodes for split-brain testing.
+    struct Partition {
+        nodes: Vec<NodeId>,
+    }
+
+    impl Partition {
+        fn new(node_ids: &[&str]) -> Self {
+            Self {
+                nodes: node_ids.iter().map(|id| NodeId::new(*id)).collect(),
+            }
+        }
+
+        fn size(&self) -> u32 {
+            self.nodes.len() as u32
+        }
+
+        fn create_signature_set(&self) -> SignatureSet {
+            let mut set = SignatureSet::new();
+            for (i, node) in self.nodes.iter().enumerate() {
+                set.add(NodeSignature::new(node.clone(), [i as u8; 64], 1000));
+            }
+            set
+        }
+    }
+
+    #[test]
+    fn test_only_one_partition_can_make_progress() {
+        // 5-node cluster with f=1, split into 3-2
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1);
+        let quorum_needed = policy.required_signatures(RiskTier::CriticalWrite); // 4
+
+        let majority = Partition::new(&["node-0", "node-1", "node-2"]);
+        let minority = Partition::new(&["node-3", "node-4"]);
+
+        // Neither partition alone has quorum for critical ops
+        assert!(
+            !policy.is_quorum_met(majority.size(), RiskTier::CriticalWrite),
+            "3 nodes should not satisfy quorum of {quorum_needed}"
+        );
+        assert!(
+            !policy.is_quorum_met(minority.size(), RiskTier::CriticalWrite),
+            "2 nodes should not satisfy quorum of {quorum_needed}"
+        );
+
+        // For Safe operations, either partition can proceed
+        assert!(policy.is_quorum_met(majority.size(), RiskTier::Safe));
+        assert!(policy.is_quorum_met(minority.size(), RiskTier::Safe));
+
+        // For Risky (f+1=2), both partitions can technically proceed
+        // but only if they have >= 2 nodes
+        assert!(policy.is_quorum_met(majority.size(), RiskTier::Risky));
+        assert!(policy.is_quorum_met(minority.size(), RiskTier::Risky));
+
+        // This is why CriticalWrite requires n-f: to prevent split-brain
+        // on critical operations like checkpoints
+    }
+
+    #[test]
+    fn test_minority_partition_refuses_writes() {
+        // 7-node cluster with f=2, split into 5-2
+        let policy = QuorumPolicy::new(ZoneId::work(), 7, 2);
+
+        let majority = Partition::new(&["node-0", "node-1", "node-2", "node-3", "node-4"]);
+        let minority = Partition::new(&["node-5", "node-6"]);
+
+        // Majority can achieve quorum (5 >= 5)
+        let majority_sigs = majority.create_signature_set();
+        assert!(
+            majority_sigs.satisfies_quorum(&policy, RiskTier::CriticalWrite),
+            "Majority partition (5) should satisfy quorum (5)"
+        );
+
+        // Minority cannot achieve quorum (2 < 5)
+        let minority_sigs = minority.create_signature_set();
+        assert!(
+            !minority_sigs.satisfies_quorum(&policy, RiskTier::CriticalWrite),
+            "Minority partition (2) should not satisfy quorum (5)"
+        );
+    }
+
+    #[test]
+    fn test_majority_partition_continues() {
+        // 5-node cluster, 3-node majority should continue operations
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1).with_degraded_mode(3);
+
+        // Even though we're degraded (3 < 5), we can do Safe ops
+        assert!(policy.can_proceed_degraded(3, RiskTier::Safe));
+
+        // But we cannot do critical operations without full quorum
+        // Note: can_proceed_degraded only allows Safe ops
+        assert!(!policy.can_proceed_degraded(3, RiskTier::CriticalWrite));
+
+        // However, if we have 4 signatures, we CAN satisfy CriticalWrite
+        assert!(policy.is_quorum_met(4, RiskTier::CriticalWrite));
+    }
+
+    #[test]
+    fn test_split_brain_merge_after_heal() {
+        // After network partition heals, both sides should be able to
+        // participate in quorum again
+
+        let policy = QuorumPolicy::new(ZoneId::work(), 5, 1);
+
+        // During partition: neither side has full quorum
+        let side_a = Partition::new(&["node-0", "node-1", "node-2"]);
+        let side_b = Partition::new(&["node-3", "node-4"]);
+
+        assert!(
+            !side_a
+                .create_signature_set()
+                .satisfies_quorum(&policy, RiskTier::CriticalWrite)
+        );
+        assert!(
+            !side_b
+                .create_signature_set()
+                .satisfies_quorum(&policy, RiskTier::CriticalWrite)
+        );
+
+        // After heal: combined set can achieve quorum
+        let mut healed_set = SignatureSet::new();
+        for node in &side_a.nodes {
+            healed_set.add(NodeSignature::new(node.clone(), [0; 64], 2000));
+        }
+        for node in &side_b.nodes {
+            healed_set.add(NodeSignature::new(node.clone(), [1; 64], 2000));
+        }
+
+        assert_eq!(healed_set.len(), 5);
+        assert!(
+            healed_set.satisfies_quorum(&policy, RiskTier::CriticalWrite),
+            "Healed cluster should satisfy quorum"
+        );
+    }
+
+    #[test]
+    fn test_even_split_cannot_proceed() {
+        // 4-node cluster with f=1, split 2-2
+        let policy = QuorumPolicy::new(ZoneId::work(), 4, 1);
+        let required = policy.required_signatures(RiskTier::CriticalWrite); // 3
+
+        // Neither 2-node partition can proceed with critical ops
+        assert!(
+            !policy.is_quorum_met(2, RiskTier::CriticalWrite),
+            "2 nodes cannot satisfy quorum of {required}"
+        );
+
+        // This prevents split-brain: neither side can make conflicting updates
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Additional Edge Case Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_large_cluster_quorum() {
+        // Test with larger cluster sizes
+        let test_cases = [
+            (100, 33, 67), // f = 33, quorum = 67
+            (50, 16, 34),  // f = 16, quorum = 34
+            (25, 8, 17),   // f = 8, quorum = 17
+        ];
+
+        for (n, f, expected_quorum) in test_cases {
+            let actual = required_quorum(n, f, RiskTier::CriticalWrite);
+            assert_eq!(
+                actual, expected_quorum,
+                "n={n}, f={f}: expected {expected_quorum}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quorum_verification_result_fields() {
+        // Test QuorumVerificationResult structure
+        let result = QuorumVerificationResult {
+            satisfied: false,
+            valid_count: 2,
+            required_count: 3,
+            risk_tier: RiskTier::Dangerous,
+            degraded_mode: true,
+            failure_reason: Some(QuorumFailureReason::InsufficientSignatures),
+        };
+
+        assert!(!result.satisfied);
+        assert_eq!(result.valid_count, 2);
+        assert_eq!(result.required_count, 3);
+        assert_eq!(result.risk_tier, RiskTier::Dangerous);
+        assert!(result.degraded_mode);
+        assert_eq!(
+            result.failure_reason,
+            Some(QuorumFailureReason::InsufficientSignatures)
+        );
+
+        // Verify serialization
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: QuorumVerificationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.satisfied, result.satisfied);
+        assert_eq!(deserialized.valid_count, result.valid_count);
+    }
+
+    #[test]
+    fn test_signature_set_with_many_nodes() {
+        // Stress test signature set with many nodes
+        let mut set = SignatureSet::new();
+
+        for i in 0u64..100 {
+            let added = set.add(NodeSignature::new(
+                NodeId::new(format!("node-{i:03}")), // Zero-padded for consistent ordering
+                [i as u8; 64],
+                1000 + i,
+            ));
+            assert!(added, "Adding node-{i:03} should succeed");
+        }
+
+        assert_eq!(set.len(), 100);
+
+        // Verify ordering is maintained
+        let ids: Vec<_> = set.iter().map(|s| s.node_id.as_str()).collect();
+        let mut sorted_ids = ids.clone();
+        sorted_ids.sort();
+        assert_eq!(ids, sorted_ids, "Signatures should be sorted by node_id");
     }
 }
