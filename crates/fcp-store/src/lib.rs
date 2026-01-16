@@ -43,8 +43,8 @@ pub use error::{GcError, ObjectStoreError, QuarantineError, RepairError, SymbolS
 pub use gc::{GarbageCollector, GcConfig, GcResult, GcRoots};
 pub use object_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
 pub use quarantine::{
-    ObjectAdmissionClass, ObjectAdmissionPolicy, PromotionReason, QuarantineStats,
-    QuarantineStore, QuarantinedObject,
+    ObjectAdmissionClass, ObjectAdmissionPolicy, PromotionReason, QuarantineStats, QuarantineStore,
+    QuarantinedObject,
 };
 pub use repair::{
     RepairController, RepairControllerConfig, RepairPermit, RepairRequest, RepairResult,

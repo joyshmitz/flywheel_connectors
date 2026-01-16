@@ -402,7 +402,78 @@ impl SymbolStore for MemorySymbolStore {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+    use std::time::Instant;
+
     use super::*;
+    use crate::coverage::CoverageEvaluation;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct StoreLogData {
+        object_id: Option<ObjectId>,
+        object_size: Option<u64>,
+        symbol_count: Option<u32>,
+        coverage_bps: Option<u32>,
+        nodes_holding: Option<Vec<String>>,
+        details: Option<serde_json::Value>,
+    }
+
+    fn nodes_from_distribution(dist: &SymbolDistribution) -> Vec<String> {
+        let mut nodes: Vec<String> = dist.nodes.keys().map(|id| format!("node-{id}")).collect();
+        nodes.sort();
+        nodes
+    }
+
+    fn run_store_test<F, Fut>(test_name: &str, phase: &str, operation: &str, assertions: u32, f: F)
+    where
+        F: FnOnce() -> Fut + panic::UnwindSafe,
+        Fut: std::future::Future<Output = StoreLogData>,
+    {
+        let start = Instant::now();
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("runtime");
+            rt.block_on(f())
+        }));
+        let duration_us = start.elapsed().as_micros();
+
+        let (passed, failed, outcome, data) = match &result {
+            Ok(data) => (assertions, 0, "pass", Some(data)),
+            Err(_) => (0, assertions, "fail", None),
+        };
+
+        let log = json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "level": "info",
+            "test_name": test_name,
+            "module": "fcp-store",
+            "phase": phase,
+            "operation": operation,
+            "correlation_id": Uuid::new_v4().to_string(),
+            "result": outcome,
+            "duration_us": duration_us,
+            "object_id": data.and_then(|d| d.object_id).map(|id| id.to_string()),
+            "object_size": data.and_then(|d| d.object_size),
+            "symbol_count": data.and_then(|d| d.symbol_count),
+            "coverage_bps": data.and_then(|d| d.coverage_bps),
+            "nodes_holding": data.and_then(|d| d.nodes_holding.clone()),
+            "details": data.and_then(|d| d.details.clone()),
+            "assertions": {
+                "passed": passed,
+                "failed": failed
+            }
+        });
+        println!("{log}");
+
+        if let Err(payload) = result {
+            panic::resume_unwind(payload);
+        }
+    }
 
     fn test_zone() -> ZoneId {
         "z:test".parse().unwrap()
@@ -441,156 +512,251 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn put_and_get_symbol() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn put_and_get_symbol() {
+        run_store_test("put_and_get_symbol", "verify", "write", 2, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
-        store.put_symbol(test_symbol(0)).await.unwrap();
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_symbol(test_symbol(0)).await.unwrap();
 
-        let symbol = store.get_symbol(&test_object_id(), 0).await.unwrap();
-        assert_eq!(symbol.meta.esi, 0);
+            let symbol = store.get_symbol(&test_object_id(), 0).await.unwrap();
+            assert_eq!(symbol.meta.esi, 0);
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                object_size: Some(symbol.data.len() as u64),
+                symbol_count: Some(1),
+                details: Some(json!({"esi": symbol.meta.esi})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn symbol_without_object_meta_rejected() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn symbol_without_object_meta_rejected() {
+        run_store_test(
+            "symbol_without_object_meta_rejected",
+            "verify",
+            "write",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        let result = store.put_symbol(test_symbol(0)).await;
-        assert!(matches!(result, Err(SymbolStoreError::ObjectNotFound(_))));
+                let result = store.put_symbol(test_symbol(0)).await;
+                assert!(matches!(result, Err(SymbolStoreError::ObjectNotFound(_))));
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    details: Some(json!({"error": "object_not_found"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
-    #[tokio::test]
-    async fn duplicate_symbol_ignored() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn duplicate_symbol_ignored() {
+        run_store_test("duplicate_symbol_ignored", "verify", "write", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
-        store.put_symbol(test_symbol(0)).await.unwrap();
-        store.put_symbol(test_symbol(0)).await.unwrap(); // Duplicate
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_symbol(test_symbol(0)).await.unwrap();
+            store.put_symbol(test_symbol(0)).await.unwrap();
 
-        assert_eq!(store.symbol_count(&test_object_id()).await, 1);
+            let count = store.symbol_count(&test_object_id()).await;
+            assert_eq!(count, 1);
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                symbol_count: Some(count),
+                details: Some(json!({"note": "duplicate_ignored"})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn get_all_symbols() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn get_all_symbols() {
+        run_store_test("get_all_symbols", "verify", "read", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
-        for esi in 0..5 {
-            store.put_symbol(test_symbol(esi)).await.unwrap();
-        }
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            for esi in 0..5 {
+                store.put_symbol(test_symbol(esi)).await.unwrap();
+            }
 
-        let symbols = store.get_all_symbols(&test_object_id()).await;
-        assert_eq!(symbols.len(), 5);
+            let symbols = store.get_all_symbols(&test_object_id()).await;
+            assert_eq!(symbols.len(), 5);
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                symbol_count: Some(symbols.len() as u32),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn can_reconstruct() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn can_reconstruct() {
+        run_store_test("can_reconstruct", "verify", "repair", 2, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        let mut meta = test_object_meta();
-        meta.source_symbols = 10;
-        store.put_object_meta(meta).await.unwrap();
+            let mut meta = test_object_meta();
+            meta.source_symbols = 10;
+            store.put_object_meta(meta).await.unwrap();
 
-        // Not enough symbols
-        for esi in 0..5 {
-            store.put_symbol(test_symbol(esi)).await.unwrap();
-        }
-        assert!(!store.can_reconstruct(&test_object_id()).await);
+            for esi in 0..5 {
+                store.put_symbol(test_symbol(esi)).await.unwrap();
+            }
+            assert!(!store.can_reconstruct(&test_object_id()).await);
 
-        // Now add more
-        for esi in 5..10 {
-            store.put_symbol(test_symbol(esi)).await.unwrap();
-        }
-        assert!(store.can_reconstruct(&test_object_id()).await);
+            for esi in 5..10 {
+                store.put_symbol(test_symbol(esi)).await.unwrap();
+            }
+            assert!(store.can_reconstruct(&test_object_id()).await);
+
+            let dist = store.get_distribution(&test_object_id()).await.unwrap();
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                symbol_count: Some(dist.total_symbols),
+                coverage_bps: Some(
+                    CoverageEvaluation::from_distribution(test_object_id(), &dist).coverage_bps,
+                ),
+                nodes_holding: Some(nodes_from_distribution(&dist)),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn get_distribution() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn get_distribution() {
+        run_store_test("get_distribution", "verify", "placement", 2, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_object_meta(test_object_meta()).await.unwrap();
 
-        // Add symbols from different nodes
-        let mut symbol = test_symbol(0);
-        symbol.meta.source_node = Some(1);
-        store.put_symbol(symbol).await.unwrap();
+            let mut symbol = test_symbol(0);
+            symbol.meta.source_node = Some(1);
+            store.put_symbol(symbol).await.unwrap();
 
-        let mut symbol = test_symbol(1);
-        symbol.meta.source_node = Some(2);
-        store.put_symbol(symbol).await.unwrap();
+            let mut symbol = test_symbol(1);
+            symbol.meta.source_node = Some(2);
+            store.put_symbol(symbol).await.unwrap();
 
-        let mut symbol = test_symbol(2);
-        symbol.meta.source_node = Some(1);
-        store.put_symbol(symbol).await.unwrap();
+            let mut symbol = test_symbol(2);
+            symbol.meta.source_node = Some(1);
+            store.put_symbol(symbol).await.unwrap();
 
-        let dist = store.get_distribution(&test_object_id()).await.unwrap();
-        assert_eq!(dist.distinct_nodes(), 2);
-        assert_eq!(dist.total_symbols, 3);
+            let dist = store.get_distribution(&test_object_id()).await.unwrap();
+            assert_eq!(dist.distinct_nodes(), 2);
+            assert_eq!(dist.total_symbols, 3);
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                symbol_count: Some(dist.total_symbols),
+                coverage_bps: Some(
+                    CoverageEvaluation::from_distribution(test_object_id(), &dist).coverage_bps,
+                ),
+                nodes_holding: Some(nodes_from_distribution(&dist)),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn delete_symbol() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn delete_symbol() {
+        run_store_test("delete_symbol", "verify", "delete", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
-        store.put_symbol(test_symbol(0)).await.unwrap();
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_symbol(test_symbol(0)).await.unwrap();
 
-        store.delete_symbol(&test_object_id(), 0).await.unwrap();
+            store.delete_symbol(&test_object_id(), 0).await.unwrap();
 
-        let result = store.get_symbol(&test_object_id(), 0).await;
-        assert!(matches!(result, Err(SymbolStoreError::NotFound { .. })));
+            let result = store.get_symbol(&test_object_id(), 0).await;
+            assert!(matches!(result, Err(SymbolStoreError::NotFound { .. })));
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                details: Some(json!({"deleted_esi": 0})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn delete_object() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn delete_object() {
+        run_store_test("delete_object_symbols", "verify", "delete", 2, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
-        for esi in 0..5 {
-            store.put_symbol(test_symbol(esi)).await.unwrap();
-        }
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            for esi in 0..5 {
+                store.put_symbol(test_symbol(esi)).await.unwrap();
+            }
 
-        let used_before = store.storage_used().await;
-        assert!(used_before > 0);
+            let used_before = store.storage_used().await;
+            assert!(used_before > 0);
 
-        store.delete_object(&test_object_id()).await.unwrap();
+            store.delete_object(&test_object_id()).await.unwrap();
 
-        assert_eq!(store.storage_used().await, 0);
+            assert_eq!(store.storage_used().await, 0);
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                details: Some(json!({"used_before": used_before})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn quota_enforcement() {
-        let config = MemorySymbolStoreConfig {
-            max_bytes: 100,
-            local_node_id: 0,
-        };
-        let store = MemorySymbolStore::new(config);
+    #[test]
+    fn quota_enforcement() {
+        run_store_test("symbol_quota_enforcement", "verify", "write", 1, || async {
+            let config = MemorySymbolStoreConfig {
+                max_bytes: 200,
+                local_node_id: 0,
+            };
+            let store = MemorySymbolStore::new(config);
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_object_meta(test_object_meta()).await.unwrap();
 
-        // First symbol should fit
-        store.put_symbol(test_symbol(0)).await.unwrap();
+            store.put_symbol(test_symbol(0)).await.unwrap();
 
-        // Second should exceed quota
-        let result = store.put_symbol(test_symbol(1)).await;
-        assert!(matches!(
-            result,
-            Err(SymbolStoreError::QuotaExceeded { .. })
-        ));
+            let result = store.put_symbol(test_symbol(1)).await;
+            assert!(matches!(
+                result,
+                Err(SymbolStoreError::QuotaExceeded { .. })
+            ));
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                symbol_count: Some(1),
+                details: Some(json!({"error": "quota_exceeded"})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn list_zone() {
-        let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    #[test]
+    fn list_zone() {
+        run_store_test("list_zone_symbols", "verify", "list", 1, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-        store.put_object_meta(test_object_meta()).await.unwrap();
+            store.put_object_meta(test_object_meta()).await.unwrap();
 
-        let mut meta2 = test_object_meta();
-        meta2.object_id = ObjectId::from_bytes([2_u8; 32]);
-        store.put_object_meta(meta2).await.unwrap();
+            let mut meta2 = test_object_meta();
+            meta2.object_id = ObjectId::from_bytes([2_u8; 32]);
+            store.put_object_meta(meta2).await.unwrap();
 
-        let ids = store.list_zone(&test_zone()).await;
-        assert_eq!(ids.len(), 2);
+            let ids = store.list_zone(&test_zone()).await;
+            assert_eq!(ids.len(), 2);
+
+            StoreLogData {
+                details: Some(json!({"zone_id": test_zone().to_string(), "count": ids.len()})),
+                ..StoreLogData::default()
+            }
+        });
     }
 }

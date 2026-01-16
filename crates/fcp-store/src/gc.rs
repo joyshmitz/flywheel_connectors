@@ -154,8 +154,7 @@ impl GarbageCollector {
 
         for object_id in evicted_ids {
             match symbol_store.delete_object(&object_id).await {
-                Ok(()) => {}
-                Err(SymbolStoreError::ObjectNotFound(_)) => {}
+                Ok(()) | Err(SymbolStoreError::ObjectNotFound(_)) => {}
                 Err(err) => return Err(GcError::SymbolStore(err)),
             }
         }
@@ -212,13 +211,13 @@ impl GarbageCollector {
                         pinned_count += 1;
                     }
                     RetentionClass::Lease { expires_at } => {
-                        if !self.config.enforce_lease_expiry || expires_at <= current_time {
-                            if store.delete(&object_id).await.is_ok() {
-                                evicted += 1;
-                                evicted_ids.push(object_id);
-                                if expires_at <= current_time {
-                                    expired_leases += 1;
-                                }
+                        if (!self.config.enforce_lease_expiry || expires_at <= current_time)
+                            && store.delete(&object_id).await.is_ok()
+                        {
+                            evicted += 1;
+                            evicted_ids.push(object_id);
+                            if expires_at <= current_time {
+                                expired_leases += 1;
                             }
                         }
                     }
@@ -266,8 +265,8 @@ impl GarbageCollector {
             // Check lease
             if let RetentionClass::Lease { expires_at } = meta.retention {
                 if self.config.enforce_lease_expiry && expires_at > current_time {
-                    // Would not collect if reachable
-                    // Need to check reachability
+                    // Valid lease blocks collection even if unreachable.
+                    return false;
                 }
             }
         }
@@ -547,7 +546,10 @@ mod tests {
             let mut roots = GcRoots::new();
             roots.set_checkpoint(id);
 
-            let result = gc.collect(&test_zone(), &roots, &store, 1000).await.unwrap();
+            let result = gc
+                .collect(&test_zone(), &roots, &store, 1000)
+                .await
+                .unwrap();
 
             assert_eq!(result.evicted, 0);
             assert_eq!(result.expired_leases, 0);
@@ -679,7 +681,7 @@ mod tests {
             ));
             assert!(matches!(
                 symbol_store.get_symbol(&object_id, 0).await,
-                Err(SymbolStoreError::ObjectNotFound(_)) | Err(SymbolStoreError::NotFound { .. })
+                Err(SymbolStoreError::ObjectNotFound(_) | SymbolStoreError::NotFound { .. })
             ));
 
             StoreLogData {

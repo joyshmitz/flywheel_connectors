@@ -4,7 +4,7 @@
 //! as required by the FCP2 store acceptance criteria.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fcp_core::{ObjectId, ZoneId};
 use fcp_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
@@ -16,7 +16,7 @@ fn test_zone() -> ZoneId {
     "z:bench".parse().unwrap()
 }
 
-fn test_object_id(n: u8) -> ObjectId {
+const fn test_object_id(n: u8) -> ObjectId {
     let mut bytes = [0_u8; 32];
     bytes[0] = n;
     ObjectId::from_bytes(bytes)
@@ -66,14 +66,20 @@ fn bench_put_symbol(c: &mut Criterion) {
                     rt.block_on(async {
                         let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
                         let obj_id = test_object_id(1);
-                        store.put_object_meta(test_object_meta(obj_id, 100)).await.unwrap();
+                        store
+                            .put_object_meta(test_object_meta(obj_id, 100))
+                            .await
+                            .unwrap();
 
                         for esi in 0..100 {
-                            store.put_symbol(test_symbol(obj_id, esi, size)).await.unwrap();
+                            store
+                                .put_symbol(test_symbol(obj_id, esi, size))
+                                .await
+                                .unwrap();
                         }
                         black_box(store.symbol_count(&obj_id).await)
-                    })
-                })
+                    });
+                });
             },
         );
     }
@@ -89,9 +95,15 @@ fn bench_get_symbol(c: &mut Criterion) {
 
     // Pre-populate the store
     rt.block_on(async {
-        store.put_object_meta(test_object_meta(obj_id, 1000)).await.unwrap();
+        store
+            .put_object_meta(test_object_meta(obj_id, 1000))
+            .await
+            .unwrap();
         for esi in 0..1000 {
-            store.put_symbol(test_symbol(obj_id, esi, 256)).await.unwrap();
+            store
+                .put_symbol(test_symbol(obj_id, esi, 256))
+                .await
+                .unwrap();
         }
     });
 
@@ -105,8 +117,8 @@ fn bench_get_symbol(c: &mut Criterion) {
                 let result = store.get_symbol(&obj_id, esi % 1000).await.unwrap();
                 esi = esi.wrapping_add(1);
                 black_box(result)
-            })
-        })
+            });
+        });
     });
 
     group.bench_function("sequential_100", |b| {
@@ -115,8 +127,8 @@ fn bench_get_symbol(c: &mut Criterion) {
                 for esi in 0..100 {
                     black_box(store.get_symbol(&obj_id, esi).await.unwrap());
                 }
-            })
-        })
+            });
+        });
     });
 
     group.finish();
@@ -132,9 +144,15 @@ fn bench_get_all_symbols(c: &mut Criterion) {
         let obj_id = test_object_id(1);
 
         rt.block_on(async {
-            store.put_object_meta(test_object_meta(obj_id, symbol_count)).await.unwrap();
+            store
+                .put_object_meta(test_object_meta(obj_id, symbol_count))
+                .await
+                .unwrap();
             for esi in 0..symbol_count {
-                store.put_symbol(test_symbol(obj_id, esi, 256)).await.unwrap();
+                store
+                    .put_symbol(test_symbol(obj_id, esi, 256))
+                    .await
+                    .unwrap();
             }
         });
 
@@ -144,10 +162,8 @@ fn bench_get_all_symbols(c: &mut Criterion) {
             &symbol_count,
             |b, _| {
                 b.iter(|| {
-                    rt.block_on(async {
-                        black_box(store.get_all_symbols(&obj_id).await)
-                    })
-                })
+                    rt.block_on(async { black_box(store.get_all_symbols(&obj_id).await) });
+                });
             },
         );
     }
@@ -166,9 +182,15 @@ fn bench_can_reconstruct(c: &mut Criterion) {
         let obj_id = test_object_id(1);
 
         rt.block_on(async {
-            store.put_object_meta(test_object_meta(obj_id, source_symbols)).await.unwrap();
+            store
+                .put_object_meta(test_object_meta(obj_id, source_symbols))
+                .await
+                .unwrap();
             for esi in 0..stored_symbols {
-                store.put_symbol(test_symbol(obj_id, esi, 256)).await.unwrap();
+                store
+                    .put_symbol(test_symbol(obj_id, esi, 256))
+                    .await
+                    .unwrap();
             }
         });
 
@@ -176,11 +198,7 @@ fn bench_can_reconstruct(c: &mut Criterion) {
             BenchmarkId::new("symbols", format!("{source_symbols}_{stored_symbols}")),
             &(source_symbols, stored_symbols),
             |b, _| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        black_box(store.can_reconstruct(&obj_id).await)
-                    })
-                })
+                b.iter(|| rt.block_on(async { black_box(store.can_reconstruct(&obj_id).await) }));
             },
         );
     }
@@ -198,7 +216,10 @@ fn bench_get_distribution(c: &mut Criterion) {
         let obj_id = test_object_id(1);
 
         rt.block_on(async {
-            store.put_object_meta(test_object_meta(obj_id, symbol_count)).await.unwrap();
+            store
+                .put_object_meta(test_object_meta(obj_id, symbol_count))
+                .await
+                .unwrap();
             for esi in 0..symbol_count {
                 let mut symbol = test_symbol(obj_id, esi, 256);
                 // Distribute across multiple nodes for realistic coverage
@@ -212,11 +233,7 @@ fn bench_get_distribution(c: &mut Criterion) {
             BenchmarkId::from_parameter(symbol_count),
             &symbol_count,
             |b, _| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        black_box(store.get_distribution(&obj_id).await)
-                    })
-                })
+                b.iter(|| rt.block_on(async { black_box(store.get_distribution(&obj_id).await) }));
             },
         );
     }
@@ -236,7 +253,10 @@ fn bench_list_zone(c: &mut Criterion) {
             for obj_idx in 0..object_count {
                 #[allow(clippy::cast_possible_truncation)]
                 let obj_id = test_object_id(obj_idx as u8);
-                store.put_object_meta(test_object_meta(obj_id, 100)).await.unwrap();
+                store
+                    .put_object_meta(test_object_meta(obj_id, 100))
+                    .await
+                    .unwrap();
             }
         });
 
@@ -244,13 +264,7 @@ fn bench_list_zone(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::from_parameter(object_count),
             &object_count,
-            |b, _| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        black_box(store.list_zone(&test_zone()).await)
-                    })
-                })
-            },
+            |b, _| b.iter(|| rt.block_on(async { black_box(store.list_zone(&test_zone()).await) })),
         );
     }
 
