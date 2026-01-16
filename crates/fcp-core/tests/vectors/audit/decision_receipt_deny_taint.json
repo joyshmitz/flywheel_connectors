@@ -1,0 +1,7 @@
+{
+  "description": "Deny decision due to PUBLIC_INPUT taint",
+  "decision": "deny",
+  "reason_code": "PUBLIC_INPUT_TAINT",
+  "evidence_count": 2,
+  "has_explanation": true
+}

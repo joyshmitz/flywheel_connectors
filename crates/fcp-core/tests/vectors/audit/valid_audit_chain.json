@@ -1,0 +1,34 @@
+{
+  "description": "Valid 3-event audit chain",
+  "events": [
+    {
+      "description": "Genesis event",
+      "event_type": "capability.invoke",
+      "seq": 0,
+      "prev_hex": null,
+      "zone_id": "z:work",
+      "actor": "user:alice",
+      "occurred_at": 1700000000
+    },
+    {
+      "description": "Second event",
+      "event_type": "capability.invoke",
+      "seq": 1,
+      "prev_hex": "b5c172a2dd739cb7fd63b7515295a80e67d1eeeba99f6ed0fdca7c5d3f6146e8",
+      "zone_id": "z:work",
+      "actor": "user:alice",
+      "occurred_at": 1700000001
+    },
+    {
+      "description": "Third event",
+      "event_type": "capability.invoke",
+      "seq": 2,
+      "prev_hex": "e7f0da1f17c9efe7c2a24ccbe9167cc97ee75973ded7d2a0cfc321b6881cc55b",
+      "zone_id": "z:work",
+      "actor": "user:alice",
+      "occurred_at": 1700000002
+    }
+  ],
+  "chain_length": 3,
+  "head_seq": 2
+}
