@@ -1206,24 +1206,26 @@ require_transparency_log = true
                 let policy = r#"[policy]
 require_transparency_log = true
 "#;
-                let transparency_entry = format!(
-                    r#"[signatures]
-transparency_log_entry = "objectid:{}"
-"#,
-                    hex::encode([0u8; 32])
-                );
                 let binary = b"registry-binary".to_vec();
                 let binary_hash = hash_bytes(&binary);
                 let unsigned = unsigned_manifest_toml(policy);
                 let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
-                let manifest_toml = with_signatures(
-                    &unsigned,
-                    &format!(
-                        "{signatures}\n{}",
-                        publisher_signature_section("pub1", &sig),
-                        signatures = transparency_entry.trim_end()
-                    ),
+
+                // Create combined signatures section with both publisher sig and transparency entry
+                let signatures_section = format!(
+                    r#"[signatures]
+publisher_threshold = "1-of-1"
+transparency_log_entry = "objectid:{}"
+
+[[signatures.publisher_signatures]]
+kid = "pub1"
+sig = "{}"
+"#,
+                    hex::encode([0u8; 32]),
+                    String::from(sig)
                 );
+
+                let manifest_toml = with_signatures(&unsigned, &signatures_section);
 
                 let bundle = ConnectorBundle {
                     manifest_toml,
