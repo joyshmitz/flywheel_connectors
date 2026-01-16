@@ -181,7 +181,11 @@ impl RepairController {
         }
 
         let mut queue = self.queue.write();
-        let request = queue.pop();
+        let request = if queue.is_empty() {
+            None
+        } else {
+            Some(queue.remove(0))
+        };
         self.stats.write().queue_depth = queue.len();
         request
     }
@@ -251,7 +255,12 @@ impl RepairController {
         let health = coverage.health(policy);
 
         match health {
-            CoverageHealth::Unavailable => 1000, // Highest priority
+            CoverageHealth::Unavailable => {
+                // Highest priority, but differentiate by coverage deficit
+                // Objects with less coverage get higher priority
+                let deficit = coverage.coverage_deficit_bps(policy.target_coverage_bps);
+                1000 + deficit / 100 // 1000-1100+ range (higher deficit = higher priority)
+            }
             CoverageHealth::Degraded => {
                 // Priority based on deficit
                 let deficit = coverage.coverage_deficit_bps(policy.target_coverage_bps);
@@ -369,6 +378,99 @@ impl TargetedRepairRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::{self, AssertUnwindSafe};
+    use std::time::Instant;
+
+    use bytes::Bytes;
+    use chrono::Utc;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use crate::symbol_store::{ObjectTransmissionInfo, StoredSymbol, SymbolMeta};
+    use crate::{MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, SymbolDistribution};
+
+    #[derive(Default)]
+    struct StoreLogData {
+        object_id: Option<ObjectId>,
+        symbol_count: Option<u32>,
+        coverage_bps: Option<u32>,
+        nodes_holding: Option<Vec<String>>,
+        details: Option<serde_json::Value>,
+    }
+
+    fn nodes_from_distribution(dist: &SymbolDistribution) -> Vec<String> {
+        let mut nodes: Vec<String> = dist.nodes.keys().map(|id| format!("node-{id}")).collect();
+        nodes.sort();
+        nodes
+    }
+
+    fn run_store_test<F, Fut>(test_name: &str, phase: &str, operation: &str, assertions: u32, f: F)
+    where
+        F: FnOnce() -> Fut + panic::UnwindSafe,
+        Fut: std::future::Future<Output = StoreLogData>,
+    {
+        let start = Instant::now();
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("runtime");
+            rt.block_on(f())
+        }));
+        let duration_us = start.elapsed().as_micros();
+
+        let (passed, failed, outcome, data) = match &result {
+            Ok(data) => (assertions, 0, "pass", Some(data)),
+            Err(_) => (0, assertions, "fail", None),
+        };
+
+        let log = json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "level": "info",
+            "test_name": test_name,
+            "module": "fcp-store",
+            "phase": phase,
+            "operation": operation,
+            "correlation_id": Uuid::new_v4().to_string(),
+            "result": outcome,
+            "duration_us": duration_us,
+            "object_id": data.and_then(|d| d.object_id).map(|id| id.to_string()),
+            "symbol_count": data.and_then(|d| d.symbol_count),
+            "coverage_bps": data.and_then(|d| d.coverage_bps),
+            "nodes_holding": data.and_then(|d| d.nodes_holding.clone()),
+            "details": data.and_then(|d| d.details.clone()),
+            "assertions": {
+                "passed": passed,
+                "failed": failed
+            }
+        });
+        println!("{log}");
+
+        if let Err(payload) = result {
+            panic::resume_unwind(payload);
+        }
+    }
+
+    fn log_repair_action(
+        object_id: &ObjectId,
+        source_node: u64,
+        target_node: u64,
+        coverage_before: u32,
+        coverage_after: u32,
+        reason_code: &str,
+    ) {
+        let log = json!({
+            "repair_action": "replicate",
+            "object_id": object_id.to_string(),
+            "source_node": format!("node-{source_node}"),
+            "target_node": format!("node-{target_node}"),
+            "coverage_before_bps": coverage_before,
+            "coverage_after_bps": coverage_after,
+            "reason_code": reason_code,
+        });
+        println!("{log}");
+    }
 
     fn test_coverage(total: u32, source: u32) -> CoverageEvaluation {
         CoverageEvaluation {
@@ -433,14 +535,26 @@ mod tests {
         let controller = RepairController::new(RepairControllerConfig::default());
         let policy = test_policy();
 
-        // Unavailable = highest priority
+        // Unavailable = highest priority (1000 + deficit-based increment)
+        // 5/10 symbols = 50% coverage = 5000 bps, target = 10000 bps, deficit = 5000 bps
+        // priority = 1000 + 5000/100 = 1050
         let unavailable = test_coverage(5, 10);
-        assert_eq!(controller.calculate_priority(&unavailable, &policy), 1000);
+        let priority = controller.calculate_priority(&unavailable, &policy);
+        assert!(priority >= 1000, "unavailable should have priority >= 1000");
+        assert_eq!(priority, 1050, "5/10 symbols should have priority 1050");
 
         // Degraded = medium priority
-        let degraded = test_coverage(9, 10); // 10% deficit
+        let degraded = CoverageEvaluation {
+            object_id: ObjectId::from_bytes([2; 32]),
+            distinct_nodes: 1,
+            max_node_fraction_bps: 10_000,
+            coverage_bps: 9_000,
+            is_available: true,
+            total_symbols: 10,
+            source_symbols: 10,
+        };
         let priority = controller.calculate_priority(&degraded, &policy);
-        assert!(priority >= 100 && priority < 200);
+        assert!((100..200).contains(&priority));
 
         // Healthy = no priority
         let healthy = test_coverage(10, 10);
@@ -612,5 +726,401 @@ mod tests {
 
         controller.clear_queue();
         assert_eq!(controller.queue_depth(), 0);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn repair_loop_improves_coverage() {
+        run_store_test(
+            "repair_loop_improves_coverage",
+            "verify",
+            "repair",
+            3,
+            || async {
+                let zone_id: ZoneId = "z:store-sim".parse().unwrap();
+                let object_id = ObjectId::from_bytes([7; 32]);
+                let source_symbols: u32 = 10;
+                let symbol_size: u16 = 64;
+                let mut rng = StdRng::seed_from_u64(0x5EED);
+
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+
+                let meta = ObjectSymbolMeta {
+                    object_id,
+                    zone_id: zone_id.clone(),
+                    oti: ObjectTransmissionInfo {
+                        transfer_length: u64::from(source_symbols) * u64::from(symbol_size),
+                        symbol_size,
+                        source_blocks: 1,
+                        sub_blocks: 1,
+                        alignment: 8,
+                    },
+                    source_symbols,
+                    first_symbol_at: 1_000_000,
+                };
+
+                store.put_object_meta(meta).await.unwrap();
+
+                let mut next_esi = 0_u32;
+                for _ in 0..5 {
+                    let node = if rng.gen_bool(0.5) { 1 } else { 2 };
+                    let symbol = StoredSymbol {
+                        meta: SymbolMeta {
+                            object_id,
+                            esi: next_esi,
+                            zone_id: zone_id.clone(),
+                            source_node: Some(node),
+                            stored_at: 1_000_000 + u64::from(next_esi),
+                        },
+                        data: Bytes::from(vec![0_u8; symbol_size as usize]),
+                    };
+                    store.put_symbol(symbol).await.unwrap();
+                    next_esi += 1;
+                }
+
+                let policy = ObjectPlacementPolicy {
+                    min_nodes: 2,
+                    max_node_fraction_bps: 7000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10000,
+                };
+
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 16,
+                    ..Default::default()
+                });
+
+                let mut policies = HashMap::new();
+                policies.insert(object_id, policy.clone());
+
+                controller.evaluate_zone(&zone_id, &store, &policies).await;
+
+                let before_dist = store.get_distribution(&object_id).await.unwrap();
+                let before_eval = CoverageEvaluation::from_distribution(object_id, &before_dist);
+
+                assert!(controller.queue_depth() > 0);
+
+                if let Some(request) = controller.next_repair() {
+                    let _permit = controller.try_acquire_permit().expect("permit");
+                    let needed = request
+                        .coverage
+                        .symbols_needed(request.policy.target_coverage_bps);
+                    let to_add = needed.min(controller.config().max_symbols_per_repair);
+
+                    for _ in 0..to_add {
+                        let node = if rng.gen_bool(0.5) { 1 } else { 3 };
+                        let symbol = StoredSymbol {
+                            meta: SymbolMeta {
+                                object_id,
+                                esi: next_esi,
+                                zone_id: zone_id.clone(),
+                                source_node: Some(node),
+                                stored_at: 1_000_500 + u64::from(next_esi),
+                            },
+                            data: Bytes::from(vec![1_u8; symbol_size as usize]),
+                        };
+                        store.put_symbol(symbol).await.unwrap();
+                        next_esi += 1;
+                    }
+
+                    let after_dist = store.get_distribution(&object_id).await.unwrap();
+                    let after_eval = CoverageEvaluation::from_distribution(object_id, &after_dist);
+
+                    log_repair_action(
+                        &object_id,
+                        1,
+                        3,
+                        request.coverage.coverage_bps,
+                        after_eval.coverage_bps,
+                        "BELOW_THRESHOLD",
+                    );
+
+                    controller.record_result(&RepairResult {
+                        object_id,
+                        success: true,
+                        new_coverage_bps: after_eval.coverage_bps,
+                        symbols_added: to_add,
+                        error: None,
+                    });
+                }
+
+                let after_dist = store.get_distribution(&object_id).await.unwrap();
+                let after_eval = CoverageEvaluation::from_distribution(object_id, &after_dist);
+
+                assert!(after_eval.coverage_bps >= policy.target_coverage_bps);
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    symbol_count: Some(after_dist.total_symbols),
+                    coverage_bps: Some(after_eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&after_dist)),
+                    details: Some(json!({
+                        "coverage_before_bps": before_eval.coverage_bps,
+                        "coverage_after_bps": after_eval.coverage_bps,
+                    })),
+                }
+            },
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn repair_respects_budget_and_idempotent() {
+        run_store_test(
+            "repair_respects_budget_and_idempotent",
+            "verify",
+            "repair",
+            4,
+            || async {
+                let zone_id: ZoneId = "z:store-sim".parse().unwrap();
+                let object_id = ObjectId::from_bytes([9; 32]);
+                let source_symbols: u32 = 10;
+                let symbol_size: u16 = 64;
+
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 2,
+                });
+
+                let meta = ObjectSymbolMeta {
+                    object_id,
+                    zone_id: zone_id.clone(),
+                    oti: ObjectTransmissionInfo {
+                        transfer_length: u64::from(source_symbols) * u64::from(symbol_size),
+                        symbol_size,
+                        source_blocks: 1,
+                        sub_blocks: 1,
+                        alignment: 8,
+                    },
+                    source_symbols,
+                    first_symbol_at: 2_000_000,
+                };
+
+                store.put_object_meta(meta).await.unwrap();
+
+                let mut next_esi = 0_u32;
+                for node in [2_u64, 3_u64, 2_u64, 3_u64, 2_u64, 3_u64] {
+                    let symbol = StoredSymbol {
+                        meta: SymbolMeta {
+                            object_id,
+                            esi: next_esi,
+                            zone_id: zone_id.clone(),
+                            source_node: Some(node),
+                            stored_at: 2_000_000 + u64::from(next_esi),
+                        },
+                        data: Bytes::from(vec![2_u8; symbol_size as usize]),
+                    };
+                    store.put_symbol(symbol).await.unwrap();
+                    next_esi += 1;
+                }
+
+                let policy = ObjectPlacementPolicy {
+                    min_nodes: 2,
+                    max_node_fraction_bps: 8000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10000,
+                };
+
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 2,
+                    ..Default::default()
+                });
+
+                let mut policies = HashMap::new();
+                policies.insert(object_id, policy.clone());
+
+                controller.evaluate_zone(&zone_id, &store, &policies).await;
+                let before_dist = store.get_distribution(&object_id).await.unwrap();
+                let before_eval = CoverageEvaluation::from_distribution(object_id, &before_dist);
+
+                let mut total_added = 0_u32;
+                for _ in 0..2 {
+                    if let Some(request) = controller.next_repair() {
+                        let _permit = controller.try_acquire_permit().expect("permit");
+                        let needed = request
+                            .coverage
+                            .symbols_needed(request.policy.target_coverage_bps);
+                        let to_add = needed.min(controller.config().max_symbols_per_repair);
+                        total_added += to_add;
+
+                        for _ in 0..to_add {
+                            let symbol = StoredSymbol {
+                                meta: SymbolMeta {
+                                    object_id,
+                                    esi: next_esi,
+                                    zone_id: zone_id.clone(),
+                                    source_node: Some(4),
+                                    stored_at: 2_000_500 + u64::from(next_esi),
+                                },
+                                data: Bytes::from(vec![3_u8; symbol_size as usize]),
+                            };
+                            store.put_symbol(symbol).await.unwrap();
+                            next_esi += 1;
+                        }
+
+                        let after_dist = store.get_distribution(&object_id).await.unwrap();
+                        let after_eval =
+                            CoverageEvaluation::from_distribution(object_id, &after_dist);
+
+                        log_repair_action(
+                            &object_id,
+                            2,
+                            4,
+                            request.coverage.coverage_bps,
+                            after_eval.coverage_bps,
+                            "BELOW_THRESHOLD",
+                        );
+
+                        controller.record_result(&RepairResult {
+                            object_id,
+                            success: true,
+                            new_coverage_bps: after_eval.coverage_bps,
+                            symbols_added: to_add,
+                            error: None,
+                        });
+                    }
+
+                    controller.evaluate_zone(&zone_id, &store, &policies).await;
+                }
+
+                let after_dist = store.get_distribution(&object_id).await.unwrap();
+                let after_eval = CoverageEvaluation::from_distribution(object_id, &after_dist);
+
+                assert!(total_added <= 4);
+                assert!(after_eval.coverage_bps >= policy.target_coverage_bps);
+
+                controller.evaluate_zone(&zone_id, &store, &policies).await;
+                assert_eq!(controller.queue_depth(), 0);
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    symbol_count: Some(after_dist.total_symbols),
+                    coverage_bps: Some(after_eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&after_dist)),
+                    details: Some(json!({
+                        "coverage_before_bps": before_eval.coverage_bps,
+                        "coverage_after_bps": after_eval.coverage_bps,
+                        "symbols_added": total_added,
+                    })),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn repair_prioritizes_unavailable_objects() {
+        run_store_test(
+            "repair_prioritizes_unavailable_objects",
+            "verify",
+            "repair",
+            2,
+            || async {
+                let zone_id: ZoneId = "z:store-sim".parse().unwrap();
+                let object_a = ObjectId::from_bytes([0xAA; 32]);
+                let object_b = ObjectId::from_bytes([0xBB; 32]);
+                let source_symbols: u32 = 10;
+                let symbol_size: u16 = 32;
+
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 3,
+                });
+
+                for object_id in [object_a, object_b] {
+                    let meta = ObjectSymbolMeta {
+                        object_id,
+                        zone_id: zone_id.clone(),
+                        oti: ObjectTransmissionInfo {
+                            transfer_length: u64::from(source_symbols) * u64::from(symbol_size),
+                            symbol_size,
+                            source_blocks: 1,
+                            sub_blocks: 1,
+                            alignment: 8,
+                        },
+                        source_symbols,
+                        first_symbol_at: 3_000_000,
+                    };
+                    store.put_object_meta(meta).await.unwrap();
+                }
+
+                let mut next_esi = 0_u32;
+                for _ in 0..4 {
+                    let symbol = StoredSymbol {
+                        meta: SymbolMeta {
+                            object_id: object_a,
+                            esi: next_esi,
+                            zone_id: zone_id.clone(),
+                            source_node: Some(1),
+                            stored_at: 3_000_000 + u64::from(next_esi),
+                        },
+                        data: Bytes::from(vec![4_u8; symbol_size as usize]),
+                    };
+                    store.put_symbol(symbol).await.unwrap();
+                    next_esi += 1;
+                }
+
+                for _ in 0..9 {
+                    let symbol = StoredSymbol {
+                        meta: SymbolMeta {
+                            object_id: object_b,
+                            esi: next_esi,
+                            zone_id: zone_id.clone(),
+                            source_node: Some(2),
+                            stored_at: 3_000_500 + u64::from(next_esi),
+                        },
+                        data: Bytes::from(vec![5_u8; symbol_size as usize]),
+                    };
+                    store.put_symbol(symbol).await.unwrap();
+                    next_esi += 1;
+                }
+
+                let policy = ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10000,
+                };
+
+                let controller = RepairController::new(RepairControllerConfig {
+                    min_deficit_bps: 100,
+                    max_symbols_per_repair: 4,
+                    ..Default::default()
+                });
+
+                let mut policies = HashMap::new();
+                policies.insert(object_a, policy.clone());
+                policies.insert(object_b, policy.clone());
+
+                controller.evaluate_zone(&zone_id, &store, &policies).await;
+
+                let first = controller.next_repair().expect("first repair");
+                let second = controller.next_repair().expect("second repair");
+
+                assert_eq!(first.object_id, object_a);
+                assert_eq!(second.object_id, object_b);
+
+                let dist = store.get_distribution(&object_a).await.unwrap();
+                let eval = CoverageEvaluation::from_distribution(object_a, &dist);
+
+                StoreLogData {
+                    object_id: Some(object_a),
+                    symbol_count: Some(dist.total_symbols),
+                    coverage_bps: Some(eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&dist)),
+                    details: Some(json!({
+                        "first_repair_object": first.object_id.to_string(),
+                        "second_repair_object": second.object_id.to_string(),
+                    })),
+                }
+            },
+        );
     }
 }
