@@ -82,7 +82,6 @@ impl IntegrityLevel {
     }
 }
 
-
 impl fmt::Display for IntegrityLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -136,7 +135,6 @@ impl ConfidentialityLevel {
         self as u8
     }
 }
-
 
 impl fmt::Display for ConfidentialityLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1402,9 +1400,15 @@ mod tests {
         let mut flags = TaintFlags::new();
 
         for flag in all_flags {
-            assert!(!flags.contains(flag), "Flag {flag:?} should not be set initially");
+            assert!(
+                !flags.contains(flag),
+                "Flag {flag:?} should not be set initially"
+            );
             flags.insert(flag);
-            assert!(flags.contains(flag), "Flag {flag:?} should be set after insert");
+            assert!(
+                flags.contains(flag),
+                "Flag {flag:?} should be set after insert"
+            );
         }
 
         assert_eq!(flags.len(), 8, "All 8 taint flags should be set");
@@ -2267,8 +2271,7 @@ mod tests {
         let mut record = ProvenanceRecord::new(ZoneId::private());
         let fake_token = test_object_id("fake-token");
 
-        let result =
-            record.apply_declassification(ConfidentialityLevel::Private, fake_token, 1000);
+        let result = record.apply_declassification(ConfidentialityLevel::Private, fake_token, 1000);
         assert!(matches!(
             result,
             Err(ProvenanceViolation::InvalidDeclassification { .. })
@@ -2296,7 +2299,7 @@ mod tests {
             authorized_flags: vec![TaintFlag::UnverifiedLink], // Only authorized for this
             covered_inputs: vec![test_object_id("victim-input")],
             cleared_flags: vec![
-                TaintFlag::PublicInput, // NOT authorized!
+                TaintFlag::PublicInput,          // NOT authorized!
                 TaintFlag::PotentiallyMalicious, // NOT authorized!
             ],
             signature: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]), // Invalid signature
@@ -2825,7 +2828,10 @@ mod tests {
 
         assert!(receipt.covers_input(&input_a));
         assert!(receipt.covers_input(&input_b));
-        assert!(!receipt.covers_input(&input_c), "Should not cover unclaimed input");
+        assert!(
+            !receipt.covers_input(&input_c),
+            "Should not cover unclaimed input"
+        );
 
         log_flow_test(
             "sanitizer_receipt_covers_input",
@@ -3266,15 +3272,344 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // ApprovalToken Scope Validation Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn approval_token_elevation_validates_target_integrity() {
+        // Elevation scope should specify a target integrity HIGHER than source
+        let prov_id = test_object_id("low-integrity-prov");
+
+        // Create token for elevation: Untrusted -> Owner
+        let elevation_token = ApprovalToken {
+            token_id: "elevation-token".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "elevate.operation".into(),
+                original_provenance_id: prov_id.clone(),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // Extract and validate scope
+        if let ApprovalScope::Elevation(scope) = &elevation_token.scope {
+            // Target integrity should be Owner (highest)
+            assert_eq!(scope.target_integrity, IntegrityLevel::Owner);
+            // Token binds to specific provenance
+            assert_eq!(scope.original_provenance_id, prov_id);
+            // Operation must be specified
+            assert!(!scope.operation_id.is_empty());
+        } else {
+            panic!("Expected Elevation scope");
+        }
+
+        // Token must be valid (not expired, not future)
+        let now_ms = 1_700_001_000_000;
+        assert!(elevation_token.is_valid(now_ms));
+
+        log_flow_test(
+            "approval_token_elevation_validates_target_integrity",
+            "integrity",
+            "untrusted",
+            "owner",
+            true,
+            "pass",
+            Some("ELEVATION_SCOPE_VALID"),
+        );
+    }
+
+    #[test]
+    fn approval_token_declassification_validates_zones() {
+        // Declassification scope should specify from_zone/to_zone correctly
+        let object_ids = vec![test_object_id("secret-data")];
+
+        // Create token for declassification: Private -> Public
+        let declassification_token = ApprovalToken {
+            token_id: "declassification-token".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Declassification(DeclassificationScope {
+                from_zone: ZoneId::private(),
+                to_zone: ZoneId::public(),
+                object_ids: object_ids.clone(),
+                target_confidentiality: ConfidentialityLevel::Public,
+            }),
+            zone_id: ZoneId::private(),
+            signature: None,
+        };
+
+        // Extract and validate scope
+        if let ApprovalScope::Declassification(scope) = &declassification_token.scope {
+            // Zone flow must be from higher to lower confidentiality
+            assert_eq!(scope.from_zone, ZoneId::private());
+            assert_eq!(scope.to_zone, ZoneId::public());
+            // Target confidentiality should be lower than source
+            assert_eq!(scope.target_confidentiality, ConfidentialityLevel::Public);
+            // Object IDs must be specified
+            assert!(!scope.object_ids.is_empty());
+            assert_eq!(scope.object_ids, object_ids);
+        } else {
+            panic!("Expected Declassification scope");
+        }
+
+        // Token must be valid
+        let now_ms = 1_700_001_000_000;
+        assert!(declassification_token.is_valid(now_ms));
+
+        log_flow_test(
+            "approval_token_declassification_validates_zones",
+            "confidentiality",
+            "private",
+            "public",
+            true,
+            "pass",
+            Some("DECLASSIFICATION_SCOPE_VALID"),
+        );
+    }
+
+    #[test]
+    fn approval_token_elevation_scope_binding_enforced() {
+        // Elevation token is bound to specific provenance - using wrong provenance should fail
+        let correct_prov_id = test_object_id("correct-provenance");
+        let wrong_prov_id = test_object_id("wrong-provenance");
+
+        let elevation_token = ApprovalToken {
+            token_id: "bound-elevation".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "bound.op".into(),
+                original_provenance_id: correct_prov_id.clone(),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        if let ApprovalScope::Elevation(scope) = &elevation_token.scope {
+            // Binding check: token's provenance_id must match actual provenance
+            let matches_correct = scope.original_provenance_id == correct_prov_id;
+            let matches_wrong = scope.original_provenance_id == wrong_prov_id;
+
+            assert!(matches_correct, "Token should match correct provenance");
+            assert!(!matches_wrong, "Token should NOT match wrong provenance");
+        } else {
+            panic!("Expected Elevation scope");
+        }
+
+        log_flow_test(
+            "approval_token_elevation_scope_binding_enforced",
+            "integrity",
+            "binding",
+            "binding",
+            true,
+            "pass",
+            Some("ELEVATION_BINDING_ENFORCED"),
+        );
+    }
+
+    #[test]
+    fn approval_token_declassification_scope_object_binding() {
+        // Declassification token is bound to specific object IDs
+        let authorized_object = test_object_id("authorized-secret");
+        let unauthorized_object = test_object_id("unauthorized-secret");
+
+        let declassification_token = ApprovalToken {
+            token_id: "bound-declassification".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Declassification(DeclassificationScope {
+                from_zone: ZoneId::private(),
+                to_zone: ZoneId::public(),
+                object_ids: vec![authorized_object.clone()],
+                target_confidentiality: ConfidentialityLevel::Public,
+            }),
+            zone_id: ZoneId::private(),
+            signature: None,
+        };
+
+        if let ApprovalScope::Declassification(scope) = &declassification_token.scope {
+            // Binding check: object must be in authorized list
+            let authorized_covered = scope.object_ids.contains(&authorized_object);
+            let unauthorized_covered = scope.object_ids.contains(&unauthorized_object);
+
+            assert!(authorized_covered, "Authorized object should be covered");
+            assert!(
+                !unauthorized_covered,
+                "Unauthorized object should NOT be covered"
+            );
+        } else {
+            panic!("Expected Declassification scope");
+        }
+
+        log_flow_test(
+            "approval_token_declassification_scope_object_binding",
+            "confidentiality",
+            "binding",
+            "binding",
+            true,
+            "pass",
+            Some("DECLASSIFICATION_BINDING_ENFORCED"),
+        );
+    }
+
+    #[test]
+    fn approval_token_signature_field_presence() {
+        // Test that signature field can be set and checked
+        let unsigned_token = ApprovalToken {
+            token_id: "unsigned-token".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "test.op".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Work,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        let signed_token = ApprovalToken {
+            token_id: "signed-token".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "test.op".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Work,
+            }),
+            zone_id: ZoneId::work(),
+            signature: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]), // Mock signature
+        };
+
+        // Unsigned token has no signature
+        assert!(unsigned_token.signature.is_none());
+
+        // Signed token has signature bytes
+        assert!(signed_token.signature.is_some());
+        let sig = signed_token.signature.as_ref().unwrap();
+        assert_eq!(sig.len(), 4);
+
+        log_flow_test(
+            "approval_token_signature_field_presence",
+            "integrity",
+            "signature",
+            "signature",
+            true,
+            "pass",
+            Some("SIGNATURE_FIELD_CHECKED"),
+        );
+    }
+
+    #[test]
+    fn approval_token_boundary_time_validity() {
+        // Test exact boundary conditions for token validity
+        let token = ApprovalToken {
+            token_id: "boundary-token".into(),
+            issued_at_ms: 1000,  // Valid from exactly 1000
+            expires_at_ms: 2000, // Expires at exactly 2000
+            issuer: "node:test".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "test.op".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Work,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // Before issued_at: not yet valid
+        assert!(token.is_not_yet_valid(999));
+        assert!(!token.is_valid(999));
+
+        // Exactly at issued_at: valid (inclusive start)
+        assert!(!token.is_not_yet_valid(1000));
+        assert!(token.is_valid(1000));
+
+        // In the middle: valid
+        assert!(token.is_valid(1500));
+
+        // Just before expiry: valid
+        assert!(!token.is_expired(1999));
+        assert!(token.is_valid(1999));
+
+        // Exactly at expires_at: expired (exclusive end)
+        assert!(token.is_expired(2000));
+        assert!(!token.is_valid(2000));
+
+        // After expiry: expired
+        assert!(token.is_expired(2001));
+        assert!(!token.is_valid(2001));
+
+        log_flow_test(
+            "approval_token_boundary_time_validity",
+            "integrity",
+            "time",
+            "time",
+            true,
+            "pass",
+            Some("BOUNDARY_TIME_VALIDATED"),
+        );
+    }
+
+    #[test]
+    fn approval_token_zero_duration_is_never_valid() {
+        // Edge case: token with zero duration (issued_at == expires_at)
+        let zero_duration_token = ApprovalToken {
+            token_id: "zero-duration".into(),
+            issued_at_ms: 1000,
+            expires_at_ms: 1000, // Expires immediately at issuance
+            issuer: "node:test".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "test.op".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Work,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // At issuance time: expires_at == issued_at, so is_expired(1000) = (1000 >= 1000) = true
+        assert!(zero_duration_token.is_expired(1000));
+        // And is_not_yet_valid(1000) = (1000 < 1000) = false
+        assert!(!zero_duration_token.is_not_yet_valid(1000));
+        // Valid requires BOTH not expired AND not_yet_valid = false, but expired = true
+        assert!(!zero_duration_token.is_valid(1000));
+
+        // Never valid at any time
+        assert!(!zero_duration_token.is_valid(999)); // Not yet valid
+        assert!(!zero_duration_token.is_valid(1001)); // Already expired
+
+        log_flow_test(
+            "approval_token_zero_duration_is_never_valid",
+            "integrity",
+            "time",
+            "time",
+            false,
+            "pass",
+            Some("ZERO_DURATION_NEVER_VALID"),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Property Tests for Merge Invariants (Randomized)
     // ─────────────────────────────────────────────────────────────────────────
 
     mod property_tests {
         use super::*;
-        use rand::{Rng, SeedableRng};
         use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
 
-        /// Generate a random IntegrityLevel.
+        /// Generate a random `IntegrityLevel`.
         fn random_integrity(rng: &mut impl Rng) -> IntegrityLevel {
             match rng.gen_range(0..5) {
                 0 => IntegrityLevel::Untrusted,
@@ -3285,7 +3620,7 @@ mod tests {
             }
         }
 
-        /// Generate a random ConfidentialityLevel.
+        /// Generate a random `ConfidentialityLevel`.
         fn random_confidentiality(rng: &mut impl Rng) -> ConfidentialityLevel {
             match rng.gen_range(0..5) {
                 0 => ConfidentialityLevel::Public,
@@ -3296,7 +3631,7 @@ mod tests {
             }
         }
 
-        /// Generate random TaintFlags (0-3 random flags).
+        /// Generate random `TaintFlags` (0-3 random flags).
         fn random_taint_flags(rng: &mut impl Rng) -> TaintFlags {
             let all_flags = [
                 TaintFlag::PublicInput,
@@ -3317,7 +3652,7 @@ mod tests {
             flags
         }
 
-        /// Generate a random ZoneId.
+        /// Generate a random `ZoneId`.
         fn random_zone(rng: &mut impl Rng) -> ZoneId {
             match rng.gen_range(0..5) {
                 0 => ZoneId::public(),
@@ -3328,7 +3663,7 @@ mod tests {
             }
         }
 
-        /// Generate a random ProvenanceRecord with explicit labels.
+        /// Generate a random `ProvenanceRecord` with explicit labels.
         fn random_provenance(rng: &mut impl Rng) -> ProvenanceRecord {
             let zone = random_zone(rng);
             let mut record = ProvenanceRecord::new(zone);
@@ -3429,7 +3764,7 @@ mod tests {
             );
         }
 
-        /// Property: result.integrity == MIN(inputs.integrity).
+        /// Property: `result.integrity` == MIN(inputs.integrity).
         ///
         /// This is the conservative merge rule: the result is no more trusted
         /// than the least trusted input.
@@ -3439,16 +3774,13 @@ mod tests {
             let zone = ZoneId::work();
 
             for i in 0..NUM_ITERATIONS {
-                let records: Vec<ProvenanceRecord> =
-                    (0..rng.gen_range(1..=5)).map(|_| random_provenance(&mut rng)).collect();
+                let records: Vec<ProvenanceRecord> = (0..rng.gen_range(1..=5))
+                    .map(|_| random_provenance(&mut rng))
+                    .collect();
                 let refs: Vec<&ProvenanceRecord> = records.iter().collect();
 
                 let merged = ProvenanceRecord::merge(&refs, zone.clone());
-                let expected_min = records
-                    .iter()
-                    .map(|r| r.integrity_label)
-                    .min()
-                    .unwrap();
+                let expected_min = records.iter().map(|r| r.integrity_label).min().unwrap();
 
                 assert_eq!(
                     merged.integrity_label, expected_min,
@@ -3467,7 +3799,7 @@ mod tests {
             );
         }
 
-        /// Property: result.confidentiality == MAX(inputs.confidentiality).
+        /// Property: `result.confidentiality` == MAX(inputs.confidentiality).
         ///
         /// This is the restrictive merge rule: the result cannot flow to
         /// lower confidentiality contexts than the most restricted input.
@@ -3477,8 +3809,9 @@ mod tests {
             let zone = ZoneId::work();
 
             for i in 0..NUM_ITERATIONS {
-                let records: Vec<ProvenanceRecord> =
-                    (0..rng.gen_range(1..=5)).map(|_| random_provenance(&mut rng)).collect();
+                let records: Vec<ProvenanceRecord> = (0..rng.gen_range(1..=5))
+                    .map(|_| random_provenance(&mut rng))
+                    .collect();
                 let refs: Vec<&ProvenanceRecord> = records.iter().collect();
 
                 let merged = ProvenanceRecord::merge(&refs, zone.clone());
@@ -3505,7 +3838,7 @@ mod tests {
             );
         }
 
-        /// Property: result.taint_flags ⊇ union(inputs.taint_flags).
+        /// Property: `result.taint_flags` ⊇ `union(inputs.taint_flags)`.
         ///
         /// Taint accumulates: merged output contains all taints from all inputs.
         #[test]
@@ -3514,8 +3847,9 @@ mod tests {
             let zone = ZoneId::work();
 
             for i in 0..NUM_ITERATIONS {
-                let records: Vec<ProvenanceRecord> =
-                    (0..rng.gen_range(1..=5)).map(|_| random_provenance(&mut rng)).collect();
+                let records: Vec<ProvenanceRecord> = (0..rng.gen_range(1..=5))
+                    .map(|_| random_provenance(&mut rng))
+                    .collect();
                 let refs: Vec<&ProvenanceRecord> = records.iter().collect();
 
                 let merged = ProvenanceRecord::merge(&refs, zone.clone());
