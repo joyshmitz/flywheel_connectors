@@ -11,6 +11,7 @@
 
 mod audit;
 mod capability;
+mod checkpoint;
 mod connector;
 mod error;
 mod event;
@@ -26,6 +27,7 @@ mod revocation;
 
 pub use audit::*;
 pub use capability::*;
+pub use checkpoint::*;
 pub use connector::*;
 pub use error::*;
 pub use event::*;
