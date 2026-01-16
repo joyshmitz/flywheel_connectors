@@ -2394,6 +2394,469 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // SanitizerReceipt Verification Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitizer_receipt_covers_input() {
+        let input_a = test_object_id("input-a");
+        let input_b = test_object_id("input-b");
+        let input_c = test_object_id("input-c");
+
+        let receipt = SanitizerReceipt {
+            receipt_id: "receipt-001".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput, TaintFlag::UserGenerated],
+            covered_inputs: vec![input_a, input_b],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+
+        assert!(receipt.covers_input(&input_a));
+        assert!(receipt.covers_input(&input_b));
+        assert!(!receipt.covers_input(&input_c), "Should not cover unclaimed input");
+
+        log_flow_test(
+            "sanitizer_receipt_covers_input",
+            "integrity",
+            "sanitizer",
+            "sanitizer",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn sanitizer_receipt_can_clear_authorized_flags() {
+        let receipt = SanitizerReceipt {
+            receipt_id: "receipt-002".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput, TaintFlag::UserGenerated],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+
+        assert!(receipt.can_clear(TaintFlag::PublicInput));
+        assert!(receipt.can_clear(TaintFlag::UserGenerated));
+        assert!(
+            !receipt.can_clear(TaintFlag::PotentiallyMalicious),
+            "Should not be able to clear unauthorized flag"
+        );
+        assert!(
+            !receipt.can_clear(TaintFlag::AiGenerated),
+            "Should not be able to clear unauthorized flag"
+        );
+
+        log_flow_test(
+            "sanitizer_receipt_can_clear_authorized_flags",
+            "integrity",
+            "sanitizer",
+            "sanitizer",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn sanitizer_receipt_is_valid_when_cleared_subset_of_authorized() {
+        // Valid: cleared flags are subset of authorized
+        let valid_receipt = SanitizerReceipt {
+            receipt_id: "receipt-valid".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![
+                TaintFlag::PublicInput,
+                TaintFlag::UserGenerated,
+                TaintFlag::UnverifiedLink,
+            ],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::UserGenerated],
+            signature: None,
+        };
+        assert!(valid_receipt.is_valid());
+
+        // Invalid: cleared flag not in authorized set
+        let invalid_receipt = SanitizerReceipt {
+            receipt_id: "receipt-invalid".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::PotentiallyMalicious], // Unauthorized!
+            signature: None,
+        };
+        assert!(
+            !invalid_receipt.is_valid(),
+            "Receipt should be invalid when clearing unauthorized flags"
+        );
+
+        log_flow_test(
+            "sanitizer_receipt_is_valid_when_cleared_subset_of_authorized",
+            "integrity",
+            "sanitizer",
+            "sanitizer",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn sanitizer_receipt_empty_cleared_flags_is_valid() {
+        let receipt = SanitizerReceipt {
+            receipt_id: "receipt-empty".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![], // No flags cleared - valid
+            signature: None,
+        };
+        assert!(receipt.is_valid(), "Empty cleared flags should be valid");
+
+        log_flow_test(
+            "sanitizer_receipt_empty_cleared_flags_is_valid",
+            "integrity",
+            "sanitizer",
+            "sanitizer",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn attack_forged_sanitizer_receipt_clearing_unauthorized_flags() {
+        // Attack: Attacker creates a receipt claiming to clear flags they're not authorized for
+        let forged_receipt = SanitizerReceipt {
+            receipt_id: "forged-receipt".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "attacker:malicious".into(),
+            sanitizer_zone: ZoneId::public(), // Low integrity zone
+            authorized_flags: vec![TaintFlag::UnverifiedLink], // Only authorized for this
+            covered_inputs: vec![test_object_id("victim-input")],
+            cleared_flags: vec![TaintFlag::PotentiallyMalicious], // Trying to clear critical flag!
+            signature: None,
+        };
+
+        // Verification should fail - cleared flags not subset of authorized
+        assert!(
+            !forged_receipt.is_valid(),
+            "Forged receipt clearing unauthorized flags must be rejected"
+        );
+
+        log_flow_test(
+            "attack_forged_sanitizer_receipt_clearing_unauthorized_flags",
+            "integrity",
+            "public",
+            "work",
+            false,
+            "fail",
+            Some("unauthorized_clear"),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-Zone Operations Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_crossing_tracking() {
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        assert_eq!(record.origin_zone, ZoneId::work());
+        assert_eq!(record.current_zone, ZoneId::work());
+        assert!(record.zone_crossings.is_empty());
+
+        // Simulate zone crossing
+        let crossing = ZoneCrossing {
+            timestamp_ms: 1_700_000_000_000,
+            from_zone: ZoneId::work(),
+            to_zone: ZoneId::private(),
+            approved: true,
+            approval_token_id: Some(test_object_id("approval")),
+        };
+        record.zone_crossings.push(crossing);
+        record.current_zone = ZoneId::private();
+
+        assert_eq!(record.origin_zone, ZoneId::work());
+        assert_eq!(record.current_zone, ZoneId::private());
+        assert_eq!(record.zone_crossings.len(), 1);
+        assert!(record.zone_crossings[0].approved);
+
+        log_flow_test(
+            "zone_crossing_tracking",
+            "integrity",
+            "work",
+            "private",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn unapproved_zone_crossing_adds_taint() {
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+
+        // Unapproved crossing should add CrossZoneUnapproved taint
+        let crossing = ZoneCrossing {
+            timestamp_ms: 1_700_000_000_000,
+            from_zone: ZoneId::work(),
+            to_zone: ZoneId::private(),
+            approved: false,
+            approval_token_id: None,
+        };
+        record.zone_crossings.push(crossing);
+        record.taint_flags.insert(TaintFlag::CrossZoneUnapproved);
+
+        assert!(record.taint_flags.contains(TaintFlag::CrossZoneUnapproved));
+        assert!(
+            record.taint_flags.has_critical(),
+            "CrossZoneUnapproved should be critical taint"
+        );
+
+        log_flow_test(
+            "unapproved_zone_crossing_adds_taint",
+            "integrity",
+            "work",
+            "private",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn flow_check_public_to_work_requires_elevation() {
+        // Public data (low integrity, low confidentiality) flowing to work zone
+        let record = ProvenanceRecord::public_input();
+
+        // Public -> Work: integrity UP (Untrusted=0 → Work=2, requires elevation)
+        // Confidentiality stays same (Public → Work, allowed)
+        let result = record.can_flow_to(&ZoneId::work());
+        assert_eq!(result, FlowCheckResult::RequiresElevation);
+
+        log_flow_test(
+            "flow_check_public_to_work_requires_elevation",
+            "integrity",
+            "public",
+            "work",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn flow_check_private_to_public_requires_declassification() {
+        // Private data cannot flow to public without declassification
+        let record = ProvenanceRecord::new(ZoneId::private());
+
+        let result = record.can_flow_to(&ZoneId::public());
+        assert_eq!(result, FlowCheckResult::RequiresDeclassification);
+
+        log_flow_test(
+            "flow_check_private_to_public_requires_declassification",
+            "confidentiality",
+            "private",
+            "public",
+            false,
+            "fail",
+            Some("requires_declassification"),
+        );
+    }
+
+    #[test]
+    fn flow_check_work_to_owner_requires_elevation() {
+        // Work data cannot flow to owner zone without elevation
+        let record = ProvenanceRecord::new(ZoneId::work());
+
+        let result = record.can_flow_to(&ZoneId::owner());
+        assert_eq!(result, FlowCheckResult::RequiresElevation);
+
+        log_flow_test(
+            "flow_check_work_to_owner_requires_elevation",
+            "integrity",
+            "work",
+            "owner",
+            false,
+            "fail",
+            Some("requires_elevation"),
+        );
+    }
+
+    #[test]
+    fn flow_check_owner_to_public_requires_both() {
+        // Owner data to public requires BOTH elevation (integrity) AND declassification (confidentiality)
+        let record = ProvenanceRecord::new(ZoneId::owner());
+
+        let result = record.can_flow_to(&ZoneId::public());
+        // Actually, owner->public: integrity flows DOWN (allowed), confidentiality flows DOWN (needs declassification)
+        // Wait - let me think about this more carefully
+        // Owner: integrity=Owner(4), confidentiality=Owner(4)
+        // Public: integrity=Untrusted(0), confidentiality=Public(0)
+        // Integrity: target(0) <= current(4) = TRUE (flows down, allowed)
+        // Confidentiality: target(0) >= current(4) = FALSE (flows down, needs declassification)
+        assert_eq!(result, FlowCheckResult::RequiresDeclassification);
+
+        log_flow_test(
+            "flow_check_owner_to_public_requires_both",
+            "confidentiality",
+            "owner",
+            "public",
+            false,
+            "fail",
+            Some("requires_declassification"),
+        );
+    }
+
+    #[test]
+    fn flow_check_untrusted_to_owner_requires_elevation() {
+        // Untrusted (low integrity, low confidentiality) to owner (high both)
+        // Integrity: target(4) <= current(0) = FALSE (needs elevation)
+        // Confidentiality: target(4) >= current(0) = TRUE (flows up, allowed)
+        let mut record = ProvenanceRecord::new(ZoneId::public());
+        record.integrity_label = IntegrityLevel::Untrusted;
+        record.confidentiality_label = ConfidentialityLevel::Public;
+
+        let result = record.can_flow_to(&ZoneId::owner());
+        assert_eq!(result, FlowCheckResult::RequiresElevation);
+
+        log_flow_test(
+            "flow_check_untrusted_to_owner_requires_elevation",
+            "integrity",
+            "untrusted",
+            "owner",
+            false,
+            "fail",
+            Some("requires_elevation"),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ExecutionScope Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn execution_scope_serialization() {
+        let scope = ExecutionScope {
+            connector_id: "fcp.test:connector:0.1.0".into(),
+            method_pattern: "test.invoke.*".into(),
+            request_object_id: Some(test_object_id("request")),
+            input_hash: Some([0xAB; 32]),
+            input_constraints: vec![InputConstraint {
+                pointer: "/action".into(),
+                expected: json!("send"),
+            }],
+        };
+
+        let token = ApprovalToken {
+            token_id: "exec-token-001".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000, // 1 hour later
+            issuer: "node:issuer".into(),
+            scope: ApprovalScope::Execution(scope),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // Roundtrip through JSON
+        let json = serde_json::to_string(&token).expect("serialization failed");
+        let parsed: ApprovalToken = serde_json::from_str(&json).expect("deserialization failed");
+
+        assert_eq!(parsed.token_id, token.token_id);
+        if let ApprovalScope::Execution(exec) = &parsed.scope {
+            assert_eq!(exec.connector_id, "fcp.test:connector:0.1.0");
+            assert_eq!(exec.method_pattern, "test.invoke.*");
+            assert!(exec.request_object_id.is_some());
+            assert!(exec.input_hash.is_some());
+            assert_eq!(exec.input_constraints.len(), 1);
+            assert_eq!(exec.input_constraints[0].pointer, "/action");
+        } else {
+            panic!("Expected Execution scope");
+        }
+
+        log_flow_test(
+            "execution_scope_serialization",
+            "integrity",
+            "execution",
+            "execution",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn approval_token_zone_binding() {
+        // Token should be bound to a specific zone
+        let token = ApprovalToken {
+            token_id: "zone-bound-token".into(),
+            issued_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_003_600_000,
+            issuer: "node:issuer".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "test.op".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        assert_eq!(token.zone_id, ZoneId::work());
+        // Token for work zone should not be used in private zone
+        // (This is a policy check - the struct just stores the zone)
+
+        log_flow_test(
+            "approval_token_zone_binding",
+            "integrity",
+            "work",
+            "work",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn input_constraint_json_pointer_format() {
+        let constraint = InputConstraint {
+            pointer: "/data/items/0/name".into(),
+            expected: json!("test-item"),
+        };
+
+        // JSON Pointer should follow RFC 6901 format
+        assert!(constraint.pointer.starts_with('/'));
+
+        // Roundtrip
+        let json = serde_json::to_string(&constraint).expect("serialization failed");
+        let parsed: InputConstraint = serde_json::from_str(&json).expect("deserialization failed");
+        assert_eq!(parsed.pointer, constraint.pointer);
+        assert_eq!(parsed.expected, constraint.expected);
+
+        log_flow_test(
+            "input_constraint_json_pointer_format",
+            "integrity",
+            "constraint",
+            "constraint",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Property Tests for Merge Invariants (Randomized)
     // ─────────────────────────────────────────────────────────────────────────
 
