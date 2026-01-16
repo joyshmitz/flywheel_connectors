@@ -61,10 +61,6 @@ pub enum OpenAIError {
         /// HTTP status code
         status_code: Option<u16>,
     },
-
-    /// Client not configured
-    #[error("Client not configured")]
-    NotConfigured,
 }
 
 impl OpenAIError {
@@ -105,7 +101,6 @@ impl OpenAIError {
                 code: 2003,
                 message: message.clone(),
             },
-            Self::NotConfigured => FcpError::NotConfigured,
             Self::Api {
                 message,
                 status_code,

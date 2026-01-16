@@ -39,18 +39,6 @@ pub enum AnthropicError {
     /// Context length exceeded
     #[error("Context length exceeded: {message}")]
     ContextLengthExceeded { message: String },
-
-    /// Budget exceeded
-    #[error("Budget exceeded: spent ${spent:.4}, limit ${limit:.4}")]
-    BudgetExceeded { spent: f64, limit: f64 },
-
-    /// Not configured
-    #[error("Connector not configured")]
-    NotConfigured,
-
-    /// Stream error
-    #[error("Stream error: {0}")]
-    Stream(String),
 }
 
 impl AnthropicError {
@@ -64,7 +52,6 @@ impl AnthropicError {
             Self::Api { status_code, .. } => {
                 matches!(status_code, Some(500..=599) | Some(429))
             }
-            Self::Stream(_) => true,
             _ => false,
         }
     }
@@ -135,20 +122,8 @@ impl AnthropicError {
                 code: 1004,
                 message: message.clone(),
             },
-            Self::BudgetExceeded { spent, limit } => FcpError::InvalidRequest {
-                code: 1005,
-                message: format!("Budget exceeded: spent ${spent:.4}, limit ${limit:.4}"),
-            },
-            Self::NotConfigured => FcpError::NotConfigured,
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
-            },
-            Self::Stream(msg) => FcpError::External {
-                service: "anthropic".into(),
-                message: msg.clone(),
-                status_code: None,
-                retryable: true,
-                retry_after: None,
             },
         }
     }

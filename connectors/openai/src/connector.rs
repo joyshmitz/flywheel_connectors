@@ -21,7 +21,7 @@ pub struct OpenAIConnector {
     client: Option<OpenAIClient>,
     requests_total: AtomicU64,
     requests_error: AtomicU64,
-    total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000)
+    total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000_000)
     verifier: Option<CapabilityVerifier>,
     instance_id: InstanceId,
     session_id: Option<SessionId>,
@@ -57,13 +57,13 @@ impl OpenAIConnector {
     /// Get total cost in dollars.
     #[must_use]
     pub fn total_cost(&self) -> f64 {
-        self.total_cost.load(Ordering::Relaxed) as f64 / 1_000_000.0
+        self.total_cost.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
     }
 
     /// Track cost from usage.
     fn track_cost(&self, usage: &Usage, model: Model) {
         let cost = usage.calculate_cost(model);
-        let cost_fixed = (cost * 1_000_000.0) as u64;
+        let cost_fixed = (cost * 1_000_000_000.0) as u64;
         self.total_cost.fetch_add(cost_fixed, Ordering::Relaxed);
     }
 
@@ -341,13 +341,15 @@ impl OpenAIConnector {
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
         // Extract and verify capability token
-        let token_value = params.get("capability_token").ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing capability_token".into(),
-        })?;
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing capability_token".into(),
+            })?;
 
-        let token: CapabilityToken = serde_json::from_value(token_value.clone())
-            .map_err(|e| FcpError::InvalidRequest {
+        let token: CapabilityToken =
+            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token format: {e}"),
             })?;
@@ -603,14 +605,40 @@ impl Default for OpenAIConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(cap)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[cap])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken { raw: cose }
+    }
 
     #[tokio::test]
     async fn test_handshake() {
-        let connector = OpenAIConnector::new();
-        let result = connector.handle_handshake(json!({})).await.unwrap();
+        let mut connector = OpenAIConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["openai.chat"]
+            }))
+            .await
+            .unwrap();
 
-        assert_eq!(result["connector_id"], "fcp.openai");
-        assert!(!result["capabilities"].as_array().unwrap().is_empty());
+        assert!(result.get("session_id").is_some());
+        assert_eq!(result["status"], "accepted");
     }
 
     #[tokio::test]
@@ -623,13 +651,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_invoke_without_config() {
-        let connector = OpenAIConnector::new();
+        let mut connector = OpenAIConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["openai.simple_chat"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "openai.simple_chat");
+
         let result = connector
             .handle_invoke(json!({
                 "operation": "openai.simple_chat",
                 "input": {
                     "message": "Hello"
-                }
+                },
+                "capability_token": token
             }))
             .await;
 
@@ -647,10 +693,27 @@ mod tests {
                 .with_base_url("http://localhost:9999"),
         );
 
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["openai.chat"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "openai.chat");
+
         let result = connector
             .handle_invoke(json!({
                 "operation": "openai.chat",
-                "input": {}
+                "input": {},
+                "capability_token": token
             }))
             .await;
 
@@ -665,11 +728,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_usage() {
-        let connector = OpenAIConnector::new();
+        let mut connector = OpenAIConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["openai.chat"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "openai.get_usage");
+
         let result = connector
             .handle_invoke(json!({
                 "operation": "openai.get_usage",
-                "input": {}
+                "input": {},
+                "capability_token": token
             }))
             .await
             .unwrap();
