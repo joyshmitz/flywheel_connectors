@@ -13,6 +13,7 @@ members = [
     "crates/fcp-protocol",
     "crates/fcp-raptorq",
     "crates/fcp-ratelimit",
+    "crates/fcp-registry",
     "crates/fcp-sandbox",
     "crates/fcp-sdk",
     "crates/fcp-streaming",
@@ -37,6 +38,7 @@ default-members = [
     "crates/fcp-mesh",
     "crates/fcp-protocol",
     "crates/fcp-raptorq",
+    "crates/fcp-registry",
     "crates/fcp-sandbox",
     "crates/fcp-sdk",
     "crates/fcp-store",
@@ -113,6 +115,12 @@ tokio-stream = "0.1"
 # Testing
 wiremock = "0.6"
 
+# Supply-chain hardening
+tough = { version = "0.21.0", features = ["http"] }
+sigstore = { version = "0.13.0", default-features = false, features = ["cosign", "verify", "rekor", "sigstore-trust-root", "rustls-tls"] }
+sigstore-trust-root = { version = "0.4.0", features = ["tuf"] }
+url = "2.5"
+
 # Internal crates
 fcp-audit = { path = "crates/fcp-audit" }
 fcp-cbor = { path = "crates/fcp-cbor" }
@@ -124,6 +132,7 @@ fcp-oauth = { path = "crates/fcp-oauth" }
 fcp-protocol = { path = "crates/fcp-protocol" }
 fcp-raptorq = { path = "crates/fcp-raptorq" }
 fcp-ratelimit = { path = "crates/fcp-ratelimit" }
+fcp-registry = { path = "crates/fcp-registry" }
 fcp-sandbox = { path = "crates/fcp-sandbox" }
 fcp-sdk = { path = "crates/fcp-sdk" }
 fcp-store = { path = "crates/fcp-store" }
