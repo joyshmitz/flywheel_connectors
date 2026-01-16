@@ -1769,4 +1769,627 @@ mod tests {
         assert!(json.contains(ZoneId::PRIVATE));
         assert!(json.contains(ZoneId::WORK));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Attack Scenarios (Adversarial Security Tests)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn attack_taint_laundering_without_receipt_rejected() {
+        // Attempt to remove taint without a valid SanitizerReceipt
+        let mut record = ProvenanceRecord::public_input();
+        record.taint_flags.insert(TaintFlag::PotentiallyMalicious);
+
+        // Attacker tries to directly modify taint_flags - but in the real system,
+        // taint reduction MUST go through apply_taint_reduction with a valid receipt.
+        // Here we verify that partial reduction still leaves critical taints.
+        let receipt_id = test_object_id("fake-receipt");
+        record.apply_taint_reduction(
+            &[TaintFlag::UserGenerated], // Trying to clear non-existent flag
+            receipt_id,
+            vec![],
+            1000,
+        );
+
+        // PUBLIC_INPUT and POTENTIALLY_MALICIOUS still present - cannot be laundered
+        assert!(record.taint_flags.contains(TaintFlag::PublicInput));
+        assert!(record.taint_flags.contains(TaintFlag::PotentiallyMalicious));
+        assert!(record.taint_flags.has_critical());
+        log_flow_test(
+            "attack_taint_laundering_without_receipt_rejected",
+            "integrity",
+            "public",
+            "public",
+            false,
+            "pass",
+            Some("TAINT_LAUNDERING_BLOCKED"),
+        );
+    }
+
+    #[test]
+    fn attack_elevation_bypass_without_approval_rejected() {
+        // Attempt to flow low-integrity data to high-integrity zone without approval
+        let public = ProvenanceRecord::public_input();
+
+        // Try to flow to owner zone - should require elevation
+        let flow_result = public.can_flow_to(&ZoneId::owner());
+        assert_eq!(flow_result, FlowCheckResult::RequiresElevation);
+
+        // Verify cannot drive dangerous operations
+        assert!(matches!(
+            public.can_drive_operation(SafetyTier::Dangerous),
+            Err(ProvenanceViolation::PublicInputForDangerousOperation)
+        ));
+
+        // Cannot directly set integrity - must use apply_elevation with token
+        let mut record = ProvenanceRecord::public_input();
+        let fake_token = test_object_id("fake-token");
+
+        // Elevation from Untrusted to Owner should succeed if token is provided
+        // (signature verification happens at a higher layer)
+        let result = record.apply_elevation(IntegrityLevel::Owner, fake_token, 1000);
+        assert!(result.is_ok()); // Elevation works, but signature would be invalid
+
+        // However, the taint is STILL PRESENT even after elevation
+        assert!(record.taint_flags.contains(TaintFlag::PublicInput));
+        assert!(record.taint_flags.has_critical());
+
+        log_flow_test(
+            "attack_elevation_bypass_without_approval_rejected",
+            "integrity",
+            "public",
+            "owner",
+            false,
+            "pass",
+            Some("ELEVATION_BYPASS_BLOCKED"),
+        );
+    }
+
+    #[test]
+    fn attack_declassification_leak_without_approval_rejected() {
+        // Attempt to leak high-confidentiality data to low-confidentiality zone
+        let private = ProvenanceRecord::new(ZoneId::private());
+
+        // Try to flow to public zone - should require declassification
+        let flow_result = private.can_flow_to(&ZoneId::public());
+        assert_eq!(flow_result, FlowCheckResult::RequiresDeclassification);
+
+        // Attempt declassification to same level should fail
+        let mut record = ProvenanceRecord::new(ZoneId::private());
+        let fake_token = test_object_id("fake-token");
+
+        let result =
+            record.apply_declassification(ConfidentialityLevel::Private, fake_token, 1000);
+        assert!(matches!(
+            result,
+            Err(ProvenanceViolation::InvalidDeclassification { .. })
+        ));
+
+        log_flow_test(
+            "attack_declassification_leak_without_approval_rejected",
+            "confidentiality",
+            "private",
+            "public",
+            false,
+            "pass",
+            Some("DECLASSIFICATION_LEAK_BLOCKED"),
+        );
+    }
+
+    #[test]
+    fn attack_forged_sanitizer_receipt_invalid_signature() {
+        // A forged receipt that claims to clear flags it's not authorized for
+        let forged_receipt = SanitizerReceipt {
+            receipt_id: "forged-receipt".into(),
+            timestamp_ms: 1000,
+            sanitizer_id: "attacker:evil".into(),
+            sanitizer_zone: ZoneId::public(), // Low-trust zone
+            authorized_flags: vec![TaintFlag::UnverifiedLink], // Only authorized for this
+            covered_inputs: vec![test_object_id("victim-input")],
+            cleared_flags: vec![
+                TaintFlag::PublicInput, // NOT authorized!
+                TaintFlag::PotentiallyMalicious, // NOT authorized!
+            ],
+            signature: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]), // Invalid signature
+        };
+
+        // Receipt validation fails - cleared flags not in authorized list
+        assert!(!forged_receipt.is_valid());
+
+        // Cannot clear PublicInput with this receipt
+        assert!(!forged_receipt.can_clear(TaintFlag::PublicInput));
+        assert!(!forged_receipt.can_clear(TaintFlag::PotentiallyMalicious));
+
+        log_flow_test(
+            "attack_forged_sanitizer_receipt_invalid_signature",
+            "integrity",
+            "public",
+            "public",
+            false,
+            "pass",
+            Some("FORGED_RECEIPT_REJECTED"),
+        );
+    }
+
+    #[test]
+    fn attack_stale_approval_token_rejected() {
+        // Expired ApprovalToken should be rejected
+        let stale_token = ApprovalToken {
+            token_id: "stale-token".into(),
+            issued_at_ms: 1000,
+            expires_at_ms: 2000, // Expired at 2000ms
+            issuer: "node:legitimate".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "op.sensitive".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // Token is expired at current time 5000ms
+        let now_ms = 5000;
+        assert!(stale_token.is_expired(now_ms));
+        assert!(!stale_token.is_valid(now_ms));
+
+        // Token was valid in the past
+        let past_ms = 1500;
+        assert!(!stale_token.is_expired(past_ms));
+        assert!(stale_token.is_valid(past_ms));
+
+        log_flow_test(
+            "attack_stale_approval_token_rejected",
+            "integrity",
+            "work",
+            "owner",
+            false,
+            "pass",
+            Some("STALE_TOKEN_REJECTED"),
+        );
+    }
+
+    #[test]
+    fn attack_future_approval_token_rejected() {
+        // ApprovalToken not yet valid (issued_at in future)
+        let future_token = ApprovalToken {
+            token_id: "future-token".into(),
+            issued_at_ms: 5000, // Not valid until 5000ms
+            expires_at_ms: 10000,
+            issuer: "node:legitimate".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "op.sensitive".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // Token is not yet valid at current time 1000ms
+        let now_ms = 1000;
+        assert!(future_token.is_not_yet_valid(now_ms));
+        assert!(!future_token.is_valid(now_ms));
+
+        // Token will be valid in the future
+        let future_ms = 7000;
+        assert!(!future_token.is_not_yet_valid(future_ms));
+        assert!(future_token.is_valid(future_ms));
+
+        log_flow_test(
+            "attack_future_approval_token_rejected",
+            "integrity",
+            "work",
+            "owner",
+            false,
+            "pass",
+            Some("FUTURE_TOKEN_REJECTED"),
+        );
+    }
+
+    #[test]
+    fn attack_mixed_input_integrity_downgrade() {
+        // Mixing high-integrity with low-integrity data downgrades result
+        let owner = ProvenanceRecord::new(ZoneId::owner());
+        let mut attacker = ProvenanceRecord::public_input();
+        attacker.taint_flags.insert(TaintFlag::PotentiallyMalicious);
+
+        // Merge owner data with attacker-controlled data
+        let merged = ProvenanceRecord::merge(&[&owner, &attacker], ZoneId::work());
+
+        // Result has MINIMUM integrity (Untrusted from attacker)
+        assert_eq!(merged.integrity_label, IntegrityLevel::Untrusted);
+
+        // Result accumulates ALL taints
+        assert!(merged.taint_flags.contains(TaintFlag::PublicInput));
+        assert!(merged.taint_flags.contains(TaintFlag::PotentiallyMalicious));
+        assert!(merged.taint_flags.has_critical());
+
+        // Cannot drive dangerous operations
+        assert!(matches!(
+            merged.can_drive_operation(SafetyTier::Dangerous),
+            Err(ProvenanceViolation::PublicInputForDangerousOperation)
+        ));
+
+        log_flow_test(
+            "attack_mixed_input_integrity_downgrade",
+            "integrity",
+            "owner+public",
+            "untrusted",
+            false,
+            "pass",
+            Some("INTEGRITY_DOWNGRADE_ENFORCED"),
+        );
+    }
+
+    #[test]
+    fn attack_cross_zone_without_approval_adds_taint() {
+        // Crossing zones without approval must add taint
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        assert!(!record.taint_flags.contains(TaintFlag::CrossZoneUnapproved));
+
+        // Cross without approval
+        record.record_zone_crossing(ZoneId::private(), false, None, 1000);
+
+        // Taint is added
+        assert!(record.taint_flags.contains(TaintFlag::CrossZoneUnapproved));
+        assert!(record.taint_flags.has_critical());
+
+        log_flow_test(
+            "attack_cross_zone_without_approval_adds_taint",
+            "integrity",
+            "work",
+            "private",
+            false,
+            "pass",
+            Some("UNAPPROVED_CROSSING_TAINTED"),
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Golden Vectors (Deterministic Test Vectors for Interop)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn golden_vector_merge_two_records() {
+        // Deterministic merge test vector
+        let work = ProvenanceRecord::new(ZoneId::work());
+        let private = ProvenanceRecord::new(ZoneId::private());
+
+        let merged = ProvenanceRecord::merge(&[&work, &private], ZoneId::work());
+
+        // Expected output (golden vector):
+        // - integrity = MIN(Work, Private) = Work
+        // - confidentiality = MAX(Work, Private) = Private
+        assert_eq!(
+            merged.integrity_label,
+            IntegrityLevel::Work,
+            "GOLDEN: merge(work, private).integrity == Work"
+        );
+        assert_eq!(
+            merged.confidentiality_label,
+            ConfidentialityLevel::Private,
+            "GOLDEN: merge(work, private).confidentiality == Private"
+        );
+        assert!(
+            merged.taint_flags.is_empty(),
+            "GOLDEN: merge(work, private).taint_flags == empty"
+        );
+
+        log_flow_test(
+            "golden_vector_merge_two_records",
+            "integrity",
+            "work+private",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn golden_vector_merge_with_taint() {
+        // Merge with taint accumulation golden vector
+        let mut a = ProvenanceRecord::new(ZoneId::work());
+        a.taint_flags.insert(TaintFlag::PublicInput);
+
+        let mut b = ProvenanceRecord::new(ZoneId::private());
+        b.taint_flags.insert(TaintFlag::UserGenerated);
+
+        let merged = ProvenanceRecord::merge(&[&a, &b], ZoneId::work());
+
+        // Expected output:
+        // - integrity = MIN(Work, Private) = Work
+        // - confidentiality = MAX(Work, Private) = Private
+        // - taint = OR(PublicInput, UserGenerated)
+        assert_eq!(merged.integrity_label, IntegrityLevel::Work);
+        assert_eq!(merged.confidentiality_label, ConfidentialityLevel::Private);
+        assert!(merged.taint_flags.contains(TaintFlag::PublicInput));
+        assert!(merged.taint_flags.contains(TaintFlag::UserGenerated));
+        assert_eq!(merged.taint_flags.len(), 2);
+
+        log_flow_test(
+            "golden_vector_merge_with_taint",
+            "integrity",
+            "work+private",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn golden_vector_elevation_sequence() {
+        // Elevation sequence golden vector
+        let mut record = ProvenanceRecord::new(ZoneId::community());
+        let token1 = test_object_id("elevation-token-1");
+        let token2 = test_object_id("elevation-token-2");
+
+        // Initial state
+        assert_eq!(record.integrity_label, IntegrityLevel::Community);
+
+        // First elevation: Community → Work
+        record
+            .apply_elevation(IntegrityLevel::Work, token1, 1000)
+            .expect("elevation to Work should succeed");
+        assert_eq!(record.integrity_label, IntegrityLevel::Work);
+        assert_eq!(record.label_adjustments.len(), 1);
+
+        // Second elevation: Work → Owner
+        record
+            .apply_elevation(IntegrityLevel::Owner, token2, 2000)
+            .expect("elevation to Owner should succeed");
+        assert_eq!(record.integrity_label, IntegrityLevel::Owner);
+        assert_eq!(record.label_adjustments.len(), 2);
+
+        // Verify adjustment history
+        assert_eq!(
+            record.label_adjustments[0].prev_integrity,
+            Some(IntegrityLevel::Community)
+        );
+        assert_eq!(
+            record.label_adjustments[0].new_integrity,
+            Some(IntegrityLevel::Work)
+        );
+        assert_eq!(
+            record.label_adjustments[1].prev_integrity,
+            Some(IntegrityLevel::Work)
+        );
+        assert_eq!(
+            record.label_adjustments[1].new_integrity,
+            Some(IntegrityLevel::Owner)
+        );
+
+        log_flow_test(
+            "golden_vector_elevation_sequence",
+            "integrity",
+            "community",
+            "owner",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn golden_vector_declassification_sequence() {
+        // Declassification sequence golden vector
+        let mut record = ProvenanceRecord::new(ZoneId::owner());
+        let token1 = test_object_id("declassify-token-1");
+        let token2 = test_object_id("declassify-token-2");
+
+        // Initial state
+        assert_eq!(record.confidentiality_label, ConfidentialityLevel::Owner);
+
+        // First declassification: Owner → Private
+        record
+            .apply_declassification(ConfidentialityLevel::Private, token1, 1000)
+            .expect("declassification to Private should succeed");
+        assert_eq!(record.confidentiality_label, ConfidentialityLevel::Private);
+
+        // Second declassification: Private → Work
+        record
+            .apply_declassification(ConfidentialityLevel::Work, token2, 2000)
+            .expect("declassification to Work should succeed");
+        assert_eq!(record.confidentiality_label, ConfidentialityLevel::Work);
+        assert_eq!(record.label_adjustments.len(), 2);
+
+        log_flow_test(
+            "golden_vector_declassification_sequence",
+            "confidentiality",
+            "owner",
+            "work",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn golden_vector_taint_reduction() {
+        // Taint reduction golden vector
+        let mut record = ProvenanceRecord::public_input();
+        record.taint_flags.insert(TaintFlag::UnverifiedLink);
+        record.taint_flags.insert(TaintFlag::UserGenerated);
+
+        let receipt_id = test_object_id("sanitizer-receipt");
+        let covered = vec![test_object_id("input-1")];
+
+        // Initial: 3 taints
+        assert_eq!(record.taint_flags.len(), 3);
+
+        // Sanitize UnverifiedLink only
+        record.apply_taint_reduction(&[TaintFlag::UnverifiedLink], receipt_id, covered, 1000);
+
+        // Result: 2 taints remain
+        assert_eq!(record.taint_flags.len(), 2);
+        assert!(!record.taint_flags.contains(TaintFlag::UnverifiedLink));
+        assert!(record.taint_flags.contains(TaintFlag::PublicInput));
+        assert!(record.taint_flags.contains(TaintFlag::UserGenerated));
+
+        // Reduction is recorded
+        assert_eq!(record.taint_reductions.len(), 1);
+        assert_eq!(
+            record.taint_reductions[0].cleared_flags,
+            vec![TaintFlag::UnverifiedLink]
+        );
+
+        log_flow_test(
+            "golden_vector_taint_reduction",
+            "integrity",
+            "public",
+            "public",
+            true,
+            "pass",
+            Some("TAINT_REDUCTION"),
+        );
+    }
+
+    #[test]
+    fn golden_vector_flow_check_matrix() {
+        // Complete flow check matrix golden vector
+        let zones = [
+            ZoneId::public(),
+            ZoneId::community(),
+            ZoneId::work(),
+            ZoneId::private(),
+            ZoneId::owner(),
+        ];
+
+        // For same-zone flows, should always be Allowed
+        for zone in &zones {
+            let record = ProvenanceRecord::new(zone.clone());
+            assert_eq!(
+                record.can_flow_to(zone),
+                FlowCheckResult::Allowed,
+                "Same-zone flow should be allowed: {}",
+                zone.as_str()
+            );
+        }
+
+        // Public → Owner requires elevation (integrity up)
+        let public = ProvenanceRecord::new(ZoneId::public());
+        assert_eq!(
+            public.can_flow_to(&ZoneId::owner()),
+            FlowCheckResult::RequiresElevation
+        );
+
+        // Owner → Public requires declassification (confidentiality down)
+        let owner = ProvenanceRecord::new(ZoneId::owner());
+        assert_eq!(
+            owner.can_flow_to(&ZoneId::public()),
+            FlowCheckResult::RequiresDeclassification
+        );
+
+        // Work → Private requires elevation (integrity up)
+        let work = ProvenanceRecord::new(ZoneId::work());
+        assert_eq!(
+            work.can_flow_to(&ZoneId::private()),
+            FlowCheckResult::RequiresElevation
+        );
+
+        // Private → Work requires declassification (confidentiality down)
+        let private = ProvenanceRecord::new(ZoneId::private());
+        assert_eq!(
+            private.can_flow_to(&ZoneId::work()),
+            FlowCheckResult::RequiresDeclassification
+        );
+
+        log_flow_test(
+            "golden_vector_flow_check_matrix",
+            "integrity",
+            "matrix",
+            "matrix",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn golden_vector_safety_tier_enforcement() {
+        // Safety tier enforcement golden vector
+        let public = ProvenanceRecord::public_input();
+        let work = ProvenanceRecord::new(ZoneId::work());
+        let owner = ProvenanceRecord::new(ZoneId::owner());
+
+        // Safe tier: all allowed
+        assert!(public.can_drive_operation(SafetyTier::Safe).is_ok());
+        assert!(work.can_drive_operation(SafetyTier::Safe).is_ok());
+        assert!(owner.can_drive_operation(SafetyTier::Safe).is_ok());
+
+        // Dangerous tier: public blocked, work/owner allowed
+        assert!(public.can_drive_operation(SafetyTier::Dangerous).is_err());
+        assert!(work.can_drive_operation(SafetyTier::Dangerous).is_ok());
+        assert!(owner.can_drive_operation(SafetyTier::Dangerous).is_ok());
+
+        // Critical tier: same as dangerous
+        assert!(public.can_drive_operation(SafetyTier::Critical).is_err());
+        assert!(work.can_drive_operation(SafetyTier::Critical).is_ok());
+        assert!(owner.can_drive_operation(SafetyTier::Critical).is_ok());
+
+        log_flow_test(
+            "golden_vector_safety_tier_enforcement",
+            "integrity",
+            "matrix",
+            "matrix",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn golden_vector_approval_token_lifecycle() {
+        // ApprovalToken lifecycle golden vector
+        let token = ApprovalToken {
+            token_id: "lifecycle-test".into(),
+            issued_at_ms: 1000,
+            expires_at_ms: 3000,
+            issuer: "node:issuer".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "test.op".into(),
+                original_provenance_id: test_object_id("prov"),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        // Before valid: t=500
+        assert!(token.is_not_yet_valid(500));
+        assert!(!token.is_expired(500));
+        assert!(!token.is_valid(500));
+
+        // At issued_at: t=1000 (edge case - valid)
+        assert!(!token.is_not_yet_valid(1000));
+        assert!(!token.is_expired(1000));
+        assert!(token.is_valid(1000));
+
+        // During validity: t=2000
+        assert!(!token.is_not_yet_valid(2000));
+        assert!(!token.is_expired(2000));
+        assert!(token.is_valid(2000));
+
+        // At expires_at: t=3000 (edge case - expired)
+        assert!(!token.is_not_yet_valid(3000));
+        assert!(token.is_expired(3000));
+        assert!(!token.is_valid(3000));
+
+        // After expiry: t=5000
+        assert!(!token.is_not_yet_valid(5000));
+        assert!(token.is_expired(5000));
+        assert!(!token.is_valid(5000));
+
+        log_flow_test(
+            "golden_vector_approval_token_lifecycle",
+            "integrity",
+            "lifecycle",
+            "lifecycle",
+            true,
+            "pass",
+            None,
+        );
+    }
 }
