@@ -1,3 +1,27 @@
-//! FCP2 conformance tooling (vectors, interop helpers, harness glue).
+//! FCP2 conformance tooling: golden vectors, interop helpers, and harness glue.
+//!
+//! This crate provides:
+//! - **Golden vectors**: Canonical byte sequences for protocol structures
+//! - **Interop helpers**: Test utilities for cross-implementation verification
+//! - **Harness glue**: Integration points for E2E test frameworks
+//!
+//! # Golden Vectors
+//!
+//! Golden vectors provide byte-exact test cases for:
+//! - FCPS frame encoding/decoding (data-plane)
+//! - FCPC frame encoding/decoding (control-plane)
+//! - Session handshake transcripts
+//! - Capability token `COSE_Sign1` encoding
+//! - `ObjectId` keyed derivation
+//!
+//! These vectors are normative: if the implementation doesn't produce
+//! these exact bytes, it's non-compliant.
 
 #![forbid(unsafe_code)]
+
+pub mod vectors;
+
+// Re-export vector types for convenience
+pub use vectors::fcpc::FcpcGoldenVector;
+pub use vectors::fcps::FcpsGoldenVector;
+pub use vectors::session::SessionGoldenVector;

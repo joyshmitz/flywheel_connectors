@@ -1,6 +1,6 @@
 [package]
 name = "fcp-conformance"
-description = "FCP2 conformance tooling (vectors, interop helpers, harness glue)"
+description = "FCP2 conformance tooling: golden vectors, interop helpers, and harness glue"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,14 @@ workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+# FCP crates (for types and encoding)
+fcp-core = { path = "../fcp-core" }
+fcp-protocol = { path = "../fcp-protocol" }
+fcp-crypto = { path = "../fcp-crypto" }
+fcp-cbor = { path = "../fcp-cbor" }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
