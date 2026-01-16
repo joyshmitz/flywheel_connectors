@@ -1087,4 +1087,624 @@ mod tests {
         let other_id = ConnectorId::new("fcp", "other", "1.0.0").unwrap();
         assert!(!profile.has_connector(&other_id));
     }
+
+    // =========================================================================
+    // Golden Vector Tests
+    // =========================================================================
+
+    #[test]
+    fn golden_vector_device_profile_minimal_cbor() {
+        // Minimal profile with deterministic inputs
+        let profile = DeviceProfile::builder(NodeId::new("node-golden"))
+            .cpu_cores(4)
+            .cpu_arch(CpuArch::X86_64)
+            .memory_mb(8192)
+            .local_storage_mb(100_000)
+            .symbol_store_quota_mb(1000)
+            .power_source(PowerSource::Mains)
+            .bandwidth_estimate_kbps(100_000)
+            .latency_class(LatencyClass::Lan)
+            .availability(AvailabilityProfile::AlwaysOn)
+            .timestamp(1705000000000)
+            .build();
+
+        // CBOR roundtrip
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&profile, &mut cbor_bytes).unwrap();
+
+        let decoded: DeviceProfile = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(profile, decoded, "CBOR roundtrip mismatch for minimal profile");
+
+        // Verify specific fields survived
+        assert_eq!(decoded.node_id.as_str(), "node-golden");
+        assert_eq!(decoded.cpu_cores, 4);
+        assert_eq!(decoded.memory_mb, 8192);
+        assert_eq!(decoded.timestamp, 1705000000000);
+    }
+
+    #[test]
+    fn golden_vector_device_profile_full_cbor() {
+        // Full profile with all optional fields
+        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576)
+            .with_compute_capability("8.9");
+        let tpu = TpuProfile::new(TpuVendor::Google, "v4", 4, 32768);
+        let connector_id = ConnectorId::new("fcp", "anthropic", "1.0.0").unwrap();
+        let connector = InstalledConnector::new(
+            connector_id,
+            "1.0.0",
+            ObjectId::from_bytes([0xAAu8; 32]),
+        );
+
+        let profile = DeviceProfile::builder(NodeId::new("node-full-golden"))
+            .cpu_cores(64)
+            .cpu_arch(CpuArch::Aarch64)
+            .memory_mb(524288)
+            .gpu(gpu)
+            .tpu(tpu)
+            .local_storage_mb(10_000_000)
+            .symbol_store_quota_mb(50_000)
+            .power_source(PowerSource::Battery)
+            .battery_percent(75)
+            .bandwidth_estimate_kbps(1_000_000)
+            .latency_class(LatencyClass::Local)
+            .metered(false)
+            .availability(AvailabilityProfile::Scheduled)
+            .next_expected_downtime(1705100000000)
+            .add_connector(connector)
+            .timestamp(1705000000000)
+            .build();
+
+        // CBOR roundtrip
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&profile, &mut cbor_bytes).unwrap();
+
+        let decoded: DeviceProfile = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+        assert_eq!(profile, decoded, "CBOR roundtrip mismatch for full profile");
+
+        // Verify optional fields
+        assert!(decoded.gpu.is_some());
+        assert!(decoded.tpu.is_some());
+        assert_eq!(decoded.battery_percent, Some(75));
+        assert_eq!(decoded.next_expected_downtime, Some(1705100000000));
+        assert_eq!(decoded.connectors.len(), 1);
+    }
+
+    #[test]
+    fn golden_vector_fitness_calculation() {
+        // Deterministic fitness calculation vectors
+        struct FitnessVector {
+            name: &'static str,
+            profile_fn: fn() -> DeviceProfile,
+            ctx_fn: fn() -> FitnessContext,
+            expected_eligible: bool,
+            expected_score: f64,
+        }
+
+        let vectors = [
+            FitnessVector {
+                name: "baseline_local",
+                profile_fn: || {
+                    DeviceProfile::builder(NodeId::new("v1"))
+                        .cpu_cores(8)
+                        .memory_mb(16384)
+                        .latency_class(LatencyClass::Local)
+                        .power_source(PowerSource::Mains)
+                        .availability(AvailabilityProfile::AlwaysOn)
+                        .timestamp(1000)
+                        .build()
+                },
+                ctx_fn: FitnessContext::new,
+                expected_eligible: true,
+                expected_score: 100.0, // BASE_SCORE
+            },
+            FitnessVector {
+                name: "derp_penalty",
+                profile_fn: || {
+                    DeviceProfile::builder(NodeId::new("v2"))
+                        .cpu_cores(8)
+                        .memory_mb(16384)
+                        .latency_class(LatencyClass::Derp)
+                        .power_source(PowerSource::Mains)
+                        .availability(AvailabilityProfile::AlwaysOn)
+                        .timestamp(1000)
+                        .build()
+                },
+                ctx_fn: FitnessContext::new,
+                expected_eligible: true,
+                // BASE - DERP_PENALTY - 3*LATENCY_PENALTY = 100 - 30 - 30 = 40
+                expected_score: 40.0,
+            },
+            FitnessVector {
+                name: "low_battery",
+                profile_fn: || {
+                    DeviceProfile::builder(NodeId::new("v3"))
+                        .cpu_cores(8)
+                        .memory_mb(16384)
+                        .latency_class(LatencyClass::Local)
+                        .power_source(PowerSource::Battery)
+                        .battery_percent(10)
+                        .availability(AvailabilityProfile::AlwaysOn)
+                        .timestamp(1000)
+                        .build()
+                },
+                ctx_fn: FitnessContext::new,
+                expected_eligible: true,
+                // BASE - LOW_BATTERY_PENALTY = 100 - 40 = 60
+                expected_score: 60.0,
+            },
+            FitnessVector {
+                name: "locality_bonus",
+                profile_fn: || {
+                    DeviceProfile::builder(NodeId::new("v4"))
+                        .cpu_cores(8)
+                        .memory_mb(16384)
+                        .latency_class(LatencyClass::Local)
+                        .power_source(PowerSource::Mains)
+                        .availability(AvailabilityProfile::AlwaysOn)
+                        .timestamp(1000)
+                        .build()
+                },
+                ctx_fn: || FitnessContext::new().with_symbols_present(true),
+                expected_eligible: true,
+                // BASE + LOCALITY_BONUS = 100 + 25 = 125
+                expected_score: 125.0,
+            },
+            FitnessVector {
+                name: "missing_gpu",
+                profile_fn: || {
+                    DeviceProfile::builder(NodeId::new("v5"))
+                        .cpu_cores(8)
+                        .memory_mb(16384)
+                        .timestamp(1000)
+                        .build()
+                },
+                ctx_fn: || FitnessContext::new().with_requires_gpu(true),
+                expected_eligible: false,
+                expected_score: 0.0,
+            },
+            FitnessVector {
+                name: "insufficient_memory",
+                profile_fn: || {
+                    DeviceProfile::builder(NodeId::new("v6"))
+                        .cpu_cores(8)
+                        .memory_mb(4096)
+                        .timestamp(1000)
+                        .build()
+                },
+                ctx_fn: || FitnessContext::new().with_min_memory_mb(8192),
+                expected_eligible: false,
+                expected_score: 0.0,
+            },
+        ];
+
+        for v in vectors {
+            let profile = (v.profile_fn)();
+            let ctx = (v.ctx_fn)();
+            let score = profile.compute_fitness(&ctx);
+
+            assert_eq!(
+                score.eligible, v.expected_eligible,
+                "Eligibility mismatch for vector '{}'",
+                v.name
+            );
+            assert!(
+                (score.score - v.expected_score).abs() < 0.001,
+                "Score mismatch for vector '{}': expected {}, got {}",
+                v.name,
+                v.expected_score,
+                score.score
+            );
+        }
+    }
+
+    // =========================================================================
+    // Capability Reporting Tests
+    // =========================================================================
+
+    #[test]
+    fn test_capability_reporting_cpu() {
+        for cores in [1u16, 4, 8, 16, 64, 128] {
+            let profile = DeviceProfile::builder(test_node_id())
+                .cpu_cores(cores)
+                .build();
+            assert_eq!(profile.cpu_cores, cores, "CPU cores mismatch for {cores}");
+        }
+    }
+
+    #[test]
+    fn test_capability_reporting_memory() {
+        for mem_mb in [512u32, 1024, 4096, 16384, 65536, 262144] {
+            let profile = DeviceProfile::builder(test_node_id())
+                .memory_mb(mem_mb)
+                .build();
+            assert_eq!(profile.memory_mb, mem_mb, "Memory mismatch for {mem_mb}");
+        }
+    }
+
+    #[test]
+    fn test_capability_reporting_storage() {
+        let profile = DeviceProfile::builder(test_node_id())
+            .local_storage_mb(1_000_000)
+            .symbol_store_quota_mb(10_000)
+            .build();
+
+        assert_eq!(profile.local_storage_mb, 1_000_000);
+        assert_eq!(profile.symbol_store_quota_mb, 10_000);
+    }
+
+    #[test]
+    fn test_capability_reporting_network() {
+        for (kbps, class) in [
+            (1_000u32, LatencyClass::Derp),
+            (10_000, LatencyClass::Internet),
+            (100_000, LatencyClass::Lan),
+            (1_000_000, LatencyClass::Local),
+        ] {
+            let profile = DeviceProfile::builder(test_node_id())
+                .bandwidth_estimate_kbps(kbps)
+                .latency_class(class)
+                .build();
+
+            assert_eq!(profile.bandwidth_estimate_kbps, kbps);
+            assert_eq!(profile.latency_class, class);
+        }
+    }
+
+    #[test]
+    fn test_capability_reporting_power_states() {
+        let tests = [
+            (PowerSource::Mains, None, false),
+            (PowerSource::Battery, Some(100u8), false),
+            (PowerSource::Battery, Some(50), false),
+            (PowerSource::Battery, Some(19), true),
+            (PowerSource::Solar, None, false),
+            (PowerSource::Unknown, None, false),
+        ];
+
+        for (source, battery, expected_low) in tests {
+            let mut builder = DeviceProfile::builder(test_node_id()).power_source(source);
+            if let Some(pct) = battery {
+                builder = builder.battery_percent(pct);
+            }
+            let profile = builder.build();
+
+            assert_eq!(profile.power_source, source);
+            assert_eq!(profile.battery_percent, battery);
+            assert_eq!(
+                profile.is_low_battery(),
+                expected_low,
+                "Low battery mismatch for {source:?}/{battery:?}"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Resource Constraint Tests
+    // =========================================================================
+
+    #[test]
+    fn test_constraint_cpu_bound() {
+        // CPU-bound connectors should work regardless of memory
+        let low_mem_profile = DeviceProfile::builder(test_node_id())
+            .cpu_cores(16)
+            .memory_mb(2048)
+            .build();
+
+        let ctx = FitnessContext::new(); // No memory requirement
+        let score = low_mem_profile.compute_fitness(&ctx);
+        assert!(score.eligible);
+    }
+
+    #[test]
+    fn test_constraint_memory_bound() {
+        // Memory-bound connectors require minimum memory
+        let ctx = FitnessContext::new().with_min_memory_mb(32768);
+
+        let small = DeviceProfile::builder(test_node_id())
+            .memory_mb(16384)
+            .build();
+        let large = DeviceProfile::builder(test_node_id())
+            .memory_mb(65536)
+            .build();
+
+        assert!(!small.compute_fitness(&ctx).eligible);
+        assert!(large.compute_fitness(&ctx).eligible);
+    }
+
+    #[test]
+    fn test_constraint_gpu_requirement() {
+        let ctx = FitnessContext::new().with_requires_gpu(true);
+
+        let no_gpu = DeviceProfile::builder(test_node_id()).build();
+        let with_gpu = DeviceProfile::builder(test_node_id())
+            .gpu(GpuProfile::new(GpuVendor::Nvidia, "RTX 3080", 10240))
+            .build();
+
+        assert!(!no_gpu.compute_fitness(&ctx).eligible);
+        assert!(with_gpu.compute_fitness(&ctx).eligible);
+    }
+
+    #[test]
+    fn test_constraint_tpu_requirement() {
+        let ctx = FitnessContext::new().with_requires_tpu(true);
+
+        let no_tpu = DeviceProfile::builder(test_node_id()).build();
+        let with_tpu = DeviceProfile::builder(test_node_id())
+            .tpu(TpuProfile::new(TpuVendor::Google, "v4", 4, 32768))
+            .build();
+
+        assert!(!no_tpu.compute_fitness(&ctx).eligible);
+        assert!(with_tpu.compute_fitness(&ctx).eligible);
+    }
+
+    #[test]
+    fn test_constraint_connector_requirement() {
+        let required_id = ConnectorId::new("fcp", "anthropic", "1.0.0").unwrap();
+        let ctx = FitnessContext::new().with_required_connector(required_id.clone());
+
+        let no_connector = DeviceProfile::builder(test_node_id()).build();
+        let wrong_connector = DeviceProfile::builder(test_node_id())
+            .add_connector(InstalledConnector::new(
+                ConnectorId::new("fcp", "openai", "1.0.0").unwrap(),
+                "1.0.0",
+                ObjectId::from_bytes([0u8; 32]),
+            ))
+            .build();
+        let correct_connector = DeviceProfile::builder(test_node_id())
+            .add_connector(InstalledConnector::new(
+                required_id,
+                "1.0.0",
+                ObjectId::from_bytes([0u8; 32]),
+            ))
+            .build();
+
+        assert!(!no_connector.compute_fitness(&ctx).eligible);
+        assert!(!wrong_connector.compute_fitness(&ctx).eligible);
+        assert!(correct_connector.compute_fitness(&ctx).eligible);
+    }
+
+    #[test]
+    fn test_constraint_combined() {
+        // Require both GPU and minimum memory
+        let ctx = FitnessContext::new()
+            .with_requires_gpu(true)
+            .with_min_memory_mb(32768);
+
+        let tests = [
+            ("no_gpu_no_mem", false, 16384, false),
+            ("no_gpu_has_mem", false, 65536, false),
+            ("has_gpu_no_mem", true, 16384, false),
+            ("has_gpu_has_mem", true, 65536, true),
+        ];
+
+        for (name, has_gpu, mem_mb, expected_eligible) in tests {
+            let mut builder = DeviceProfile::builder(test_node_id()).memory_mb(mem_mb);
+            if has_gpu {
+                builder = builder.gpu(GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576));
+            }
+            let profile = builder.build();
+            let score = profile.compute_fitness(&ctx);
+
+            assert_eq!(
+                score.eligible, expected_eligible,
+                "Combined constraint mismatch for '{name}'"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Fitness Ranking & Tie-breaking Tests
+    // =========================================================================
+
+    #[test]
+    fn test_fitness_ranking_orders_devices_correctly() {
+        let ctx = FitnessContext::new();
+
+        // Create profiles with varying quality
+        let profiles = vec![
+            ("worst", DeviceProfile::builder(NodeId::new("worst"))
+                .latency_class(LatencyClass::Derp)
+                .power_source(PowerSource::Battery)
+                .battery_percent(10)
+                .availability(AvailabilityProfile::BestEffort)
+                .metered(true)
+                .timestamp(1000)
+                .build()),
+            ("medium", DeviceProfile::builder(NodeId::new("medium"))
+                .latency_class(LatencyClass::Lan)
+                .power_source(PowerSource::Mains)
+                .availability(AvailabilityProfile::AlwaysOn)
+                .timestamp(1000)
+                .build()),
+            ("best", DeviceProfile::builder(NodeId::new("best"))
+                .latency_class(LatencyClass::Local)
+                .power_source(PowerSource::Mains)
+                .availability(AvailabilityProfile::AlwaysOn)
+                .timestamp(1000)
+                .build()),
+        ];
+
+        let mut scores: Vec<_> = profiles
+            .iter()
+            .map(|(name, p)| (*name, p.compute_fitness(&ctx)))
+            .collect();
+
+        // Sort by score descending
+        scores.sort_by(|a, b| b.1.cmp(&a.1));
+
+        assert_eq!(scores[0].0, "best", "Best device should rank first");
+        assert_eq!(scores[1].0, "medium", "Medium device should rank second");
+        assert_eq!(scores[2].0, "worst", "Worst device should rank last");
+    }
+
+    #[test]
+    fn test_fitness_tiebreaking_by_node_id() {
+        let ctx = FitnessContext::new();
+
+        // Create identical profiles with different node IDs
+        let make_profile = |id: &str| {
+            DeviceProfile::builder(NodeId::new(id))
+                .cpu_cores(8)
+                .memory_mb(16384)
+                .latency_class(LatencyClass::Local)
+                .power_source(PowerSource::Mains)
+                .availability(AvailabilityProfile::AlwaysOn)
+                .timestamp(1000)
+                .build()
+        };
+
+        let profiles = vec![
+            ("charlie", make_profile("charlie")),
+            ("alice", make_profile("alice")),
+            ("bob", make_profile("bob")),
+        ];
+
+        let scores: Vec<_> = profiles
+            .iter()
+            .map(|(name, p)| (*name, p.compute_fitness(&ctx), p.node_id.as_str().to_string()))
+            .collect();
+
+        // All scores should be equal
+        assert!(
+            scores.windows(2).all(|w| w[0].1 == w[1].1),
+            "All fitness scores should be equal for tie-breaking test"
+        );
+
+        // When scores are equal, sort by node_id for determinism
+        let mut sorted = scores.clone();
+        sorted.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        // Node IDs should be in alphabetical order due to tie-breaking
+        assert_eq!(sorted[0].0, "alice");
+        assert_eq!(sorted[1].0, "bob");
+        assert_eq!(sorted[2].0, "charlie");
+    }
+
+    #[test]
+    fn test_fitness_eligible_always_ranks_above_ineligible() {
+        let ctx = FitnessContext::new().with_requires_gpu(true);
+
+        let ineligible = DeviceProfile::builder(NodeId::new("no-gpu"))
+            .cpu_cores(128)
+            .memory_mb(1_048_576)
+            .latency_class(LatencyClass::Local)
+            .timestamp(1000)
+            .build();
+
+        let eligible = DeviceProfile::builder(NodeId::new("has-gpu"))
+            .cpu_cores(1)
+            .memory_mb(512)
+            .latency_class(LatencyClass::Derp)
+            .power_source(PowerSource::Battery)
+            .battery_percent(5)
+            .gpu(GpuProfile::new(GpuVendor::Intel, "Arc A380", 6144))
+            .timestamp(1000)
+            .build();
+
+        let score_ineligible = ineligible.compute_fitness(&ctx);
+        let score_eligible = eligible.compute_fitness(&ctx);
+
+        // Despite better specs, ineligible device ranks lower
+        assert!(!score_ineligible.eligible);
+        assert!(score_eligible.eligible);
+        assert!(score_eligible > score_ineligible);
+    }
+
+    // =========================================================================
+    // Serialization Tests
+    // =========================================================================
+
+    #[test]
+    fn test_cbor_roundtrip_preserves_all_fields() {
+        let connector = InstalledConnector::new(
+            ConnectorId::new("fcp", "test", "2.0.0").unwrap(),
+            "2.0.0",
+            ObjectId::from_bytes([0x55u8; 32]),
+        );
+
+        let original = DeviceProfile::builder(NodeId::new("roundtrip-test"))
+            .cpu_cores(32)
+            .cpu_arch(CpuArch::Aarch64)
+            .memory_mb(131072)
+            .gpu(GpuProfile::new(GpuVendor::Apple, "M3 Ultra", 192 * 1024).with_compute_capability("Metal 3"))
+            .tpu(TpuProfile::new(TpuVendor::Google, "v5e", 8, 65536))
+            .local_storage_mb(2_000_000)
+            .symbol_store_quota_mb(100_000)
+            .power_source(PowerSource::Solar)
+            .bandwidth_estimate_kbps(10_000_000)
+            .latency_class(LatencyClass::Lan)
+            .metered(true)
+            .availability(AvailabilityProfile::Scheduled)
+            .next_expected_downtime(1800000000000)
+            .add_connector(connector)
+            .timestamp(1705000000000)
+            .build();
+
+        let mut cbor_bytes = Vec::new();
+        ciborium::into_writer(&original, &mut cbor_bytes).unwrap();
+
+        let decoded: DeviceProfile = ciborium::from_reader(&cbor_bytes[..]).unwrap();
+
+        // Verify every field
+        assert_eq!(original.node_id, decoded.node_id);
+        assert_eq!(original.profile_version, decoded.profile_version);
+        assert_eq!(original.timestamp, decoded.timestamp);
+        assert_eq!(original.cpu_cores, decoded.cpu_cores);
+        assert_eq!(original.cpu_arch, decoded.cpu_arch);
+        assert_eq!(original.memory_mb, decoded.memory_mb);
+        assert_eq!(original.gpu, decoded.gpu);
+        assert_eq!(original.tpu, decoded.tpu);
+        assert_eq!(original.local_storage_mb, decoded.local_storage_mb);
+        assert_eq!(original.symbol_store_quota_mb, decoded.symbol_store_quota_mb);
+        assert_eq!(original.power_source, decoded.power_source);
+        assert_eq!(original.battery_percent, decoded.battery_percent);
+        assert_eq!(original.bandwidth_estimate_kbps, decoded.bandwidth_estimate_kbps);
+        assert_eq!(original.latency_class, decoded.latency_class);
+        assert_eq!(original.metered, decoded.metered);
+        assert_eq!(original.availability, decoded.availability);
+        assert_eq!(original.next_expected_downtime, decoded.next_expected_downtime);
+        assert_eq!(original.connectors, decoded.connectors);
+    }
+
+    #[test]
+    fn test_json_roundtrip_preserves_all_fields() {
+        let original = DeviceProfile::builder(NodeId::new("json-test"))
+            .cpu_cores(16)
+            .cpu_arch(CpuArch::X86_64)
+            .memory_mb(32768)
+            .gpu(GpuProfile::new(GpuVendor::Amd, "RX 7900 XTX", 24576))
+            .power_source(PowerSource::Mains)
+            .latency_class(LatencyClass::Internet)
+            .availability(AvailabilityProfile::BestEffort)
+            .timestamp(1705000000000)
+            .build();
+
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        let decoded: DeviceProfile = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_enum_serialization_formats() {
+        // Verify enums serialize to expected string formats
+        let profile = DeviceProfile::builder(NodeId::new("enum-test"))
+            .cpu_arch(CpuArch::Aarch64)
+            .power_source(PowerSource::Battery)
+            .latency_class(LatencyClass::Derp)
+            .availability(AvailabilityProfile::Scheduled)
+            .timestamp(1000)
+            .build();
+
+        let json = serde_json::to_string(&profile).unwrap();
+
+        // Check snake_case serialization
+        assert!(json.contains("\"aarch64\""), "CpuArch should serialize as snake_case");
+        assert!(json.contains("\"battery\""), "PowerSource should serialize as snake_case");
+        assert!(json.contains("\"derp\""), "LatencyClass should serialize as snake_case");
+        assert!(json.contains("\"scheduled\""), "AvailabilityProfile should serialize as snake_case");
+    }
 }
