@@ -181,6 +181,72 @@ impl ZoneKeyManifest {
             .iter()
             .find(|entry| entry.recipient == *node_id)
     }
+
+    /// Create a new empty manifest (for testing).
+    ///
+    /// # Errors
+    ///
+    /// This function is infallible but returns `Result` for API consistency.
+    #[cfg(test)]
+    pub fn new_empty(
+        zone_id: ZoneId,
+        valid_from: u64,
+        _owner_key: &fcp_crypto::Ed25519SigningKey,
+    ) -> Result<Self, crate::error::FcpError> {
+        use rand::RngCore;
+
+        let mut zone_key_id = [0u8; 8];
+        rand::rngs::OsRng.fill_bytes(&mut zone_key_id);
+
+        let mut object_id_key_id = [0u8; 8];
+        rand::rngs::OsRng.fill_bytes(&mut object_id_key_id);
+
+        // We need to sign a dummy payload or just return a valid signed structure?
+        // The structure needs to be signed.
+        // We can't easily sign `Self` because `signature` is a field.
+        // We need a canonical representation without signature.
+        // Ideally we follow `ZoneKeyManifest::sign` pattern if it existed.
+        // But for testing we can just sign an empty byte slice if verify isn't strict about payload match
+        // OR we duplicate the signing logic here.
+        // But `ZoneKeyManifest` doesn't seem to have a canonical serialization method exposed?
+        // Wait, `apply_manifest` doesn't verify signature. `NodeKeyAttestation` does.
+        // `ZoneKeyManifest` struct definition doesn't have a `verify` method shown in my previous `read_file`.
+        // Let's verify `ZoneKeyManifest` struct again.
+
+        // It has `signature: NodeSignature`.
+        // So we can just create a dummy signature.
+
+        let signature =
+            crate::NodeSignature::new(crate::NodeId::new("owner"), [0u8; 64], valid_from);
+
+        Ok(Self {
+            header: ObjectHeader {
+                schema: fcp_cbor::SchemaId::new(
+                    "fcp.zone",
+                    "ZoneKeyManifest",
+                    semver::Version::new(1, 0, 0),
+                ),
+                zone_id: zone_id.clone(),
+                created_at: valid_from,
+                provenance: crate::Provenance::new(zone_id.clone()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            },
+            zone_id,
+            zone_key_id: ZoneKeyId(zone_key_id),
+            object_id_key_id: ObjectIdKeyId(object_id_key_id),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature,
+        })
+    }
 }
 
 /// Zone key ring storing active/known keys by id.

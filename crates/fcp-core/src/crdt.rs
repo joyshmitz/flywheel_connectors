@@ -172,13 +172,16 @@ where
 {
     pub fn add(&mut self, value: T, tag: OrSetTag) {
         let tags = self.entries.entry(value).or_default();
-        tags.adds.insert(tag);
+        if !tags.removes.contains(&tag) {
+            tags.adds.insert(tag);
+        }
     }
 
     /// Remove all observed tags for a value.
     pub fn remove_observed(&mut self, value: &T) {
         if let Some(tags) = self.entries.get_mut(value) {
             tags.removes.extend(tags.adds.iter().cloned());
+            tags.adds.clear();
         }
     }
 
@@ -186,14 +189,22 @@ where
     pub fn contains(&self, value: &T) -> bool {
         self.entries
             .get(value)
-            .is_some_and(|tags| tags.adds.iter().any(|tag| !tags.removes.contains(tag)))
+            .is_some_and(|tags| !tags.adds.is_empty())
     }
 
     pub fn merge(&mut self, other: &Self) {
         for (value, tags) in &other.entries {
             let entry = self.entries.entry(value.clone()).or_default();
-            entry.adds.extend(tags.adds.iter().cloned());
             entry.removes.extend(tags.removes.iter().cloned());
+
+            for tag in &tags.adds {
+                if !entry.removes.contains(tag) {
+                    entry.adds.insert(tag.clone());
+                }
+            }
+
+            // Cleanup existing adds that are now removed
+            entry.adds.retain(|tag| !entry.removes.contains(tag));
         }
     }
 
@@ -201,7 +212,7 @@ where
     pub fn len(&self) -> usize {
         self.entries
             .iter()
-            .filter(|(_, tags)| tags.adds.iter().any(|tag| !tags.removes.contains(tag)))
+            .filter(|(_, tags)| !tags.adds.is_empty())
             .count()
     }
 
@@ -214,7 +225,7 @@ where
     pub fn values(&self) -> Vec<T> {
         self.entries
             .iter()
-            .filter(|(_, tags)| tags.adds.iter().any(|tag| !tags.removes.contains(tag)))
+            .filter(|(_, tags)| !tags.adds.is_empty())
             .map(|(value, _)| value.clone())
             .collect()
     }
