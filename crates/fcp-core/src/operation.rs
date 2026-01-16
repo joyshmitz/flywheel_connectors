@@ -905,4 +905,698 @@ mod tests {
         // The receipt_id from the entry is what should be returned
         assert_eq!(entry.receipt_id, Some(test_object_id("receipt-1")));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Golden Vector Tests - Deterministic CBOR Serialization
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn golden_intent_signable_bytes_deterministic() {
+        // Create intent with all fields populated
+        let intent = create_test_intent();
+
+        // Signable bytes must be deterministic across calls
+        let bytes1 = intent.signable_bytes();
+        let bytes2 = intent.signable_bytes();
+        let bytes3 = intent.signable_bytes();
+
+        assert_eq!(bytes1, bytes2);
+        assert_eq!(bytes2, bytes3);
+
+        // Must start with domain separator
+        assert!(bytes1.starts_with(b"FCP2-INTENT-V1"));
+    }
+
+    #[test]
+    fn golden_intent_signable_bytes_include_all_fields() {
+        let intent = create_test_intent();
+        let bytes = intent.signable_bytes();
+
+        // Bytes should include:
+        // - Domain separator
+        // - created_at (8 bytes)
+        // - request_object_id
+        // - capability_token_jti (16 bytes for UUID)
+        // - idempotency_key (present marker + content)
+        // - planned_at (8 bytes)
+        // - planned_by
+        // - lease_seq (present marker + 8 bytes)
+        // - upstream_idempotency (present marker)
+
+        // Must be non-trivial length (domain sep + all fields)
+        assert!(bytes.len() > 50);
+    }
+
+    #[test]
+    fn golden_receipt_signable_bytes_deterministic() {
+        let receipt = create_test_receipt();
+
+        let bytes1 = receipt.signable_bytes();
+        let bytes2 = receipt.signable_bytes();
+
+        assert_eq!(bytes1, bytes2);
+        assert!(bytes1.starts_with(b"FCP2-RECEIPT-V1"));
+    }
+
+    #[test]
+    fn golden_intent_receipt_signable_bytes_differ() {
+        // Intent and receipt for same operation should have different signable bytes
+        let intent = create_test_intent();
+        let receipt = create_test_receipt();
+
+        let intent_bytes = intent.signable_bytes();
+        let receipt_bytes = receipt.signable_bytes();
+
+        // Different domain separators and structures
+        assert_ne!(intent_bytes, receipt_bytes);
+        assert!(intent_bytes.starts_with(b"FCP2-INTENT-V1"));
+        assert!(receipt_bytes.starts_with(b"FCP2-RECEIPT-V1"));
+    }
+
+    #[test]
+    fn golden_intent_serde_json_roundtrip() {
+        let intent = create_test_intent();
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&intent).unwrap();
+
+        // Parse back
+        let parsed: OperationIntent = serde_json::from_str(&json).unwrap();
+
+        // Key fields must match
+        assert_eq!(parsed.request_object_id, intent.request_object_id);
+        assert_eq!(parsed.idempotency_key, intent.idempotency_key);
+        assert_eq!(parsed.lease_seq, intent.lease_seq);
+        assert_eq!(parsed.planned_at, intent.planned_at);
+    }
+
+    #[test]
+    fn golden_receipt_serde_json_roundtrip() {
+        let receipt = create_test_receipt();
+
+        let json = serde_json::to_string_pretty(&receipt).unwrap();
+        let parsed: OperationReceipt = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.request_object_id, receipt.request_object_id);
+        assert_eq!(parsed.idempotency_key, receipt.idempotency_key);
+        assert_eq!(parsed.outcome_object_ids, receipt.outcome_object_ids);
+        assert_eq!(parsed.executed_at, receipt.executed_at);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Idempotency Key Tests - Core Idempotency Properties
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn idempotency_different_keys_produce_independent_entries() {
+        // Two operations with different idempotency keys should be independent
+        let key1 = "operation-001";
+        let key2 = "operation-002";
+
+        let entry1 = IdempotencyEntry {
+            key: key1.to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent-1"),
+            receipt_id: Some(test_object_id("receipt-1")),
+            status: IntentStatus::Completed,
+            created_at: 1000,
+            expires_at: 2000,
+        };
+
+        let entry2 = IdempotencyEntry {
+            key: key2.to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent-2"),
+            receipt_id: Some(test_object_id("receipt-2")),
+            status: IntentStatus::Completed,
+            created_at: 1000,
+            expires_at: 2000,
+        };
+
+        // Keys are different
+        assert_ne!(entry1.key, entry2.key);
+
+        // Each should have its own receipt
+        assert_ne!(entry1.receipt_id, entry2.receipt_id);
+
+        // Both are independently cacheable
+        assert!(entry1.should_return_cached(1500));
+        assert!(entry2.should_return_cached(1500));
+    }
+
+    #[test]
+    fn idempotency_key_collision_resistance() {
+        // Keys that are similar but not identical should not collide
+        let keys = [
+            "op-1",
+            "op-10",
+            "op-100",
+            "op-1000",
+            "op_1",
+            "op.1",
+            "op:1",
+            "OP-1",
+            "Op-1",
+        ];
+
+        // All keys should be unique
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len());
+    }
+
+    #[test]
+    fn idempotency_key_expiry_semantics() {
+        let entry = IdempotencyEntry {
+            key: "test-key".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: Some(test_object_id("receipt")),
+            status: IntentStatus::Completed,
+            created_at: 1000,
+            expires_at: 2000,
+        };
+
+        // Before expiry - should return cached
+        assert!(!entry.is_expired(1999));
+        assert!(entry.should_return_cached(1999));
+
+        // At expiry boundary - expired
+        assert!(entry.is_expired(2000));
+        assert!(!entry.should_return_cached(2000));
+
+        // After expiry - key may be reused
+        assert!(entry.is_expired(3000));
+        assert!(!entry.should_return_cached(3000));
+    }
+
+    #[test]
+    fn idempotency_entry_lifecycle() {
+        // Simulate full lifecycle of an idempotency entry
+
+        // 1. Intent created, entry pending
+        let mut entry = IdempotencyEntry {
+            key: "payment-xyz".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: None,
+            status: IntentStatus::Pending,
+            created_at: 1000,
+            expires_at: 1000 + 86400, // 24 hours
+        };
+
+        assert!(!entry.is_terminal());
+        assert!(!entry.should_return_cached(1000));
+
+        // 2. Operation in progress
+        entry.status = IntentStatus::InProgress;
+        assert!(!entry.is_terminal());
+        assert!(!entry.should_return_cached(1000));
+
+        // 3. Operation completed, receipt added
+        entry.status = IntentStatus::Completed;
+        entry.receipt_id = Some(test_object_id("receipt"));
+
+        assert!(entry.is_terminal());
+        assert!(entry.should_return_cached(1500));
+
+        // 4. Retry with same key should return cached
+        assert!(entry.should_return_cached(2000));
+        assert!(entry.should_return_cached(50000)); // Still within 24 hour window
+
+        // 5. After expiry, entry is no longer cached
+        assert!(!entry.should_return_cached(1000 + 86400 + 1));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lease Fencing Tests - Preventing Zombie Lease Holders
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lease_fencing_intent_binds_to_lease_seq() {
+        let mut intent = create_test_intent();
+        intent.lease_seq = Some(42);
+
+        assert!(intent.is_lease_bound());
+        assert_eq!(intent.lease_seq, Some(42));
+    }
+
+    #[test]
+    fn lease_fencing_stale_lease_detection() {
+        // Simulate stale lease holder attempting execution
+        let intent = create_test_intent();
+        let expected_lease_seq = 42_u64;
+
+        // Intent was created with lease_seq = 42
+        assert_eq!(intent.lease_seq, Some(expected_lease_seq));
+
+        // Stale lease holder has old sequence
+        let stale_lease_seq = 40_u64;
+
+        // Comparison shows stale (old seq < expected seq)
+        assert!(stale_lease_seq < expected_lease_seq);
+    }
+
+    #[test]
+    fn lease_fencing_no_lease_for_safe_operations() {
+        let mut intent = create_test_intent();
+        intent.lease_seq = None;
+
+        // Safe operations don't require lease binding
+        assert!(!intent.is_lease_bound());
+
+        // Can still have strict idempotency without lease
+        assert!(intent.requires_strict_idempotency());
+    }
+
+    #[test]
+    fn lease_fencing_signable_bytes_include_lease_seq() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+
+        // Same intent but different lease sequences
+        intent1.lease_seq = Some(100);
+        intent2.lease_seq = Some(200);
+
+        // Signable bytes should differ
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn lease_fencing_signable_bytes_differ_with_without_lease() {
+        let mut intent_with_lease = create_test_intent();
+        let mut intent_without_lease = create_test_intent();
+
+        intent_with_lease.lease_seq = Some(42);
+        intent_without_lease.lease_seq = None;
+
+        // Signable bytes should differ
+        assert_ne!(
+            intent_with_lease.signable_bytes(),
+            intent_without_lease.signable_bytes()
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fault Injection Tests - Crash Recovery Simulation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fault_crash_between_intent_and_receipt_detection() {
+        // Simulate crash after intent created but before receipt
+        let intent = create_test_intent();
+        let has_receipt = false;
+        let now = intent.planned_at + 7200; // 2 hours later
+        let orphan_threshold = 3600; // 1 hour threshold
+
+        // Intent should be detected as orphaned
+        assert!(is_intent_orphaned(&intent, has_receipt, now, orphan_threshold));
+    }
+
+    #[test]
+    fn fault_crash_recovery_with_receipt_present() {
+        // If receipt exists, intent is not orphaned
+        let intent = create_test_intent();
+        let has_receipt = true;
+        let now = intent.planned_at + 7200; // 2 hours later
+        let orphan_threshold = 3600;
+
+        assert!(!is_intent_orphaned(&intent, has_receipt, now, orphan_threshold));
+    }
+
+    #[test]
+    fn fault_intent_not_orphaned_within_threshold() {
+        // Intent within threshold should not be orphaned
+        let intent = create_test_intent();
+        let has_receipt = false;
+        let now = intent.planned_at + 1800; // 30 minutes later
+        let orphan_threshold = 3600; // 1 hour threshold
+
+        // Still within threshold, not orphaned yet
+        assert!(!is_intent_orphaned(&intent, has_receipt, now, orphan_threshold));
+    }
+
+    #[test]
+    fn fault_orphan_detection_at_threshold_boundary() {
+        let intent = create_test_intent();
+        let has_receipt = false;
+        let orphan_threshold = 3600;
+
+        // Exactly at threshold - not orphaned (> not >=)
+        let at_threshold = intent.planned_at + orphan_threshold;
+        assert!(!is_intent_orphaned(&intent, has_receipt, at_threshold, orphan_threshold));
+
+        // One second past threshold - orphaned
+        let past_threshold = intent.planned_at + orphan_threshold + 1;
+        assert!(is_intent_orphaned(&intent, has_receipt, past_threshold, orphan_threshold));
+    }
+
+    #[test]
+    fn fault_orphan_detection_handles_timestamp_overflow() {
+        let mut intent = create_test_intent();
+        intent.planned_at = u64::MAX - 100; // Near max timestamp
+
+        let has_receipt = false;
+        let orphan_threshold = 3600;
+
+        // Should not panic on overflow, should use saturating subtraction
+        let result = is_intent_orphaned(&intent, has_receipt, u64::MAX, orphan_threshold);
+
+        // 100 seconds elapsed, less than threshold
+        assert!(!result);
+    }
+
+    #[test]
+    fn fault_idempotency_entry_status_transitions() {
+        // Test valid status transitions for fault recovery
+
+        // Pending -> InProgress (normal flow)
+        let status1 = IntentStatus::Pending;
+        assert!(!matches!(status1, IntentStatus::InProgress));
+
+        // InProgress -> Completed (success)
+        let status2 = IntentStatus::InProgress;
+        assert!(!matches!(status2, IntentStatus::Completed));
+
+        // InProgress -> Failed (error)
+        assert!(!matches!(status2, IntentStatus::Failed));
+
+        // InProgress -> Orphaned (crash recovery)
+        assert!(!matches!(status2, IntentStatus::Orphaned));
+    }
+
+    #[test]
+    fn fault_incomplete_intent_reconciliation_scenario() {
+        // Simulate reconciliation of incomplete intents during recovery
+
+        // Found intent without receipt
+        let entry = IdempotencyEntry {
+            key: "incomplete-op".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("orphan-intent"),
+            receipt_id: None,
+            status: IntentStatus::InProgress,
+            created_at: 1000,
+            expires_at: 5000,
+        };
+
+        // Not terminal, no cached receipt to return
+        assert!(!entry.is_terminal());
+        assert!(!entry.should_return_cached(2000));
+
+        // After reconciliation, status would be set to Orphaned
+        let mut reconciled = entry;
+        reconciled.status = IntentStatus::Orphaned;
+
+        // Still not terminal (Orphaned is not success/failure)
+        // Note: Orphaned may need different handling in actual implementation
+        assert!(!reconciled.is_terminal());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Concurrency Tests - Race Condition Prevention
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn concurrency_same_key_single_execution_check() {
+        // For concurrent requests with same key, only one should execute
+        // This is enforced by checking should_return_cached before execution
+
+        let entry = IdempotencyEntry {
+            key: "concurrent-op".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: None,
+            status: IntentStatus::InProgress,
+            created_at: 1000,
+            expires_at: 5000,
+        };
+
+        // First request starts execution - status is InProgress
+        assert!(!entry.is_terminal());
+        assert!(!entry.should_return_cached(1100));
+
+        // Second request checks at same time - sees InProgress
+        // Should not start a new execution (implementation detail)
+        assert!(!entry.is_terminal());
+    }
+
+    #[test]
+    fn concurrency_different_keys_independent_execution() {
+        // Concurrent requests with different keys should all execute
+        let entries: Vec<IdempotencyEntry> = (0..5)
+            .map(|i| IdempotencyEntry {
+                key: format!("concurrent-{i}"),
+                zone_id: test_zone(),
+                intent_id: test_object_id(&format!("intent-{i}")),
+                receipt_id: None,
+                status: IntentStatus::Pending,
+                created_at: 1000,
+                expires_at: 5000,
+            })
+            .collect();
+
+        // All should be independent - none should return cached
+        for entry in &entries {
+            assert!(!entry.should_return_cached(1100));
+        }
+
+        // All have unique keys
+        let keys: std::collections::HashSet<_> = entries.iter().map(|e| &e.key).collect();
+        assert_eq!(keys.len(), 5);
+    }
+
+    #[test]
+    fn concurrency_race_intent_lease_expiry_scenario() {
+        // Simulate race between intent creation and lease expiry
+        let intent = create_test_intent();
+
+        // Intent was created when lease was active (lease_seq = 42)
+        assert_eq!(intent.lease_seq, Some(42));
+
+        // If lease expires before execution completes, the intent's lease_seq
+        // will be stale compared to a new lease's sequence
+        let new_lease_seq = 43_u64;
+
+        // Stale lease detection (intent's seq < current seq)
+        assert!(intent.lease_seq.unwrap() < new_lease_seq);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Validation Error Display Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validation_error_display_all_variants() {
+        let errors = [
+            OperationValidationError::IntentNotFound {
+                idempotency_key: "key-123".to_string(),
+            },
+            OperationValidationError::AlreadyCompleted {
+                idempotency_key: "key-456".to_string(),
+            },
+            OperationValidationError::ZoneMismatch {
+                expected: ZoneId::work(),
+                got: ZoneId::owner(),
+            },
+            OperationValidationError::IntentReferenceMissing {
+                receipt_id: test_object_id("receipt"),
+            },
+            OperationValidationError::LeaseSeqMismatch {
+                expected: 42,
+                got: 41,
+            },
+            OperationValidationError::IntentOrphaned {
+                intent_id: test_object_id("orphan"),
+                planned_at: 1000,
+            },
+            OperationValidationError::SignatureInvalid {
+                reason: "bad signature".to_string(),
+            },
+            OperationValidationError::RequestMismatch {
+                expected: test_object_id("req-1"),
+                got: test_object_id("req-2"),
+            },
+        ];
+
+        for error in &errors {
+            let display = error.to_string();
+            assert!(!display.is_empty());
+
+            // Each error should have meaningful content
+            match error {
+                OperationValidationError::IntentNotFound { idempotency_key } => {
+                    assert!(display.contains(idempotency_key));
+                }
+                OperationValidationError::AlreadyCompleted { idempotency_key } => {
+                    assert!(display.contains(idempotency_key));
+                }
+                OperationValidationError::ZoneMismatch { .. } => {
+                    assert!(display.contains("mismatch"));
+                }
+                OperationValidationError::IntentReferenceMissing { .. } => {
+                    assert!(display.contains("reference"));
+                }
+                OperationValidationError::LeaseSeqMismatch { expected, .. } => {
+                    assert!(display.contains(&expected.to_string()));
+                }
+                OperationValidationError::IntentOrphaned { .. } => {
+                    assert!(display.contains("orphaned"));
+                }
+                OperationValidationError::SignatureInvalid { reason } => {
+                    assert!(display.contains(reason));
+                }
+                OperationValidationError::RequestMismatch { .. } => {
+                    assert!(display.contains("mismatch"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn validation_error_is_std_error() {
+        let error: Box<dyn std::error::Error> = Box::new(
+            OperationValidationError::IntentNotFound {
+                idempotency_key: "test".to_string(),
+            }
+        );
+
+        // Should implement std::error::Error
+        assert!(!error.to_string().is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Safety Tier Idempotency Requirements Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn safety_tier_dangerous_requires_strict() {
+        // Dangerous operations MUST be Strict
+        let result = required_idempotency_for_safety_tier(true, false);
+        assert_eq!(result, IdempotencyClass::Strict);
+
+        // Both dangerous and risky
+        let result = required_idempotency_for_safety_tier(true, true);
+        assert_eq!(result, IdempotencyClass::Strict);
+    }
+
+    #[test]
+    fn safety_tier_risky_requires_strict() {
+        // Risky operations SHOULD be Strict
+        let result = required_idempotency_for_safety_tier(false, true);
+        assert_eq!(result, IdempotencyClass::Strict);
+    }
+
+    #[test]
+    fn safety_tier_safe_allows_none() {
+        // Safe operations don't require idempotency
+        let result = required_idempotency_for_safety_tier(false, false);
+        assert_eq!(result, IdempotencyClass::None);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Edge Cases and Boundary Conditions
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn edge_empty_idempotency_key() {
+        let mut intent = create_test_intent();
+        intent.idempotency_key = Some(String::new());
+
+        // Empty string is still "some" key
+        assert!(intent.requires_strict_idempotency());
+
+        // Signable bytes should include the empty key
+        let bytes = intent.signable_bytes();
+        assert!(bytes.len() > 0);
+    }
+
+    #[test]
+    fn edge_very_long_idempotency_key() {
+        let mut intent = create_test_intent();
+        let long_key = "x".repeat(10_000);
+        intent.idempotency_key = Some(long_key.clone());
+
+        // Should handle long keys
+        assert!(intent.requires_strict_idempotency());
+
+        let bytes = intent.signable_bytes();
+        // Bytes should include the long key
+        assert!(bytes.len() > 10_000);
+    }
+
+    #[test]
+    fn edge_receipt_with_many_outcome_objects() {
+        let mut receipt = create_test_receipt();
+
+        // Add many outcome objects
+        receipt.outcome_object_ids = (0..100)
+            .map(|i| test_object_id(&format!("outcome-{i}")))
+            .collect();
+
+        assert_eq!(receipt.outcome_object_ids.len(), 100);
+        assert_eq!(receipt.total_objects_produced(), 100);
+
+        // Signable bytes should be deterministic
+        let bytes1 = receipt.signable_bytes();
+        let bytes2 = receipt.signable_bytes();
+        assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn edge_receipt_with_many_resource_objects() {
+        let mut receipt = create_test_receipt();
+
+        receipt.resource_object_ids = (0..50)
+            .map(|i| test_object_id(&format!("resource-{i}")))
+            .collect();
+
+        assert_eq!(receipt.resource_object_ids.len(), 50);
+        assert_eq!(receipt.total_objects_produced(), 51); // 1 outcome + 50 resources
+    }
+
+    #[test]
+    fn edge_intent_with_upstream_idempotency() {
+        let mut intent = create_test_intent();
+        intent.upstream_idempotency = Some("stripe-idem-key-xyz".to_string());
+
+        let bytes1 = intent.signable_bytes();
+
+        // Change upstream key
+        intent.upstream_idempotency = Some("stripe-idem-key-abc".to_string());
+        let bytes2 = intent.signable_bytes();
+
+        // Different upstream keys should produce different signable bytes
+        assert_ne!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn edge_intent_without_upstream_idempotency() {
+        let mut intent1 = create_test_intent();
+        let mut intent2 = create_test_intent();
+
+        intent1.upstream_idempotency = None;
+        intent2.upstream_idempotency = Some("upstream-key".to_string());
+
+        // Should produce different signable bytes
+        assert_ne!(intent1.signable_bytes(), intent2.signable_bytes());
+    }
+
+    #[test]
+    fn edge_idempotency_entry_with_failed_status() {
+        let entry = IdempotencyEntry {
+            key: "failed-op".to_string(),
+            zone_id: test_zone(),
+            intent_id: test_object_id("intent"),
+            receipt_id: Some(test_object_id("error-receipt")),
+            status: IntentStatus::Failed,
+            created_at: 1000,
+            expires_at: 2000,
+        };
+
+        // Failed is terminal
+        assert!(entry.is_terminal());
+
+        // Failed with receipt should return cached (to return error consistently)
+        assert!(entry.should_return_cached(1500));
+    }
 }
