@@ -111,7 +111,9 @@ impl Pkce {
 
     /// Generate a cryptographically random verifier.
     fn generate_verifier() -> String {
-        let bytes: Vec<u8> = (0..32).map(|_| rand::random()).collect();
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
         URL_SAFE_NO_PAD.encode(bytes)
     }
 

@@ -13,6 +13,25 @@ use crate::{
     GrantType, OAuthError, OAuthResult, OAuthTokens, Pkce, PkceMethod, ResponseMode, TokenResponse,
 };
 
+/// OAuth authentication style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthStyle {
+    /// HTTP Basic Authentication (Authorization header).
+    Basic,
+    /// Request body parameters (client_id/client_secret).
+    #[default]
+    Post,
+}
+
+impl std::fmt::Display for AuthStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Basic => write!(f, "basic"),
+            Self::Post => write!(f, "post"),
+        }
+    }
+}
+
 /// OAuth 2.0 configuration.
 #[derive(Debug, Clone)]
 pub struct OAuth2Config {
@@ -34,6 +53,8 @@ pub struct OAuth2Config {
     pub pkce_method: PkceMethod,
     /// Response mode for authorization.
     pub response_mode: ResponseMode,
+    /// Authentication style for token requests.
+    pub auth_style: AuthStyle,
     /// Additional authorization parameters.
     pub extra_auth_params: HashMap<String, String>,
     /// Additional token parameters.
@@ -61,6 +82,7 @@ impl OAuth2Config {
             use_pkce: true,
             pkce_method: PkceMethod::S256,
             response_mode: ResponseMode::Query,
+            auth_style: AuthStyle::Post,
             extra_auth_params: HashMap::new(),
             extra_token_params: HashMap::new(),
             timeout: Duration::from_secs(30),
@@ -84,6 +106,7 @@ impl OAuth2Config {
             use_pkce: true, // PKCE is required for public clients
             pkce_method: PkceMethod::S256,
             response_mode: ResponseMode::Query,
+            auth_style: AuthStyle::Post,
             extra_auth_params: HashMap::new(),
             extra_token_params: HashMap::new(),
             timeout: Duration::from_secs(30),
@@ -122,6 +145,13 @@ impl OAuth2Config {
     #[must_use]
     pub const fn with_response_mode(mut self, mode: ResponseMode) -> Self {
         self.response_mode = mode;
+        self
+    }
+
+    /// Set authentication style.
+    #[must_use]
+    pub const fn with_auth_style(mut self, style: AuthStyle) -> Self {
+        self.auth_style = style;
         self
     }
 
@@ -276,11 +306,6 @@ impl OAuth2Client {
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::AuthorizationCode.to_string());
         params.insert("code", code.to_string());
-        params.insert("client_id", self.config.client_id.clone());
-
-        if let Some(secret) = &self.config.client_secret {
-            params.insert("client_secret", secret.clone());
-        }
 
         if let Some(redirect_uri) = &self.config.redirect_uri {
             params.insert("redirect_uri", redirect_uri.clone());
@@ -300,14 +325,17 @@ impl OAuth2Client {
 
     /// Get tokens using client credentials flow.
     pub async fn client_credentials(&self, scopes: &[&str]) -> OAuthResult<OAuthTokens> {
-        let secret = self.config.client_secret.as_ref().ok_or_else(|| {
-            OAuthError::InvalidConfig("Client secret required for client credentials flow".into())
-        })?;
+        // Only require secret if not public client (though client creds usually implies confidential)
+        // If public client tries client creds, it might fail at provider, but we shouldn't block it here if secret is None
+        // But RFC says client credentials grant is for confidential clients.
+        if self.config.client_secret.is_none() {
+            return Err(OAuthError::InvalidConfig(
+                "Client secret required for client credentials flow".into(),
+            ));
+        }
 
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::ClientCredentials.to_string());
-        params.insert("client_id", self.config.client_id.clone());
-        params.insert("client_secret", secret.clone());
 
         let all_scopes: Vec<&str> = self
             .config
@@ -334,11 +362,6 @@ impl OAuth2Client {
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::RefreshToken.to_string());
         params.insert("refresh_token", refresh_token.to_string());
-        params.insert("client_id", self.config.client_id.clone());
-
-        if let Some(secret) = &self.config.client_secret {
-            params.insert("client_secret", secret.clone());
-        }
 
         // Extra parameters
         for (key, value) in &self.config.extra_token_params {
@@ -349,13 +372,26 @@ impl OAuth2Client {
     }
 
     /// Make a token request.
-    async fn token_request(&self, params: HashMap<&str, String>) -> OAuthResult<OAuthTokens> {
-        let response = self
-            .http_client
-            .post(&self.config.token_url)
-            .form(&params)
-            .send()
-            .await?;
+    async fn token_request(&self, mut params: HashMap<&str, String>) -> OAuthResult<OAuthTokens> {
+        let mut request = self.http_client.post(&self.config.token_url);
+
+        match self.config.auth_style {
+            AuthStyle::Basic => {
+                if let Some(secret) = &self.config.client_secret {
+                    request = request.basic_auth(&self.config.client_id, Some(secret));
+                } else {
+                    request = request.basic_auth(&self.config.client_id, Some(""));
+                }
+            }
+            AuthStyle::Post => {
+                params.insert("client_id", self.config.client_id.clone());
+                if let Some(secret) = &self.config.client_secret {
+                    params.insert("client_secret", secret.clone());
+                }
+            }
+        }
+
+        let response = request.form(&params).send().await?;
 
         if !response.status().is_success() {
             let error: TokenErrorResponse =
@@ -458,8 +494,10 @@ impl AuthorizationCallback {
 /// Generate a cryptographically random state parameter.
 fn generate_state() -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::RngCore;
 
-    let bytes: Vec<u8> = (0..32).map(|_| rand::random()).collect();
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
