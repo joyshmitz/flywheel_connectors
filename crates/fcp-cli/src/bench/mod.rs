@@ -326,16 +326,12 @@ fn parse_size_bytes(size: &str) -> anyhow::Result<usize> {
         bail!("size must not be empty");
     }
 
-    let (number, multiplier) = if let Some(stripped) = size.strip_suffix("kb") {
-        (stripped, 1024_u64)
-    } else if let Some(stripped) = size.strip_suffix("mb") {
-        (stripped, 1024_u64 * 1024)
-    } else if let Some(stripped) = size.strip_suffix("gb") {
-        (stripped, 1024_u64 * 1024 * 1024)
-    } else if let Some(stripped) = size.strip_suffix('b') {
-        (stripped, 1_u64)
-    } else {
-        (size.as_str(), 1_u64)
+    let (number, multiplier) = match size.as_str() {
+        s if s.ends_with("kb") => (s.trim_end_matches("kb"), 1024_u64),
+        s if s.ends_with("mb") => (s.trim_end_matches("mb"), 1024_u64 * 1024),
+        s if s.ends_with("gb") => (s.trim_end_matches("gb"), 1024_u64 * 1024 * 1024),
+        s if s.ends_with('b') => (s.trim_end_matches('b'), 1_u64),
+        _ => (size.as_str(), 1_u64),
     };
 
     let number = number.trim().replace('_', "");
@@ -486,58 +482,34 @@ fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
 }
 
 fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
-    use ed25519_dalek::{Signer, SigningKey};
-    use fcp_core::{
-        CapabilityToken, CapabilityVerifier, ConnectorId, InstanceId, OperationId, ZoneId,
-    };
-    use serde::Serialize;
+    use fcp_core::{CapabilityToken, CapabilityVerifier, InstanceId, OperationId, ZoneId};
+    use fcp_crypto::{CapabilityTokenBuilder, CwtClaims, Ed25519SigningKey};
 
-    #[derive(Serialize)]
-    struct TokenPayload<'a> {
-        jti: &'a fcp_core::Uuid,
-        sub: &'a fcp_core::PrincipalId,
-        iss: &'a ZoneId,
-        aud: &'a ConnectorId,
-        instance: &'a Option<InstanceId>,
-        iat: u64,
-        exp: u64,
-        caps: &'a Vec<fcp_core::CapabilityGrant>,
-        constraints: &'a fcp_core::CapabilityConstraints,
-    }
-
-    let seed = [42_u8; 32];
-    let signing_key = SigningKey::from_bytes(&seed);
+    let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
     let pub_bytes = verifying_key.to_bytes();
 
-    let mut token = CapabilityToken::test_token();
-    token.iss = ZoneId::work();
-    token.aud = "test-connector:v1:0.1"
-        .parse()
-        .expect("connector id must be canonical");
-    token.exp = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0) + 3_600;
+    let now = chrono::Utc::now();
+    let expires = now + chrono::Duration::hours(1);
+    let zone = ZoneId::work();
+    let ops = ["op.test"];
 
-    let payload = TokenPayload {
-        jti: &token.jti,
-        sub: &token.sub,
-        iss: &token.iss,
-        aud: &token.aud,
-        instance: &token.instance,
-        iat: token.iat,
-        exp: token.exp,
-        caps: &token.caps,
-        constraints: &token.constraints,
+    let cose_token = CapabilityTokenBuilder::new()
+        .capability_id("cap.test")
+        .zone_id(zone.as_str())
+        .principal("principal:test")
+        .operations(&ops)
+        .issuer("node:test")
+        .validity(now, expires)
+        .sign(&signing_key)
+        .expect("capability token should sign");
+
+    let token = CapabilityToken {
+        raw: cose_token,
+        claims: CwtClaims::new(),
     };
 
-    let payload_value =
-        serde_json::to_value(&payload).expect("payload should serialize deterministically");
-    let payload_bytes =
-        serde_json::to_vec(&payload_value).expect("payload should serialize deterministically");
-
-    let signature = signing_key.sign(&payload_bytes);
-    token.sig = signature.to_bytes();
-
-    let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+    let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), InstanceId::new());
     let op = OperationId::new("op.test").expect("operation id must be canonical");
 
     let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
@@ -554,9 +526,9 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         percentiles,
     )
     .with_parameters(serde_json::json!({
-        "caps": token.caps.len(),
-        "zone": token.iss.as_str(),
-        "instance_bound": token.instance.is_some(),
+        "ops": ops.len(),
+        "zone": zone.as_str(),
+        "instance_bound": false,
     }))
     .with_targets(types::Targets {
         p50_target_ms: 0.2,
