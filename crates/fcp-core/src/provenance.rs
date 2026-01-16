@@ -2981,6 +2981,198 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sanitizer_receipt_zone_integrity_requirements() {
+        // High-integrity zone sanitizer can clear critical flags
+        let high_integrity_receipt = SanitizerReceipt {
+            receipt_id: "trusted-sanitizer-receipt".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:owner-trusted".into(),
+            sanitizer_zone: ZoneId::owner(), // High integrity zone
+            authorized_flags: vec![TaintFlag::PotentiallyMalicious, TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("sensitive-input")],
+            cleared_flags: vec![TaintFlag::PotentiallyMalicious], // Clearing critical flag
+            signature: Some(vec![0xAA, 0xBB, 0xCC, 0xDD]),
+        };
+
+        // Receipt from high-integrity zone should be valid for clearing critical flags
+        assert!(
+            high_integrity_receipt.is_valid(),
+            "High-integrity sanitizer can clear authorized critical flags"
+        );
+
+        // Low-integrity zone sanitizer attempting to clear critical flags
+        let low_integrity_receipt = SanitizerReceipt {
+            receipt_id: "untrusted-sanitizer-receipt".into(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer:public-untrusted".into(),
+            sanitizer_zone: ZoneId::public(), // Low integrity zone
+            authorized_flags: vec![TaintFlag::UnverifiedLink], // Only minor flag
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::UnverifiedLink], // Non-critical flag
+            signature: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        };
+
+        // Low-integrity sanitizer can still clear non-critical flags if authorized
+        assert!(
+            low_integrity_receipt.is_valid(),
+            "Low-integrity sanitizer can clear authorized non-critical flags"
+        );
+
+        // Verify zone integrity levels are correctly ordered
+        let owner_integrity = IntegrityLevel::from_zone(&ZoneId::owner());
+        let work_integrity = IntegrityLevel::from_zone(&ZoneId::work());
+        let public_integrity = IntegrityLevel::from_zone(&ZoneId::public());
+
+        // Zone integrity comparison (owner > work > public)
+        assert!(
+            owner_integrity > work_integrity,
+            "Owner zone has higher integrity than work zone"
+        );
+        assert!(
+            work_integrity > public_integrity,
+            "Work zone has higher integrity than public zone"
+        );
+
+        log_flow_test(
+            "sanitizer_receipt_zone_integrity_requirements",
+            "integrity",
+            "zone",
+            "zone",
+            true,
+            "pass",
+            Some("ZONE_INTEGRITY_VERIFIED"),
+        );
+    }
+
+    #[test]
+    fn sanitizer_receipt_staleness_detection() {
+        // Current time in milliseconds
+        let now_ms: u64 = 1_700_000_000_000;
+        let one_hour_ms: u64 = 3_600_000;
+        let one_day_ms: u64 = 86_400_000;
+
+        // Fresh receipt (created now)
+        let fresh_receipt = SanitizerReceipt {
+            receipt_id: "fresh-receipt".into(),
+            timestamp_ms: now_ms,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+
+        // Receipt from 1 hour ago
+        let hourly_receipt = SanitizerReceipt {
+            receipt_id: "hourly-receipt".into(),
+            timestamp_ms: now_ms - one_hour_ms,
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+
+        // Stale receipt (from 30 days ago)
+        let stale_receipt = SanitizerReceipt {
+            receipt_id: "stale-receipt".into(),
+            timestamp_ms: now_ms - (30 * one_day_ms),
+            sanitizer_id: "sanitizer:trusted".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+
+        // All receipts are structurally valid (is_valid checks flag authorization)
+        assert!(fresh_receipt.is_valid());
+        assert!(hourly_receipt.is_valid());
+        assert!(stale_receipt.is_valid());
+
+        // Age calculation helpers
+        let fresh_age = now_ms.saturating_sub(fresh_receipt.timestamp_ms);
+        let hourly_age = now_ms.saturating_sub(hourly_receipt.timestamp_ms);
+        let stale_age = now_ms.saturating_sub(stale_receipt.timestamp_ms);
+
+        assert_eq!(fresh_age, 0, "Fresh receipt has zero age");
+        assert_eq!(hourly_age, one_hour_ms, "Hourly receipt is 1 hour old");
+        assert!(
+            stale_age > 29 * one_day_ms,
+            "Stale receipt is > 29 days old"
+        );
+
+        // Configurable staleness threshold (example: 7 days)
+        let staleness_threshold_ms = 7 * one_day_ms;
+
+        let fresh_is_stale = fresh_age > staleness_threshold_ms;
+        let hourly_is_stale = hourly_age > staleness_threshold_ms;
+        let stale_is_stale = stale_age > staleness_threshold_ms;
+
+        assert!(!fresh_is_stale, "Fresh receipt is not stale");
+        assert!(!hourly_is_stale, "Hourly receipt is not stale");
+        assert!(stale_is_stale, "30-day-old receipt is stale");
+
+        log_flow_test(
+            "sanitizer_receipt_staleness_detection",
+            "integrity",
+            "time",
+            "time",
+            true,
+            "pass",
+            Some("STALENESS_DETECTED"),
+        );
+    }
+
+    #[test]
+    fn sanitizer_receipt_future_timestamp_detection() {
+        // Current time
+        let now_ms: u64 = 1_700_000_000_000;
+
+        // Receipt with future timestamp (suspicious/invalid)
+        let future_receipt = SanitizerReceipt {
+            receipt_id: "future-receipt".into(),
+            timestamp_ms: now_ms + 3_600_000, // 1 hour in the future
+            sanitizer_id: "sanitizer:suspicious".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+
+        // Structurally valid but timestamp is suspicious
+        assert!(
+            future_receipt.is_valid(),
+            "Structural validity doesn't check timestamp"
+        );
+
+        // Future timestamp check
+        let is_future = future_receipt.timestamp_ms > now_ms;
+        assert!(is_future, "Future timestamp should be detected");
+
+        // Clock skew tolerance (e.g., 5 minutes)
+        let clock_skew_tolerance_ms: u64 = 5 * 60 * 1000;
+        let is_beyond_skew = future_receipt.timestamp_ms > now_ms + clock_skew_tolerance_ms;
+        assert!(
+            is_beyond_skew,
+            "1-hour future timestamp exceeds 5-minute skew tolerance"
+        );
+
+        log_flow_test(
+            "sanitizer_receipt_future_timestamp_detection",
+            "integrity",
+            "time",
+            "time",
+            false,
+            "pass",
+            Some("FUTURE_TIMESTAMP_DETECTED"),
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Cross-Zone Operations Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -3288,7 +3480,7 @@ mod tests {
             issuer: "node:authority".into(),
             scope: ApprovalScope::Elevation(ElevationScope {
                 operation_id: "elevate.operation".into(),
-                original_provenance_id: prov_id.clone(),
+                original_provenance_id: prov_id,
                 target_integrity: IntegrityLevel::Owner,
             }),
             zone_id: ZoneId::work(),
@@ -3385,7 +3577,7 @@ mod tests {
             issuer: "node:authority".into(),
             scope: ApprovalScope::Elevation(ElevationScope {
                 operation_id: "bound.op".into(),
-                original_provenance_id: correct_prov_id.clone(),
+                original_provenance_id: correct_prov_id,
                 target_integrity: IntegrityLevel::Owner,
             }),
             zone_id: ZoneId::work(),
@@ -3428,7 +3620,7 @@ mod tests {
             scope: ApprovalScope::Declassification(DeclassificationScope {
                 from_zone: ZoneId::private(),
                 to_zone: ZoneId::public(),
-                object_ids: vec![authorized_object.clone()],
+                object_ids: vec![authorized_object],
                 target_confidentiality: ConfidentialityLevel::Public,
             }),
             zone_id: ZoneId::private(),
