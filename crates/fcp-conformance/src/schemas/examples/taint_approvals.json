@@ -1,0 +1,155 @@
+{
+  "$schema": "../FZPF_v0.1.schema.json",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "policy_id": "taint-approvals-example",
+    "default_deny": true
+  },
+  "defaults": {
+    "taint": {
+      "require_elevation_min_safety": "risky",
+      "require_approval_min_safety": "dangerous"
+    }
+  },
+  "zones": [
+    {
+      "id": "z:private",
+      "name": "Private Zone",
+      "integrity_level": 80,
+      "confidentiality_level": 90
+    },
+    {
+      "id": "z:work",
+      "name": "Work Zone",
+      "integrity_level": 60,
+      "confidentiality_level": 70
+    },
+    {
+      "id": "z:public",
+      "name": "Public Zone",
+      "integrity_level": 20,
+      "confidentiality_level": 10
+    }
+  ],
+  "taint_rules": [
+    {
+      "name": "public-input-dangerous-deny",
+      "min_taint": "tainted",
+      "min_safety": "dangerous",
+      "taint_flags": ["public_input"],
+      "action": {
+        "type": "deny",
+        "reason": "Public input cannot drive dangerous operations directly"
+      }
+    },
+    {
+      "name": "external-api-risky-elevation",
+      "min_taint": "tainted",
+      "min_safety": "risky",
+      "taint_flags": ["external_api"],
+      "action": {
+        "type": "require_elevation",
+        "ttl_seconds": 300,
+        "reason": "External API data requires elevation for risky operations"
+      }
+    },
+    {
+      "name": "cross-zone-approval",
+      "min_taint": "tainted",
+      "taint_flags": ["cross_zone"],
+      "when_integrity_insufficient": true,
+      "action": {
+        "type": "require_approval",
+        "mode": "interactive",
+        "ttl_seconds": 600,
+        "reason": "Cross-zone data with integrity gap requires interactive approval"
+      }
+    },
+    {
+      "name": "pii-sanitize",
+      "taint_flags": ["pii_present"],
+      "target_zone_patterns": ["z:public"],
+      "action": {
+        "type": "sanitize",
+        "sanitizer": "pii-redactor",
+        "reason": "PII must be sanitized before entering public zone"
+      }
+    },
+    {
+      "name": "malicious-detect-deny",
+      "taint_flags": ["malicious_detected"],
+      "action": {
+        "type": "deny",
+        "reason": "Malicious content detected - operation blocked"
+      }
+    }
+  ],
+  "approval_constraints": [
+    {
+      "name": "elevation-to-private",
+      "scope_type": "elevation",
+      "zone_id": "z:private",
+      "target_integrity": 80,
+      "max_ttl_seconds": 300,
+      "require_request_binding": true
+    },
+    {
+      "name": "declassification-private-to-work",
+      "scope_type": "declassification",
+      "from_zone": "z:private",
+      "to_zone": "z:work",
+      "target_confidentiality": 70,
+      "max_ttl_seconds": 600,
+      "require_request_binding": true
+    },
+    {
+      "name": "declassification-work-to-public",
+      "scope_type": "declassification",
+      "from_zone": "z:work",
+      "to_zone": "z:public",
+      "target_confidentiality": 10,
+      "max_ttl_seconds": 300,
+      "require_request_binding": true,
+      "require_input_hash": true
+    },
+    {
+      "name": "execution-dangerous-operations",
+      "scope_type": "execution",
+      "zone_id": "z:private",
+      "connector_pattern": "fcp.*",
+      "method_pattern": "*.delete*",
+      "max_ttl_seconds": 60,
+      "require_request_binding": true,
+      "require_input_hash": true,
+      "input_constraints": [
+        {
+          "pointer": "/confirmed",
+          "op": "eq",
+          "value": true
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "name": "private-to-work-requires-both",
+      "from": "z:private",
+      "to": "z:work",
+      "kind": "egress",
+      "allow": true,
+      "requires_elevation": true,
+      "requires_declassification": true,
+      "audit": true
+    },
+    {
+      "name": "work-to-public-declassification",
+      "from": "z:work",
+      "to": "z:public",
+      "kind": "egress",
+      "allow": true,
+      "requires_declassification": true,
+      "audit": true
+    }
+  ]
+}

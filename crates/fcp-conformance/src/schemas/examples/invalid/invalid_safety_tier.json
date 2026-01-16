@@ -1,0 +1,25 @@
+{
+  "$schema": "../../FZPF_v0.1.schema.json",
+  "_comment": "INVALID: Uses invalid safety tier value",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "default_deny": true
+  },
+  "zones": [
+    {
+      "id": "z:work",
+      "integrity_level": 60,
+      "confidentiality_level": 70
+    }
+  ],
+  "taint_rules": [
+    {
+      "name": "bad-safety",
+      "min_safety": "ultra_dangerous",
+      "action": {
+        "type": "deny"
+      }
+    }
+  ]
+}

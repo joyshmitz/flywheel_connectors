@@ -1,0 +1,30 @@
+{
+  "$schema": "../../FZPF_v0.1.schema.json",
+  "_comment": "INVALID: Uses JSONPath instead of JSON Pointer (JSONPath forbidden)",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "default_deny": true
+  },
+  "zones": [
+    {
+      "id": "z:work",
+      "integrity_level": 60,
+      "confidentiality_level": 70
+    }
+  ],
+  "approval_constraints": [
+    {
+      "name": "bad-jsonpath",
+      "scope_type": "execution",
+      "zone_id": "z:work",
+      "input_constraints": [
+        {
+          "pointer": "$.data.confirmed",
+          "op": "eq",
+          "value": true
+        }
+      ]
+    }
+  ]
+}
