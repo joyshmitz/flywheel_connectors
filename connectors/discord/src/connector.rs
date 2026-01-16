@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fcp_core::{
-    AgentHint, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId, EventCaps,
-    EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, Principal, RiskLevel,
-    SafetyTier, SessionId, TrustLevel, ZoneId,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
+    Principal, RiskLevel, SafetyTier, SessionId, TrustLevel, ZoneId,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -24,13 +24,12 @@ use crate::{
 
 /// Discord FCP connector.
 pub struct DiscordConnector {
-    id: ConnectorId,
+    base: Arc<BaseConnector>,
     config: Option<DiscordConfig>,
     api_client: Option<Arc<DiscordApiClient>>,
     gateway: Option<GatewayConnection>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    instance_id: InstanceId,
     bot_user_id: Option<String>,
 
     // Event broadcast
@@ -49,13 +48,12 @@ impl DiscordConnector {
         let (event_tx, _) = broadcast::channel(1000);
 
         Self {
-            id: ConnectorId::from_static("discord"),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("discord"))),
             config: None,
             api_client: None,
             gateway: None,
             verifier: None,
             session_id: None,
-            instance_id: InstanceId::new(),
             bot_user_id: None,
             event_tx,
             gateway_task: None,
@@ -110,6 +108,7 @@ impl DiscordConnector {
         self.api_client = Some(api_client.clone());
         self.gateway = Some(GatewayConnection::new(config.clone(), api_client));
         self.config = Some(config);
+        self.base.set_configured(true);
 
         Ok(json!({
             "status": "configured",
@@ -140,7 +139,7 @@ impl DiscordConnector {
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.instance_id.clone(),
+            self.base.instance_id.clone(),
         ));
 
         let session_id = SessionId::new();
@@ -148,6 +147,7 @@ impl DiscordConnector {
 
         // Connect to gateway
         self.connect_gateway().await?;
+        self.base.set_handshaken(true);
 
         // Convert capability IDs to grants
         let capabilities_granted: Vec<CapabilityGrant> = req
@@ -197,7 +197,8 @@ impl DiscordConnector {
             Ok(_) => Ok(json!({
                 "status": "ready",
                 "uptime_ms": self.start_time.elapsed().as_millis() as u64,
-                "gateway_connected": self.gateway_task.is_some()
+                "gateway_connected": self.gateway_task.is_some(),
+                "metrics": self.base.metrics()
             })),
             Err(e) => Ok(json!({
                 "status": "degraded",
@@ -526,6 +527,15 @@ impl DiscordConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let operation =
             params
                 .get("operation")
@@ -569,7 +579,7 @@ impl DiscordConnector {
             return Err(FcpError::NotConfigured);
         }
 
-        let result = match operation {
+        match operation {
             "discord.send_message" => self.invoke_send_message(input).await,
             "discord.edit_message" => self.invoke_edit_message(input).await,
             "discord.delete_message" => self.invoke_delete_message(input).await,
@@ -579,9 +589,7 @@ impl DiscordConnector {
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
-        };
-
-        result
+        }
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -959,14 +967,16 @@ impl DiscordConnector {
         let mut event_rx = gateway.connect().await.map_err(|e| e.to_fcp_error())?;
 
         let event_tx = self.event_tx.clone();
-        let connector_id = self.id.clone();
-        let instance_id = self.instance_id.clone();
+        let connector_id = self.base.id.clone();
+        let instance_id = self.base.instance_id.clone();
+        let base = self.base.clone();
 
         let task = tokio::spawn(async move {
             while let Some(gateway_event) = event_rx.recv().await {
                 if let Some(event) =
                     gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
                 {
+                    base.record_event();
                     if event_tx.send(Ok(event)).is_err() {
                         tracing::info!("Event receiver dropped, stopping gateway event forwarding");
                         break;

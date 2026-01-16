@@ -3,7 +3,6 @@
 //! Implements the FcpConnector trait with Telegram-specific operations.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use fcp_core::*;
@@ -38,12 +37,12 @@ fn default_poll_timeout() -> i32 {
 
 /// Telegram FCP connector.
 pub struct TelegramConnector {
-    id: ConnectorId,
+    base: Arc<BaseConnector>,
     config: Option<TelegramConfig>,
     client: Option<TelegramClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    instance_id: InstanceId,
+    // instance_id: InstanceId, // Remove
 
     // Polling state
     last_update_id: Arc<RwLock<Option<i64>>>,
@@ -55,10 +54,6 @@ pub struct TelegramConnector {
 
     // Metrics
     start_time: Instant,
-    messages_received: Arc<AtomicU64>,
-    messages_sent: Arc<AtomicU64>,
-    requests_total: Arc<AtomicU64>,
-    requests_error: Arc<AtomicU64>,
 }
 
 impl TelegramConnector {
@@ -67,21 +62,17 @@ impl TelegramConnector {
         let (event_tx, _) = broadcast::channel(1000);
 
         Self {
-            id: ConnectorId::from_static("telegram"),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("telegram"))),
             config: None,
             client: None,
             verifier: None,
             session_id: None,
-            instance_id: InstanceId::new(),
+            // instance_id: InstanceId::new(), // Remove
             last_update_id: Arc::new(RwLock::new(None)),
             poll_running: Arc::new(RwLock::new(false)),
             poll_task: None,
             event_tx,
             start_time: Instant::now(),
-            messages_received: Arc::new(AtomicU64::new(0)),
-            messages_sent: Arc::new(AtomicU64::new(0)),
-            requests_total: Arc::new(AtomicU64::new(0)),
-            requests_error: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -114,6 +105,7 @@ impl TelegramConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.base.set_configured(true);
 
         info!("Telegram connector configured");
         Ok(json!({ "status": "configured" }))
@@ -153,7 +145,7 @@ impl TelegramConnector {
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.instance_id.clone(),
+            self.base.instance_id.clone(), // Use base.instance_id
         ));
 
         let session_id = SessionId::new();
@@ -161,6 +153,7 @@ impl TelegramConnector {
 
         // Start polling if not already running
         self.start_polling().await?;
+        self.base.set_handshaken(true);
 
         // Convert capability IDs to grants
         let capabilities_granted: Vec<CapabilityGrant> = req
@@ -211,7 +204,8 @@ impl TelegramConnector {
             Ok(_) => Ok(json!({
                 "status": "ready",
                 "uptime_ms": self.start_time.elapsed().as_millis() as u64,
-                "polling": *self.poll_running.read().await
+                "polling": *self.poll_running.read().await,
+                "metrics": self.base.metrics()
             })),
             Err(e) => Ok(json!({
                 "status": "degraded",
@@ -363,8 +357,39 @@ impl TelegramConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
 
+    /// Validate input structure and limits before capability token verification.
+    fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+        const MAX_TEXT_LENGTH: usize = 4096;
+
+        match operation {
+            "telegram.send_message" => {
+                let text = input.get("text").and_then(|v| v.as_str());
+                if let Some(text) = text {
+                    if text.len() > MAX_TEXT_LENGTH {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Message text exceeds {MAX_TEXT_LENGTH} character limit (got {} characters)",
+                                text.len()
+                            ),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let operation =
             params
                 .get("operation")
@@ -375,6 +400,9 @@ impl TelegramConnector {
                 })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        // Early validation
+        Self::validate_input_early(operation, &input)?;
 
         // Extract and verify capability token
         let token_value = params
@@ -402,24 +430,18 @@ impl TelegramConnector {
             return Err(FcpError::NotConfigured);
         }
 
-        let result = match operation {
+        match operation {
             "telegram.send_message" => self.invoke_send_message(input).await,
             "telegram.get_file" => self.invoke_get_file(input).await,
             "telegram.answer_callback_query" => self.invoke_answer_callback_query(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
-        };
-
-        if result.is_err() {
-            self.requests_error.fetch_add(1, Ordering::Relaxed);
         }
-
-        result
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        // Validate input first (before checking client) for better error messages
+        // Input validation is now done in validate_input_early, but we still need to extract fields
         let chat_id =
             input
                 .get("chat_id")
@@ -436,18 +458,6 @@ impl TelegramConnector {
                 code: 1003,
                 message: "Missing text".into(),
             })?;
-
-        // Validate message text length (Telegram limit: 4096 characters)
-        const MAX_TEXT_LENGTH: usize = 4096;
-        if text.len() > MAX_TEXT_LENGTH {
-            return Err(FcpError::InvalidRequest {
-                code: 1004,
-                message: format!(
-                    "Message text exceeds {MAX_TEXT_LENGTH} character limit (got {} characters)",
-                    text.len()
-                ),
-            });
-        }
 
         // Now check that we're configured
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -474,8 +484,6 @@ impl TelegramConnector {
                     retryable: e.is_retryable(),
                     retry_after: None,
                 })?;
-
-        self.messages_sent.fetch_add(1, Ordering::Relaxed);
 
         Ok(json!({
             "message_id": message.message_id,
@@ -603,9 +611,9 @@ impl TelegramConnector {
         let event_tx = self.event_tx.clone();
         let last_update_id = self.last_update_id.clone();
         let poll_running = self.poll_running.clone();
-        let messages_received = self.messages_received.clone();
-        let instance_id = self.instance_id.clone();
-        let connector_id = self.id.clone();
+        let instance_id = self.base.instance_id.clone(); // Use base.instance_id
+        let connector_id = self.base.id.clone();
+        let base = self.base.clone();
 
         *poll_running.write().await = true;
 
@@ -637,7 +645,7 @@ impl TelegramConnector {
                             if let Some(event) =
                                 update_to_event(&update, &connector_id, &instance_id)
                             {
-                                messages_received.fetch_add(1, Ordering::Relaxed);
+                                base.record_event();
                                 if event_tx.send(Ok(event)).is_err() {
                                     info!("Event receiver dropped, closing polling loop");
                                     *poll_running.write().await = false;

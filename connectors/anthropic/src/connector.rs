@@ -1,11 +1,12 @@
 //! FCP Anthropic Connector implementation.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, EventCaps,
-    FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass, InstanceId,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
 use serde_json::json;
 use tracing::{info, instrument};
@@ -18,12 +19,10 @@ use crate::{
 
 /// FCP Anthropic Connector.
 pub struct AnthropicConnector {
+    base: Arc<BaseConnector>,
     client: Option<AnthropicClient>,
-    requests_total: AtomicU64,
-    requests_error: AtomicU64,
-    total_cost: std::sync::atomic::AtomicU64, // Store as fixed-point (cost * 1_000_000_000)
+    total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000_000)
     verifier: Option<CapabilityVerifier>,
-    instance_id: InstanceId,
     session_id: Option<SessionId>,
 }
 
@@ -32,12 +31,10 @@ impl AnthropicConnector {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("anthropic"))),
             client: None,
-            requests_total: AtomicU64::new(0),
-            requests_error: AtomicU64::new(0),
             total_cost: AtomicU64::new(0),
             verifier: None,
-            instance_id: InstanceId::new(),
             session_id: None,
         }
     }
@@ -45,13 +42,13 @@ impl AnthropicConnector {
     /// Get total requests made.
     #[must_use]
     pub fn total_requests(&self) -> u64 {
-        self.requests_total.load(Ordering::Relaxed)
+        self.base.metrics().requests_total
     }
 
     /// Get total errors.
     #[must_use]
     pub fn total_errors(&self) -> u64 {
-        self.requests_error.load(Ordering::Relaxed)
+        self.base.metrics().requests_error
     }
 
     /// Get total cost in dollars.
@@ -93,6 +90,7 @@ impl AnthropicConnector {
         }
 
         self.client = Some(client);
+        self.base.set_configured(true);
         info!("Anthropic connector configured");
 
         Ok(json!({ "status": "configured" }))
@@ -113,11 +111,12 @@ impl AnthropicConnector {
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.instance_id.clone(),
+            self.base.instance_id.clone(),
         ));
 
         let session_id = SessionId::new();
         self.session_id = Some(session_id.clone());
+        self.base.set_handshaken(true);
 
         // Convert capability IDs to grants
         let capabilities_granted: Vec<CapabilityGrant> = req
@@ -321,8 +320,17 @@ impl AnthropicConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.base.record_request(true);
 
+        let result = self.handle_invoke_internal(params).await;
+        self.base.record_request(result.is_ok());
+        result
+    }
+
+    async fn handle_invoke_internal(
+        &self,
+        params: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
         let operation =
             params
                 .get("operation")
@@ -360,20 +368,14 @@ impl AnthropicConnector {
             return Err(FcpError::NotConfigured);
         }
 
-        let result = match operation {
+        match operation {
             "anthropic.message" => self.invoke_message(input).await,
             "anthropic.chat" => self.invoke_chat(input).await,
             "anthropic.get_usage" => self.invoke_get_usage().await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
-        };
-
-        if result.is_err() {
-            self.requests_error.fetch_add(1, Ordering::Relaxed);
         }
-
-        result
     }
 
     async fn invoke_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {

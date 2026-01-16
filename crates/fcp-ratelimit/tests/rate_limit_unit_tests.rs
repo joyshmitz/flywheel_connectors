@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use fcp_core::{BackpressureLevel, LimitType, ThrottleViolation, ThrottleViolationInput};
 use fcp_ratelimit::{
-    config_from_core, enforce, BackpressureThresholds, ConcurrencyLimiter, RateLimitConfig,
-    RateLimiter, ThrottleContext, TokenBucket,
+    BackpressureThresholds, ConcurrencyLimiter, RateLimitConfig, RateLimiter, ThrottleContext,
+    TokenBucket, config_from_core, enforce,
 };
 
 // ============================================================================
@@ -263,20 +263,26 @@ async fn different_zones_have_independent_quotas() {
         limit_type: LimitType::Rpm,
     };
 
-    let outcome_work = enforce(&limiter_work, 1, &ctx_work, BackpressureThresholds::standard()).await;
+    let outcome_work = enforce(
+        &limiter_work,
+        1,
+        &ctx_work,
+        BackpressureThresholds::standard(),
+    )
+    .await;
     assert!(!outcome_work.allowed);
     assert_eq!(
-        outcome_work
-            .violation
-            .as_ref()
-            .unwrap()
-            .zone_id
-            .as_str(),
+        outcome_work.violation.as_ref().unwrap().zone_id.as_str(),
         "z:work"
     );
 
-    let outcome_private =
-        enforce(&limiter_private, 1, &ctx_private, BackpressureThresholds::standard()).await;
+    let outcome_private = enforce(
+        &limiter_private,
+        1,
+        &ctx_private,
+        BackpressureThresholds::standard(),
+    )
+    .await;
     assert!(outcome_private.allowed);
 }
 
@@ -292,7 +298,13 @@ async fn different_connectors_tracked_in_violations() {
         limit_type: LimitType::Rpm,
     };
 
-    let outcome = enforce(&limiter, 1, &ctx_anthropic, BackpressureThresholds::standard()).await;
+    let outcome = enforce(
+        &limiter,
+        1,
+        &ctx_anthropic,
+        BackpressureThresholds::standard(),
+    )
+    .await;
     let violation = outcome.violation.expect("violation expected");
     assert_eq!(
         violation.connector_id.as_ref().unwrap().as_str(),
@@ -338,7 +350,10 @@ async fn token_bucket_allows_configured_burst() {
     }
 
     // 21st should fail
-    assert!(!limiter.try_acquire().await, "burst limit should be enforced");
+    assert!(
+        !limiter.try_acquire().await,
+        "burst limit should be enforced"
+    );
 }
 
 #[tokio::test]
@@ -416,10 +431,7 @@ fn concurrency_limiter_basic_operation() {
 
     // Third should fail
     let err = limiter.try_acquire_or_violation(&ctx).unwrap_err();
-    assert!(matches!(
-        err,
-        fcp_core::FcpError::RateLimited { .. }
-    ));
+    assert!(matches!(err, fcp_core::FcpError::RateLimited { .. }));
 }
 
 #[test]

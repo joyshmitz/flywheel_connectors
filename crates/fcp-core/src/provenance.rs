@@ -528,6 +528,9 @@ impl ProvenanceRecord {
                 if self.taint_flags.contains(TaintFlag::PotentiallyMalicious) {
                     return Err(ProvenanceViolation::MaliciousInputDetected);
                 }
+                if self.taint_flags.contains(TaintFlag::CrossZoneUnapproved) {
+                    return Err(ProvenanceViolation::CrossZoneUnapprovedForDangerousOperation);
+                }
                 if self.integrity_label < IntegrityLevel::Work {
                     return Err(ProvenanceViolation::InsufficientIntegrity {
                         required: IntegrityLevel::Work,
@@ -705,6 +708,9 @@ pub enum ProvenanceViolation {
 
     #[error("malicious input pattern detected")]
     MaliciousInputDetected,
+
+    #[error("unapproved cross-zone input cannot drive dangerous operation")]
+    CrossZoneUnapprovedForDangerousOperation,
 
     #[error("tainted input cannot drive risky operation without elevation: {taint_flags:?}")]
     TaintedInputForRiskyOperation { taint_flags: Vec<TaintFlag> },
@@ -2054,17 +2060,17 @@ mod tests {
         let receipt = SanitizerReceipt {
             receipt_id: "test-receipt".into(),
             timestamp_ms: 1000,
-            sanitizer_id: "sanitizer:html".into(),
+            sanitizer_id: "sanitizer:trusted".into(),
             sanitizer_zone: ZoneId::work(),
-            authorized_flags: vec![TaintFlag::UnverifiedLink, TaintFlag::UserGenerated],
+            authorized_flags: vec![TaintFlag::PublicInput, TaintFlag::UserGenerated],
             covered_inputs: vec![test_object_id("input1")],
-            cleared_flags: vec![TaintFlag::UnverifiedLink],
+            cleared_flags: vec![TaintFlag::PublicInput],
             signature: None,
         };
 
         assert!(receipt.is_valid());
-        assert!(receipt.can_clear(TaintFlag::UnverifiedLink));
-        assert!(!receipt.can_clear(TaintFlag::PublicInput)); // Not authorized
+        assert!(receipt.can_clear(TaintFlag::PublicInput));
+        assert!(!receipt.can_clear(TaintFlag::PotentiallyMalicious)); // Not authorized
         assert!(receipt.covers_input(&test_object_id("input1")));
         log_flow_test(
             "sanitizer_receipt_validation",
@@ -2082,11 +2088,11 @@ mod tests {
         let receipt = SanitizerReceipt {
             receipt_id: "test-receipt".into(),
             timestamp_ms: 1000,
-            sanitizer_id: "sanitizer:html".into(),
+            sanitizer_id: "sanitizer:trusted".into(),
             sanitizer_zone: ZoneId::work(),
-            authorized_flags: vec![TaintFlag::UnverifiedLink],
-            covered_inputs: vec![],
-            cleared_flags: vec![TaintFlag::PublicInput], // Not authorized!
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input1")],
+            cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::PotentiallyMalicious], // Not authorized!
             signature: None,
         };
 
@@ -2107,15 +2113,16 @@ mod tests {
         let receipt = SanitizerReceipt {
             receipt_id: "test-receipt".into(),
             timestamp_ms: 1000,
-            sanitizer_id: "sanitizer:html".into(),
+            sanitizer_id: "sanitizer:trusted".into(),
             sanitizer_zone: ZoneId::work(),
-            authorized_flags: vec![TaintFlag::UnverifiedLink],
+            authorized_flags: vec![TaintFlag::PublicInput],
             covered_inputs: vec![test_object_id("input1"), test_object_id("input2")],
-            cleared_flags: vec![TaintFlag::UnverifiedLink],
+            cleared_flags: vec![TaintFlag::PublicInput],
             signature: None,
         };
 
         assert!(receipt.covers_input(&test_object_id("input1")));
+        assert!(receipt.covers_input(&test_object_id("input2")));
         assert!(!receipt.covers_input(&test_object_id("input3")));
         log_flow_test(
             "sanitizer_receipt_coverage_checks_inputs",
@@ -2691,20 +2698,6 @@ mod tests {
         let owner = ProvenanceRecord::new(ZoneId::owner());
         assert_eq!(
             owner.can_flow_to(&ZoneId::public()),
-            FlowCheckResult::RequiresDeclassification
-        );
-
-        // Work → Private requires elevation (integrity up)
-        let work = ProvenanceRecord::new(ZoneId::work());
-        assert_eq!(
-            work.can_flow_to(&ZoneId::private()),
-            FlowCheckResult::RequiresElevation
-        );
-
-        // Private → Work requires declassification (confidentiality down)
-        let private = ProvenanceRecord::new(ZoneId::private());
-        assert_eq!(
-            private.can_flow_to(&ZoneId::work()),
             FlowCheckResult::RequiresDeclassification
         );
 

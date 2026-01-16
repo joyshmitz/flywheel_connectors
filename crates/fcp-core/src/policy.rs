@@ -166,6 +166,7 @@ pub enum DecisionReasonCode {
     TaintUnverifiedLinkRisky,
     TaintMaliciousInput,
     TaintRiskyRequiresElevation,
+    TaintCrossZoneUnapproved,
     IntegrityInsufficient,
     ZonePolicyPrincipalDenied,
     ZonePolicyConnectorDenied,
@@ -199,6 +200,7 @@ impl DecisionReasonCode {
             Self::TaintUnverifiedLinkRisky => "taint.unverified_link_risky",
             Self::TaintMaliciousInput => "taint.malicious_input",
             Self::TaintRiskyRequiresElevation => "taint.risky_requires_elevation",
+            Self::TaintCrossZoneUnapproved => "taint.cross_zone_unapproved",
             Self::IntegrityInsufficient => "integrity.insufficient",
             Self::ZonePolicyPrincipalDenied => "zone_policy.principal_denied",
             Self::ZonePolicyConnectorDenied => "zone_policy.connector_denied",
@@ -235,6 +237,9 @@ impl DecisionReasonCode {
             ProvenanceViolation::InvalidElevation { .. } => Self::ApprovalMissingElevation,
             ProvenanceViolation::InvalidDeclassification { .. } => {
                 Self::ApprovalMissingDeclassification
+            }
+            ProvenanceViolation::CrossZoneUnapprovedForDangerousOperation => {
+                Self::TaintCrossZoneUnapproved
             }
             ProvenanceViolation::SanitizerCoverageInsufficient => {
                 Self::SanitizerCoverageInsufficient

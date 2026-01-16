@@ -87,6 +87,12 @@ impl AuditEvent {
         &self.zone_id
     }
 
+    /// Check if this is a genesis event (seq 0, no prev).
+    #[must_use]
+    pub const fn is_genesis(&self) -> bool {
+        self.seq == 0 && self.prev.is_none()
+    }
+
     /// Check if this event follows another event in the chain.
     ///
     /// # Arguments

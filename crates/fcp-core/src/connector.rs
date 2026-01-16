@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use futures_util::Stream;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     CapabilityToken, ConnectorId, EventEnvelope, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, ShutdownRequest,
+    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, ShutdownRequest,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 
@@ -52,7 +53,7 @@ pub trait FcpConnector: Send + Sync {
 }
 
 /// Connector metrics for monitoring.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConnectorMetrics {
     /// Total requests received
     pub requests_total: u64,
@@ -149,6 +150,8 @@ pub trait Webhook: FcpConnector {
 pub struct BaseConnector {
     /// Connector ID
     pub id: ConnectorId,
+    /// Instance ID (unique per run)
+    pub instance_id: InstanceId,
     /// Whether configured
     pub configured: AtomicBool,
     /// Whether handshake completed
@@ -176,6 +179,7 @@ impl BaseConnector {
     pub fn new(id: impl Into<ConnectorId>) -> Self {
         Self {
             id: id.into(),
+            instance_id: InstanceId::new(),
             configured: AtomicBool::new(false),
             handshaken: AtomicBool::new(false),
             metrics: AtomicConnectorMetrics::default(),
