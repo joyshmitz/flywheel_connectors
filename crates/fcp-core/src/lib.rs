@@ -9,6 +9,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+mod audit;
 mod capability;
 mod connector;
 mod error;
@@ -23,6 +24,7 @@ mod quorum;
 mod ratelimit;
 mod revocation;
 
+pub use audit::*;
 pub use capability::*;
 pub use connector::*;
 pub use error::*;
