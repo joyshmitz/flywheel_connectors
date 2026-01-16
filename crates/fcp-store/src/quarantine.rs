@@ -102,8 +102,8 @@ impl Ord for EvictionEntry {
         other
             .received_at
             .cmp(&self.received_at)
-            .then_with(|| self.peer_reputation.cmp(&other.peer_reputation))
-            .then_with(|| other.size.cmp(&self.size))
+            .then_with(|| other.peer_reputation.cmp(&self.peer_reputation))
+            .then_with(|| self.size.cmp(&other.size))
     }
 }
 

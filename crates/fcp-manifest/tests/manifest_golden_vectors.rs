@@ -81,9 +81,8 @@ fn vector_manifest_path(name: &str) -> std::path::PathBuf {
 
 fn read_vector_manifest(name: &str) -> String {
     let path = vector_manifest_path(name);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| {
-        panic!("failed to read manifest vector {}: {err}", path.display())
-    })
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read manifest vector {}: {err}", path.display()))
 }
 
 fn with_computed_hash(raw: &str) -> String {
@@ -329,10 +328,8 @@ fn rejects_unknown_field_in_manifest() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
-        "[manifest]",
-        "[manifest]\nunknown_field = \"bad\"",
-    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("[manifest]", "[manifest]\nunknown_field = \"bad\"");
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
     assert!(matches!(err, ManifestError::Toml(_)));
     assert!(err.to_string().contains("unknown"));
@@ -394,12 +391,12 @@ fn rejects_invalid_manifest_format() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH)
-        .replace("fcp-connector-manifest", "invalid-format");
+    let toml =
+        base_manifest_toml(PLACEHOLDER_HASH).replace("fcp-connector-manifest", "invalid-format");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
-    let with_hash = base_manifest_toml(&hash.to_string())
-        .replace("fcp-connector-manifest", "invalid-format");
+    let with_hash =
+        base_manifest_toml(&hash.to_string()).replace("fcp-connector-manifest", "invalid-format");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
     assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "manifest.format"));
 }
@@ -413,13 +410,16 @@ fn rejects_unsupported_schema_version() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("schema_version = \"2.1\"", "schema_version = \"3.0\"");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("schema_version = \"2.1\"", "schema_version = \"3.0\"");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
     let with_hash = base_manifest_toml(&hash.to_string())
         .replace("schema_version = \"2.1\"", "schema_version = \"3.0\"");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-    assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "manifest.schema_version"));
+    assert!(
+        matches!(err, ManifestError::Invalid { field, .. } if field == "manifest.schema_version")
+    );
 }
 
 #[test]
@@ -431,13 +431,16 @@ fn rejects_zero_max_datagram_bytes() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("max_datagram_bytes = 1200", "max_datagram_bytes = 0");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("max_datagram_bytes = 1200", "max_datagram_bytes = 0");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
     let with_hash = base_manifest_toml(&hash.to_string())
         .replace("max_datagram_bytes = 1200", "max_datagram_bytes = 0");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-    assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "manifest.max_datagram_bytes"));
+    assert!(
+        matches!(err, ManifestError::Invalid { field, .. } if field == "manifest.max_datagram_bytes")
+    );
 }
 
 #[test]
@@ -449,7 +452,8 @@ fn rejects_invalid_risk_level() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("risk_level = \"low\"", "risk_level = \"extreme\"");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("risk_level = \"low\"", "risk_level = \"extreme\"");
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
     assert!(matches!(err, ManifestError::Toml(_)));
 }
@@ -463,7 +467,8 @@ fn rejects_invalid_safety_tier() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("safety_tier = \"safe\"", "safety_tier = \"super_safe\"");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("safety_tier = \"safe\"", "safety_tier = \"super_safe\"");
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
     assert!(matches!(err, ManifestError::Toml(_)));
 }
@@ -477,7 +482,8 @@ fn rejects_invalid_idempotency_class() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("idempotency = \"none\"", "idempotency = \"always\"");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("idempotency = \"none\"", "idempotency = \"always\"");
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
     assert!(matches!(err, ManifestError::Toml(_)));
 }
@@ -491,7 +497,10 @@ fn rejects_invalid_approval_mode() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("requires_approval = \"none\"", "requires_approval = \"maybe\"");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "requires_approval = \"none\"",
+        "requires_approval = \"maybe\"",
+    );
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
     assert!(matches!(err, ManifestError::Toml(_)));
 }
@@ -509,28 +518,26 @@ fn rejects_home_zone_in_forbidden() {
         Some("1.0.0"),
         Some(1),
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("forbidden = []", "forbidden = [\"z:work\"]");
+    let toml =
+        base_manifest_toml(PLACEHOLDER_HASH).replace("forbidden = []", "forbidden = [\"z:work\"]");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
-    let with_hash = base_manifest_toml(&hash.to_string())
-        .replace("forbidden = []", "forbidden = [\"z:work\"]");
+    let with_hash =
+        base_manifest_toml(&hash.to_string()).replace("forbidden = []", "forbidden = [\"z:work\"]");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
     assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "zones.forbidden"));
 }
 
 #[test]
 fn rejects_invalid_zone_id() {
-    let _log = TestLog::new(
-        "rejects_invalid_zone_id",
-        "fcp-manifest",
-        None,
-        None,
-        None,
-    );
+    let _log = TestLog::new("rejects_invalid_zone_id", "fcp-manifest", None, None, None);
     // Zone IDs must start with z:
     let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("z:work", "invalid_zone");
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
-    assert!(matches!(err, ManifestError::Toml(_) | ManifestError::ZoneId(_)));
+    assert!(matches!(
+        err,
+        ManifestError::Toml(_) | ManifestError::ZoneId(_)
+    ));
 }
 
 // =============================================================================
@@ -550,8 +557,8 @@ fn accepts_minimal_memory_mb() {
     let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("memory_mb = 64", "memory_mb = 1");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
-    let with_hash = base_manifest_toml(&hash.to_string())
-        .replace("memory_mb = 64", "memory_mb = 1");
+    let with_hash =
+        base_manifest_toml(&hash.to_string()).replace("memory_mb = 64", "memory_mb = 1");
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
     assert_eq!(parsed.sandbox.memory_mb, 1);
 }
@@ -565,13 +572,16 @@ fn rejects_zero_wall_clock_timeout() {
         Some("1.0.0"),
         Some(1),
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("wall_clock_timeout_ms = 1000", "wall_clock_timeout_ms = 0");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        .replace("wall_clock_timeout_ms = 1000", "wall_clock_timeout_ms = 0");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
     let with_hash = base_manifest_toml(&hash.to_string())
         .replace("wall_clock_timeout_ms = 1000", "wall_clock_timeout_ms = 0");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-    assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "sandbox.wall_clock_timeout_ms"));
+    assert!(
+        matches!(err, ManifestError::Invalid { field, .. } if field == "sandbox.wall_clock_timeout_ms")
+    );
 }
 
 #[test]
@@ -584,11 +594,12 @@ fn accepts_high_cpu_percent() {
         Some(1),
     );
     // Note: cpu_percent is u8, values > 100 are allowed (no upper bound validation)
-    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace("cpu_percent = 20", "cpu_percent = 100");
+    let toml =
+        base_manifest_toml(PLACEHOLDER_HASH).replace("cpu_percent = 20", "cpu_percent = 100");
     let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
     let hash = unchecked.compute_interface_hash().expect("compute hash");
-    let with_hash = base_manifest_toml(&hash.to_string())
-        .replace("cpu_percent = 20", "cpu_percent = 100");
+    let with_hash =
+        base_manifest_toml(&hash.to_string()).replace("cpu_percent = 20", "cpu_percent = 100");
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
     assert_eq!(parsed.sandbox.cpu_percent, 100);
 }
@@ -608,14 +619,27 @@ fn supply_chain_with_valid_attestations() {
     );
     let raw = read_vector_manifest("manifest_valid.toml");
     let with_hash = with_computed_hash(&raw);
-    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest with supply chain");
+    let parsed =
+        ConnectorManifest::parse_str(&with_hash).expect("valid manifest with supply chain");
 
     let supply_chain = parsed.supply_chain.expect("supply_chain present");
     assert_eq!(supply_chain.attestations.len(), 2);
 
-    let types: Vec<_> = supply_chain.attestations.iter().map(|a| &a.attestation_type).collect();
-    assert!(types.iter().any(|t| matches!(t, fcp_manifest::AttestationType::InToto)));
-    assert!(types.iter().any(|t| matches!(t, fcp_manifest::AttestationType::ReproducibleBuild)));
+    let types: Vec<_> = supply_chain
+        .attestations
+        .iter()
+        .map(|a| &a.attestation_type)
+        .collect();
+    assert!(
+        types
+            .iter()
+            .any(|t| matches!(t, fcp_manifest::AttestationType::InToto))
+    );
+    assert!(
+        types
+            .iter()
+            .any(|t| matches!(t, fcp_manifest::AttestationType::ReproducibleBuild))
+    );
 }
 
 #[test]
@@ -632,7 +656,11 @@ fn policy_validates_trusted_builders() {
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
 
     let policy = parsed.policy.expect("policy present");
-    assert!(policy.trusted_builders.contains(&"github-actions".to_string()));
+    assert!(
+        policy
+            .trusted_builders
+            .contains(&"github-actions".to_string())
+    );
     assert!(policy.trusted_builders.contains(&"internal-ci".to_string()));
     assert_eq!(policy.min_slsa_level, Some(2));
 }
@@ -670,7 +698,9 @@ fn rejects_slsa_level_too_high() {
     // SLSA levels are 0-4
     let with_hash = with_computed_hash(&raw).replace("min_slsa_level = 2", "min_slsa_level = 5");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-    assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "policy.min_slsa_level"));
+    assert!(
+        matches!(err, ManifestError::Invalid { field, .. } if field == "policy.min_slsa_level")
+    );
 }
 
 // =============================================================================
@@ -708,7 +738,9 @@ fn rejects_threshold_exceeding_signatures() {
     // 5-of-2 is invalid (required > total)
     let with_hash = with_computed_hash(&raw).replace("2-of-2", "5-of-2");
     let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-    assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold"));
+    assert!(
+        matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold")
+    );
 }
 
 // =============================================================================
@@ -734,8 +766,15 @@ network_constraints = { host_allow = ["api.example.com"], port_allow = [443], re
     let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest with cidr_deny");
 
-    let op = parsed.provides.operations.get("test_op").expect("test_op exists");
-    let nc = op.network_constraints.as_ref().expect("network_constraints present");
+    let op = parsed
+        .provides
+        .operations
+        .get("test_op")
+        .expect("test_op exists");
+    let nc = op
+        .network_constraints
+        .as_ref()
+        .expect("network_constraints present");
     assert_eq!(nc.cidr_deny.len(), 2);
 }
 
@@ -758,8 +797,15 @@ network_constraints = { host_allow = ["api.example.com"], port_allow = [443], re
     let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
 
-    let op = parsed.provides.operations.get("test_op").expect("test_op exists");
-    let nc = op.network_constraints.as_ref().expect("network_constraints present");
+    let op = parsed
+        .provides
+        .operations
+        .get("test_op")
+        .expect("test_op exists");
+    let nc = op
+        .network_constraints
+        .as_ref()
+        .expect("network_constraints present");
     // Default should be true for security
     assert!(nc.deny_private_ranges);
 }
@@ -857,14 +903,26 @@ deny_ptrace = true
 
     assert_eq!(parsed.provides.operations.len(), 3);
 
-    let read_op = parsed.provides.operations.get("read_data").expect("read_data exists");
+    let read_op = parsed
+        .provides
+        .operations
+        .get("read_data")
+        .expect("read_data exists");
     assert_eq!(read_op.risk_level, fcp_core::RiskLevel::Low);
 
-    let write_op = parsed.provides.operations.get("write_data").expect("write_data exists");
+    let write_op = parsed
+        .provides
+        .operations
+        .get("write_data")
+        .expect("write_data exists");
     assert_eq!(write_op.risk_level, fcp_core::RiskLevel::Medium);
     assert!(write_op.rate_limit.is_some());
 
-    let delete_op = parsed.provides.operations.get("delete_data").expect("delete_data exists");
+    let delete_op = parsed
+        .provides
+        .operations
+        .get("delete_data")
+        .expect("delete_data exists");
     assert_eq!(delete_op.risk_level, fcp_core::RiskLevel::High);
 }
 
@@ -1036,7 +1094,10 @@ fn interface_hash_excludes_supply_chain() {
     let unchecked2 = ConnectorManifest::parse_str_unchecked(&minimal).expect("unchecked parse 2");
     let hash2 = unchecked2.compute_interface_hash().expect("compute hash 2");
 
-    assert_eq!(hash1, hash2, "interface hash should exclude supply chain metadata");
+    assert_eq!(
+        hash1, hash2,
+        "interface hash should exclude supply chain metadata"
+    );
 }
 
 // =============================================================================
@@ -1052,11 +1113,19 @@ fn parses_all_valid_archetypes() {
         Some("1.0.0"),
         Some(1),
     );
-    let archetypes = ["operational", "bidirectional", "streaming", "storage", "knowledge"];
+    let archetypes = [
+        "operational",
+        "bidirectional",
+        "streaming",
+        "storage",
+        "knowledge",
+    ];
 
     for archetype in archetypes {
-        let toml = base_manifest_toml(PLACEHOLDER_HASH)
-            .replace("archetypes = [\"operational\"]", &format!("archetypes = [\"{archetype}\"]"));
+        let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+            "archetypes = [\"operational\"]",
+            &format!("archetypes = [\"{archetype}\"]"),
+        );
         let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
         let hash = unchecked.compute_interface_hash().expect("compute hash");
         let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
@@ -1075,8 +1144,10 @@ fn rejects_invalid_archetype() {
         None,
         None,
     );
-    let toml = base_manifest_toml(PLACEHOLDER_HASH)
-        .replace("archetypes = [\"operational\"]", "archetypes = [\"invalid_archetype\"]");
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "archetypes = [\"operational\"]",
+        "archetypes = [\"invalid_archetype\"]",
+    );
     let err = ConnectorManifest::parse_str(&toml).unwrap_err();
     assert!(matches!(err, ManifestError::Toml(_)));
 }
@@ -1117,5 +1188,8 @@ fn parses_singleton_writer_state_model() {
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
 
     let state = parsed.connector.state.expect("state section present");
-    assert!(matches!(state.model, fcp_manifest::ConnectorStateModel::SingletonWriter));
+    assert!(matches!(
+        state.model,
+        fcp_manifest::ConnectorStateModel::SingletonWriter
+    ));
 }
