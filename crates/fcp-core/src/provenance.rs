@@ -1139,6 +1139,209 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Origin Zone Tracking Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn origin_zone_preserved_through_zone_crossing() {
+        // Origin zone should remain unchanged when data crosses zones
+        let mut record = ProvenanceRecord::new(ZoneId::private());
+        assert_eq!(record.origin_zone, ZoneId::private());
+
+        // Cross to work zone
+        record.record_zone_crossing(ZoneId::work(), true, None, 1000);
+        assert_eq!(
+            record.origin_zone,
+            ZoneId::private(),
+            "Origin zone must be preserved"
+        );
+        assert_eq!(record.current_zone, ZoneId::work());
+
+        // Cross to public zone
+        record.record_zone_crossing(ZoneId::public(), false, None, 2000);
+        assert_eq!(
+            record.origin_zone,
+            ZoneId::private(),
+            "Origin zone must remain unchanged"
+        );
+        assert_eq!(record.current_zone, ZoneId::public());
+
+        log_flow_test(
+            "origin_zone_preserved_through_zone_crossing",
+            "integrity",
+            "private",
+            "public",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn origin_zone_preserved_through_merge() {
+        // First input's origin zone is preserved in merge
+        let a = ProvenanceRecord::new(ZoneId::owner());
+        let b = ProvenanceRecord::new(ZoneId::public());
+
+        let merged = ProvenanceRecord::merge(&[&a, &b], ZoneId::work());
+        assert_eq!(
+            merged.origin_zone,
+            ZoneId::owner(),
+            "First input's origin zone is preserved"
+        );
+
+        log_flow_test(
+            "origin_zone_preserved_through_merge",
+            "integrity",
+            "owner+public",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn current_zone_updated_on_zone_crossing() {
+        let mut record = ProvenanceRecord::new(ZoneId::owner());
+        assert_eq!(record.current_zone, ZoneId::owner());
+
+        // Track zone crossing path
+        let zones = [
+            ZoneId::private(),
+            ZoneId::work(),
+            ZoneId::community(),
+            ZoneId::public(),
+        ];
+
+        for (i, zone) in zones.iter().enumerate() {
+            record.record_zone_crossing(zone.clone(), true, None, (i as u64 + 1) * 1000);
+            assert_eq!(
+                &record.current_zone, zone,
+                "Current zone must update after crossing"
+            );
+        }
+
+        // Verify all crossings were recorded
+        assert_eq!(record.zone_crossings.len(), 4);
+
+        log_flow_test(
+            "current_zone_updated_on_zone_crossing",
+            "integrity",
+            "owner",
+            "public",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn zone_crossing_records_from_and_to_zones() {
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        record.record_zone_crossing(ZoneId::private(), true, Some(test_object_id("token")), 1000);
+
+        let crossing = &record.zone_crossings[0];
+        assert_eq!(crossing.from_zone, ZoneId::work());
+        assert_eq!(crossing.to_zone, ZoneId::private());
+        assert!(crossing.approved);
+        assert_eq!(crossing.approval_token_id, Some(test_object_id("token")));
+        assert_eq!(crossing.timestamp_ms, 1000);
+
+        log_flow_test(
+            "zone_crossing_records_from_and_to_zones",
+            "integrity",
+            "work",
+            "private",
+            true,
+            "pass",
+            None,
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Integrity/Confidentiality Label Propagation Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn integrity_label_propagates_through_merge_chain() {
+        // Test that MIN integrity is preserved through multiple merges
+        let owner = ProvenanceRecord::new(ZoneId::owner()); // Integrity: Owner
+        let work = ProvenanceRecord::new(ZoneId::work()); // Integrity: Work
+        let public = ProvenanceRecord::public_input(); // Integrity: Untrusted
+
+        // Merge owner + work -> should get Work (MIN)
+        let merged1 = ProvenanceRecord::merge(&[&owner, &work], ZoneId::work());
+        assert_eq!(merged1.integrity_label, IntegrityLevel::Work);
+
+        // Merge result + public -> should get Untrusted (MIN)
+        let merged2 = ProvenanceRecord::merge(&[&merged1, &public], ZoneId::work());
+        assert_eq!(merged2.integrity_label, IntegrityLevel::Untrusted);
+
+        log_flow_test(
+            "integrity_label_propagates_through_merge_chain",
+            "integrity",
+            "owner+work+public",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn confidentiality_label_propagates_through_merge_chain() {
+        // Test that MAX confidentiality is preserved through multiple merges
+        let public = ProvenanceRecord::new(ZoneId::public()); // Confidentiality: Public
+        let work = ProvenanceRecord::new(ZoneId::work()); // Confidentiality: Work
+        let owner = ProvenanceRecord::new(ZoneId::owner()); // Confidentiality: Owner
+
+        // Merge public + work -> should get Work (MAX)
+        let merged1 = ProvenanceRecord::merge(&[&public, &work], ZoneId::work());
+        assert_eq!(merged1.confidentiality_label, ConfidentialityLevel::Work);
+
+        // Merge result + owner -> should get Owner (MAX)
+        let merged2 = ProvenanceRecord::merge(&[&merged1, &owner], ZoneId::work());
+        assert_eq!(merged2.confidentiality_label, ConfidentialityLevel::Owner);
+
+        log_flow_test(
+            "confidentiality_label_propagates_through_merge_chain",
+            "confidentiality",
+            "public+work+owner",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn labels_independent_of_current_zone() {
+        // Labels are intrinsic to the data, not affected by current zone
+        let private_record = ProvenanceRecord::new(ZoneId::private());
+
+        // Merge into different zones - labels should stay the same
+        let merged_work = ProvenanceRecord::merge(&[&private_record], ZoneId::work());
+        let merged_public = ProvenanceRecord::merge(&[&private_record], ZoneId::public());
+
+        assert_eq!(merged_work.integrity_label, merged_public.integrity_label);
+        assert_eq!(
+            merged_work.confidentiality_label,
+            merged_public.confidentiality_label
+        );
+
+        log_flow_test(
+            "labels_independent_of_current_zone",
+            "integrity",
+            "private",
+            "work|public",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Taint Flag Tests
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1176,6 +1379,212 @@ mod tests {
             "integrity",
             "public+unverified",
             "public+unverified",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn all_taint_flag_variants_can_be_set_and_checked() {
+        // Test that all TaintFlag variants work correctly
+        let all_flags = [
+            TaintFlag::PublicInput,
+            TaintFlag::UnverifiedLink,
+            TaintFlag::UntrustedTransform,
+            TaintFlag::WebhookInjected,
+            TaintFlag::UserGenerated,
+            TaintFlag::PotentiallyMalicious,
+            TaintFlag::AiGenerated,
+            TaintFlag::CrossZoneUnapproved,
+        ];
+
+        let mut flags = TaintFlags::new();
+
+        for flag in all_flags {
+            assert!(!flags.contains(flag), "Flag {flag:?} should not be set initially");
+            flags.insert(flag);
+            assert!(flags.contains(flag), "Flag {flag:?} should be set after insert");
+        }
+
+        assert_eq!(flags.len(), 8, "All 8 taint flags should be set");
+
+        log_flow_test(
+            "all_taint_flag_variants_can_be_set_and_checked",
+            "taint",
+            "none",
+            "all",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn taint_flag_criticality() {
+        // Critical flags that block Dangerous operations
+        assert!(TaintFlag::PublicInput.is_critical());
+        assert!(TaintFlag::PotentiallyMalicious.is_critical());
+        assert!(TaintFlag::CrossZoneUnapproved.is_critical());
+
+        // Non-critical flags
+        assert!(!TaintFlag::UnverifiedLink.is_critical());
+        assert!(!TaintFlag::UntrustedTransform.is_critical());
+        assert!(!TaintFlag::WebhookInjected.is_critical());
+        assert!(!TaintFlag::UserGenerated.is_critical());
+        assert!(!TaintFlag::AiGenerated.is_critical());
+
+        log_flow_test(
+            "taint_flag_criticality",
+            "taint",
+            "all_flags",
+            "critical_check",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn taint_flags_accumulate_union() {
+        // Verify taint accumulation is union (OR) operation
+        let mut a = TaintFlags::new();
+        a.insert(TaintFlag::PublicInput);
+        a.insert(TaintFlag::UserGenerated);
+
+        let mut b = TaintFlags::new();
+        b.insert(TaintFlag::UnverifiedLink);
+        b.insert(TaintFlag::UserGenerated); // Duplicate
+
+        let merged = a.merge(&b);
+
+        // Union should contain all unique flags
+        assert!(merged.contains(TaintFlag::PublicInput));
+        assert!(merged.contains(TaintFlag::UserGenerated));
+        assert!(merged.contains(TaintFlag::UnverifiedLink));
+        assert_eq!(merged.len(), 3, "Duplicates should not count twice");
+
+        log_flow_test(
+            "taint_flags_accumulate_union",
+            "taint",
+            "a+b",
+            "union",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn taint_flags_has_critical_with_mixed_flags() {
+        let mut flags = TaintFlags::new();
+
+        // Add non-critical flags
+        flags.insert(TaintFlag::UserGenerated);
+        flags.insert(TaintFlag::AiGenerated);
+        assert!(!flags.has_critical(), "No critical flags yet");
+
+        // Add one critical flag
+        flags.insert(TaintFlag::PublicInput);
+        assert!(flags.has_critical(), "Should detect critical flag");
+
+        log_flow_test(
+            "taint_flags_has_critical_with_mixed_flags",
+            "taint",
+            "mixed",
+            "critical_check",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn webhook_injected_flag_applied() {
+        // Simulate webhook-sourced data
+        let mut record = ProvenanceRecord::new(ZoneId::community());
+        record.taint_flags.insert(TaintFlag::WebhookInjected);
+
+        assert!(record.taint_flags.contains(TaintFlag::WebhookInjected));
+        assert!(
+            !record.taint_flags.has_critical(),
+            "WebhookInjected alone is not critical"
+        );
+
+        log_flow_test(
+            "webhook_injected_flag_applied",
+            "taint",
+            "community",
+            "community",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn ai_generated_flag_applied() {
+        // Data synthesized by AI model
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        record.taint_flags.insert(TaintFlag::AiGenerated);
+
+        assert!(record.taint_flags.contains(TaintFlag::AiGenerated));
+        assert!(
+            !record.taint_flags.has_critical(),
+            "AiGenerated alone is not critical"
+        );
+
+        log_flow_test(
+            "ai_generated_flag_applied",
+            "taint",
+            "work",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn untrusted_transform_flag_applied() {
+        // Data that passed through untrusted transformation
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        record.taint_flags.insert(TaintFlag::UntrustedTransform);
+
+        assert!(record.taint_flags.contains(TaintFlag::UntrustedTransform));
+        assert!(
+            !record.taint_flags.has_critical(),
+            "UntrustedTransform alone is not critical"
+        );
+
+        log_flow_test(
+            "untrusted_transform_flag_applied",
+            "taint",
+            "work",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn potentially_malicious_flag_is_critical() {
+        // Data flagged as potentially malicious by sanitizer
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        record.taint_flags.insert(TaintFlag::PotentiallyMalicious);
+
+        assert!(record.taint_flags.contains(TaintFlag::PotentiallyMalicious));
+        assert!(
+            record.taint_flags.has_critical(),
+            "PotentiallyMalicious is critical"
+        );
+
+        log_flow_test(
+            "potentially_malicious_flag_is_critical",
+            "taint",
+            "work",
+            "work",
             false,
             "pass",
             None,
