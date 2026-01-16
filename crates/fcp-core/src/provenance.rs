@@ -2392,4 +2392,465 @@ mod tests {
             None,
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Property Tests for Merge Invariants (Randomized)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    mod property_tests {
+        use super::*;
+        use rand::{Rng, SeedableRng};
+        use rand::rngs::StdRng;
+
+        /// Generate a random IntegrityLevel.
+        fn random_integrity(rng: &mut impl Rng) -> IntegrityLevel {
+            match rng.gen_range(0..5) {
+                0 => IntegrityLevel::Untrusted,
+                1 => IntegrityLevel::Community,
+                2 => IntegrityLevel::Work,
+                3 => IntegrityLevel::Private,
+                _ => IntegrityLevel::Owner,
+            }
+        }
+
+        /// Generate a random ConfidentialityLevel.
+        fn random_confidentiality(rng: &mut impl Rng) -> ConfidentialityLevel {
+            match rng.gen_range(0..5) {
+                0 => ConfidentialityLevel::Public,
+                1 => ConfidentialityLevel::Community,
+                2 => ConfidentialityLevel::Work,
+                3 => ConfidentialityLevel::Private,
+                _ => ConfidentialityLevel::Owner,
+            }
+        }
+
+        /// Generate random TaintFlags (0-3 random flags).
+        fn random_taint_flags(rng: &mut impl Rng) -> TaintFlags {
+            let all_flags = [
+                TaintFlag::PublicInput,
+                TaintFlag::UnverifiedLink,
+                TaintFlag::UntrustedTransform,
+                TaintFlag::WebhookInjected,
+                TaintFlag::UserGenerated,
+                TaintFlag::PotentiallyMalicious,
+                TaintFlag::AiGenerated,
+                TaintFlag::CrossZoneUnapproved,
+            ];
+            let num_flags = rng.gen_range(0..=3);
+            let mut flags = TaintFlags::new();
+            for _ in 0..num_flags {
+                let idx = rng.gen_range(0..all_flags.len());
+                flags.insert(all_flags[idx]);
+            }
+            flags
+        }
+
+        /// Generate a random ZoneId.
+        fn random_zone(rng: &mut impl Rng) -> ZoneId {
+            match rng.gen_range(0..5) {
+                0 => ZoneId::public(),
+                1 => ZoneId::community(),
+                2 => ZoneId::work(),
+                3 => ZoneId::private(),
+                _ => ZoneId::owner(),
+            }
+        }
+
+        /// Generate a random ProvenanceRecord with explicit labels.
+        fn random_provenance(rng: &mut impl Rng) -> ProvenanceRecord {
+            let zone = random_zone(rng);
+            let mut record = ProvenanceRecord::new(zone);
+            // Override with random labels
+            record.integrity_label = random_integrity(rng);
+            record.confidentiality_label = random_confidentiality(rng);
+            record.taint_flags = random_taint_flags(rng);
+            record
+        }
+
+        const NUM_ITERATIONS: usize = 100;
+        const SEED: u64 = 0xDEAD_BEEF_CAFE_F00D;
+
+        /// Property: merge(a, b) == merge(b, a) for integrity, confidentiality, and taint.
+        ///
+        /// Commutativity ensures that the order of inputs doesn't affect the
+        /// security-relevant merge result.
+        #[test]
+        fn property_merge_commutativity() {
+            let mut rng = StdRng::seed_from_u64(SEED);
+            let zone = ZoneId::work();
+
+            for i in 0..NUM_ITERATIONS {
+                let a = random_provenance(&mut rng);
+                let b = random_provenance(&mut rng);
+
+                let merge_ab = ProvenanceRecord::merge(&[&a, &b], zone.clone());
+                let merge_ba = ProvenanceRecord::merge(&[&b, &a], zone.clone());
+
+                assert_eq!(
+                    merge_ab.integrity_label, merge_ba.integrity_label,
+                    "Iteration {i}: integrity not commutative"
+                );
+                assert_eq!(
+                    merge_ab.confidentiality_label, merge_ba.confidentiality_label,
+                    "Iteration {i}: confidentiality not commutative"
+                );
+                assert_eq!(
+                    merge_ab.taint_flags, merge_ba.taint_flags,
+                    "Iteration {i}: taint flags not commutative"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_commutativity",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: merge(merge(a, b), c) == merge(a, merge(b, c)) for labels and taint.
+        ///
+        /// Associativity ensures consistent results regardless of grouping.
+        #[test]
+        fn property_merge_associativity() {
+            let mut rng = StdRng::seed_from_u64(SEED + 1);
+            let zone = ZoneId::work();
+
+            for i in 0..NUM_ITERATIONS {
+                let a = random_provenance(&mut rng);
+                let b = random_provenance(&mut rng);
+                let c = random_provenance(&mut rng);
+
+                // (a merge b) merge c
+                let ab = ProvenanceRecord::merge(&[&a, &b], zone.clone());
+                let ab_c = ProvenanceRecord::merge(&[&ab, &c], zone.clone());
+
+                // a merge (b merge c)
+                let bc = ProvenanceRecord::merge(&[&b, &c], zone.clone());
+                let a_bc = ProvenanceRecord::merge(&[&a, &bc], zone.clone());
+
+                assert_eq!(
+                    ab_c.integrity_label, a_bc.integrity_label,
+                    "Iteration {i}: integrity not associative"
+                );
+                assert_eq!(
+                    ab_c.confidentiality_label, a_bc.confidentiality_label,
+                    "Iteration {i}: confidentiality not associative"
+                );
+                assert_eq!(
+                    ab_c.taint_flags, a_bc.taint_flags,
+                    "Iteration {i}: taint flags not associative"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_associativity",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: result.integrity == MIN(inputs.integrity).
+        ///
+        /// This is the conservative merge rule: the result is no more trusted
+        /// than the least trusted input.
+        #[test]
+        fn property_merge_integrity_is_minimum() {
+            let mut rng = StdRng::seed_from_u64(SEED + 2);
+            let zone = ZoneId::work();
+
+            for i in 0..NUM_ITERATIONS {
+                let records: Vec<ProvenanceRecord> =
+                    (0..rng.gen_range(1..=5)).map(|_| random_provenance(&mut rng)).collect();
+                let refs: Vec<&ProvenanceRecord> = records.iter().collect();
+
+                let merged = ProvenanceRecord::merge(&refs, zone.clone());
+                let expected_min = records
+                    .iter()
+                    .map(|r| r.integrity_label)
+                    .min()
+                    .unwrap();
+
+                assert_eq!(
+                    merged.integrity_label, expected_min,
+                    "Iteration {i}: integrity should be MIN of inputs"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_integrity_is_minimum",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: result.confidentiality == MAX(inputs.confidentiality).
+        ///
+        /// This is the restrictive merge rule: the result cannot flow to
+        /// lower confidentiality contexts than the most restricted input.
+        #[test]
+        fn property_merge_confidentiality_is_maximum() {
+            let mut rng = StdRng::seed_from_u64(SEED + 3);
+            let zone = ZoneId::work();
+
+            for i in 0..NUM_ITERATIONS {
+                let records: Vec<ProvenanceRecord> =
+                    (0..rng.gen_range(1..=5)).map(|_| random_provenance(&mut rng)).collect();
+                let refs: Vec<&ProvenanceRecord> = records.iter().collect();
+
+                let merged = ProvenanceRecord::merge(&refs, zone.clone());
+                let expected_max = records
+                    .iter()
+                    .map(|r| r.confidentiality_label)
+                    .max()
+                    .unwrap();
+
+                assert_eq!(
+                    merged.confidentiality_label, expected_max,
+                    "Iteration {i}: confidentiality should be MAX of inputs"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_confidentiality_is_maximum",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: result.taint_flags ⊇ union(inputs.taint_flags).
+        ///
+        /// Taint accumulates: merged output contains all taints from all inputs.
+        #[test]
+        fn property_merge_taint_accumulation() {
+            let mut rng = StdRng::seed_from_u64(SEED + 4);
+            let zone = ZoneId::work();
+
+            for i in 0..NUM_ITERATIONS {
+                let records: Vec<ProvenanceRecord> =
+                    (0..rng.gen_range(1..=5)).map(|_| random_provenance(&mut rng)).collect();
+                let refs: Vec<&ProvenanceRecord> = records.iter().collect();
+
+                let merged = ProvenanceRecord::merge(&refs, zone.clone());
+
+                // Collect all expected flags from inputs
+                let mut expected_flags = TaintFlags::new();
+                for record in &records {
+                    for flag in record.taint_flags.iter() {
+                        expected_flags.insert(*flag);
+                    }
+                }
+
+                // Verify all expected flags are present in merged
+                for flag in expected_flags.iter() {
+                    assert!(
+                        merged.taint_flags.contains(*flag),
+                        "Iteration {i}: merged should contain flag {flag:?}"
+                    );
+                }
+
+                // Verify merged has exactly the expected flags (no extras)
+                assert_eq!(
+                    merged.taint_flags, expected_flags,
+                    "Iteration {i}: merged taint flags should equal union of inputs"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_taint_accumulation",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: merge(single) preserves the single input's labels.
+        ///
+        /// Identity property: merging a single input should preserve its values.
+        #[test]
+        fn property_merge_single_preserves_labels() {
+            let mut rng = StdRng::seed_from_u64(SEED + 5);
+            let zone = ZoneId::work();
+
+            for i in 0..NUM_ITERATIONS {
+                let single = random_provenance(&mut rng);
+
+                let merged = ProvenanceRecord::merge(&[&single], zone.clone());
+
+                assert_eq!(
+                    merged.integrity_label, single.integrity_label,
+                    "Iteration {i}: single merge should preserve integrity"
+                );
+                assert_eq!(
+                    merged.confidentiality_label, single.confidentiality_label,
+                    "Iteration {i}: single merge should preserve confidentiality"
+                );
+                assert_eq!(
+                    merged.taint_flags, single.taint_flags,
+                    "Iteration {i}: single merge should preserve taint flags"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_single_preserves_labels",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: merge(empty) returns fresh record with zone defaults.
+        #[test]
+        fn property_merge_empty_returns_zone_defaults() {
+            let zones = [
+                ZoneId::public(),
+                ZoneId::community(),
+                ZoneId::work(),
+                ZoneId::private(),
+                ZoneId::owner(),
+            ];
+
+            for zone in zones {
+                let merged = ProvenanceRecord::merge(&[], zone.clone());
+
+                assert_eq!(
+                    merged.integrity_label,
+                    IntegrityLevel::from_zone(&zone),
+                    "Empty merge should use zone's default integrity"
+                );
+                assert_eq!(
+                    merged.confidentiality_label,
+                    ConfidentialityLevel::from_zone(&zone),
+                    "Empty merge should use zone's default confidentiality"
+                );
+                assert!(
+                    merged.taint_flags.is_empty(),
+                    "Empty merge should have no taint"
+                );
+            }
+
+            log_flow_test(
+                "property_merge_empty_returns_zone_defaults",
+                "integrity",
+                "empty",
+                "zones",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: TaintFlags.merge is commutative.
+        #[test]
+        fn property_taint_flags_merge_commutativity() {
+            let mut rng = StdRng::seed_from_u64(SEED + 6);
+
+            for i in 0..NUM_ITERATIONS {
+                let a = random_taint_flags(&mut rng);
+                let b = random_taint_flags(&mut rng);
+
+                let ab = a.merge(&b);
+                let ba = b.merge(&a);
+
+                assert_eq!(
+                    ab, ba,
+                    "Iteration {i}: TaintFlags.merge should be commutative"
+                );
+            }
+
+            log_flow_test(
+                "property_taint_flags_merge_commutativity",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: TaintFlags.merge is associative.
+        #[test]
+        fn property_taint_flags_merge_associativity() {
+            let mut rng = StdRng::seed_from_u64(SEED + 7);
+
+            for i in 0..NUM_ITERATIONS {
+                let a = random_taint_flags(&mut rng);
+                let b = random_taint_flags(&mut rng);
+                let c = random_taint_flags(&mut rng);
+
+                let ab_c = a.merge(&b).merge(&c);
+                let a_bc = a.merge(&b.merge(&c));
+
+                assert_eq!(
+                    ab_c, a_bc,
+                    "Iteration {i}: TaintFlags.merge should be associative"
+                );
+            }
+
+            log_flow_test(
+                "property_taint_flags_merge_associativity",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+
+        /// Property: TaintFlags.merge(empty) is identity.
+        #[test]
+        fn property_taint_flags_merge_identity() {
+            let mut rng = StdRng::seed_from_u64(SEED + 8);
+            let empty = TaintFlags::new();
+
+            for i in 0..NUM_ITERATIONS {
+                let flags = random_taint_flags(&mut rng);
+
+                let merged = flags.merge(&empty);
+                assert_eq!(
+                    merged, flags,
+                    "Iteration {i}: merge with empty should be identity"
+                );
+
+                let merged_rev = empty.merge(&flags);
+                assert_eq!(
+                    merged_rev, flags,
+                    "Iteration {i}: empty merge with flags should be identity"
+                );
+            }
+
+            log_flow_test(
+                "property_taint_flags_merge_identity",
+                "integrity",
+                "random",
+                "random",
+                false,
+                "pass",
+                None,
+            );
+        }
+    }
 }
