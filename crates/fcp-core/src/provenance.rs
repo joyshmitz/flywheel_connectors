@@ -995,6 +995,81 @@ mod tests {
         eprintln!("{log}");
     }
 
+    fn assert_merge_equivalent(left: &ProvenanceRecord, right: &ProvenanceRecord) {
+        assert_eq!(left.integrity_label, right.integrity_label);
+        assert_eq!(left.confidentiality_label, right.confidentiality_label);
+        assert_eq!(left.taint_flags, right.taint_flags);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Provenance Field Handling Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn public_input_defaults() {
+        let record = ProvenanceRecord::public_input();
+
+        assert_eq!(record.origin_zone, ZoneId::public());
+        assert_eq!(record.current_zone, ZoneId::public());
+        assert_eq!(record.integrity_label, IntegrityLevel::Untrusted);
+        assert_eq!(record.confidentiality_label, ConfidentialityLevel::Public);
+        assert!(record.taint_flags.contains(TaintFlag::PublicInput));
+        log_flow_test(
+            "public_input_defaults",
+            "integrity",
+            "public",
+            "public",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn provenance_merge_empty_defaults_to_current_zone() {
+        let merged = ProvenanceRecord::merge(&[], ZoneId::work());
+
+        assert_eq!(merged.origin_zone, ZoneId::work());
+        assert_eq!(merged.current_zone, ZoneId::work());
+        assert_eq!(merged.integrity_label, IntegrityLevel::Work);
+        assert_eq!(merged.confidentiality_label, ConfidentialityLevel::Work);
+        assert!(merged.taint_flags.is_empty());
+        log_flow_test(
+            "provenance_merge_empty_defaults_to_current_zone",
+            "integrity",
+            "none",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn provenance_merge_single_preserves_fields() {
+        let mut record = ProvenanceRecord::new(ZoneId::private());
+        record.taint_flags.insert(TaintFlag::UserGenerated);
+        record.input_sources.push(test_object_id("source-a"));
+
+        let merged = ProvenanceRecord::merge(&[&record], ZoneId::work());
+
+        assert_eq!(merged.origin_zone, ZoneId::private());
+        assert_eq!(merged.current_zone, ZoneId::work());
+        assert_eq!(merged.integrity_label, IntegrityLevel::Private);
+        assert_eq!(merged.confidentiality_label, ConfidentialityLevel::Private);
+        assert!(merged.taint_flags.contains(TaintFlag::UserGenerated));
+        assert_eq!(merged.input_sources, vec![test_object_id("source-a")]);
+        log_flow_test(
+            "provenance_merge_single_preserves_fields",
+            "integrity",
+            "private",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Integrity/Confidentiality Level Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -1096,6 +1171,15 @@ mod tests {
         assert!(merged.contains(TaintFlag::PublicInput));
         assert!(merged.contains(TaintFlag::UnverifiedLink));
         assert_eq!(merged.len(), 2);
+        log_flow_test(
+            "taint_flags_merge",
+            "integrity",
+            "public+unverified",
+            "public+unverified",
+            false,
+            "pass",
+            None,
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1111,6 +1195,15 @@ mod tests {
 
         // MIN integrity: Owner + Untrusted = Untrusted
         assert_eq!(merged.integrity_label, IntegrityLevel::Untrusted);
+        log_flow_test(
+            "provenance_merge_min_integrity",
+            "integrity",
+            "owner+public",
+            "work",
+            false,
+            "pass",
+            None,
+        );
     }
 
     #[test]
@@ -1122,6 +1215,15 @@ mod tests {
 
         // MAX confidentiality: Public + Private = Private
         assert_eq!(merged.confidentiality_label, ConfidentialityLevel::Private);
+        log_flow_test(
+            "provenance_merge_max_confidentiality",
+            "confidentiality",
+            "public+private",
+            "work",
+            false,
+            "pass",
+            None,
+        );
     }
 
     #[test]
@@ -1136,6 +1238,64 @@ mod tests {
 
         assert!(merged.taint_flags.contains(TaintFlag::PublicInput));
         assert!(merged.taint_flags.contains(TaintFlag::UnverifiedLink));
+        log_flow_test(
+            "provenance_merge_taint_accumulates",
+            "integrity",
+            "work",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn provenance_merge_commutative_labels_and_taints() {
+        let mut a = ProvenanceRecord::new(ZoneId::owner());
+        a.taint_flags.insert(TaintFlag::UserGenerated);
+        let mut b = ProvenanceRecord::new(ZoneId::public());
+        b.taint_flags.insert(TaintFlag::PublicInput);
+
+        let merged_ab = ProvenanceRecord::merge(&[&a, &b], ZoneId::work());
+        let merged_ba = ProvenanceRecord::merge(&[&b, &a], ZoneId::work());
+
+        assert_merge_equivalent(&merged_ab, &merged_ba);
+        log_flow_test(
+            "provenance_merge_commutative_labels_and_taints",
+            "integrity",
+            "owner+public",
+            "work",
+            false,
+            "pass",
+            None,
+        );
+    }
+
+    #[test]
+    fn provenance_merge_associative_labels_and_taints() {
+        let mut a = ProvenanceRecord::new(ZoneId::private());
+        a.taint_flags.insert(TaintFlag::UserGenerated);
+        let mut b = ProvenanceRecord::new(ZoneId::work());
+        b.taint_flags.insert(TaintFlag::UnverifiedLink);
+        let mut c = ProvenanceRecord::new(ZoneId::public());
+        c.taint_flags.insert(TaintFlag::PublicInput);
+
+        let merged_ab = ProvenanceRecord::merge(&[&a, &b], ZoneId::work());
+        let merged_abc_left = ProvenanceRecord::merge(&[&merged_ab, &c], ZoneId::work());
+
+        let merged_bc = ProvenanceRecord::merge(&[&b, &c], ZoneId::work());
+        let merged_abc_right = ProvenanceRecord::merge(&[&a, &merged_bc], ZoneId::work());
+
+        assert_merge_equivalent(&merged_abc_left, &merged_abc_right);
+        log_flow_test(
+            "provenance_merge_associative_labels_and_taints",
+            "integrity",
+            "private+work+public",
+            "work",
+            false,
+            "pass",
+            None,
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1373,6 +1533,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn taint_reduction_noop_without_matching_flags() {
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        record.taint_flags.insert(TaintFlag::UserGenerated);
+
+        let receipt_id = test_object_id("sanitizer-receipt");
+        record.apply_taint_reduction(&[TaintFlag::UnverifiedLink], receipt_id, vec![], 1000);
+
+        assert!(record.taint_flags.contains(TaintFlag::UserGenerated));
+        assert!(record.taint_reductions.is_empty());
+        log_flow_test(
+            "taint_reduction_noop_without_matching_flags",
+            "integrity",
+            "work",
+            "work",
+            true,
+            "pass",
+            Some("NO_MATCHING_TAINT"),
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Zone Crossing Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -1508,6 +1689,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sanitizer_receipt_coverage_checks_inputs() {
+        let receipt = SanitizerReceipt {
+            receipt_id: "test-receipt".into(),
+            timestamp_ms: 1000,
+            sanitizer_id: "sanitizer:html".into(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::UnverifiedLink],
+            covered_inputs: vec![test_object_id("input1"), test_object_id("input2")],
+            cleared_flags: vec![TaintFlag::UnverifiedLink],
+            signature: None,
+        };
+
+        assert!(receipt.covers_input(&test_object_id("input1")));
+        assert!(!receipt.covers_input(&test_object_id("input3")));
+        log_flow_test(
+            "sanitizer_receipt_coverage_checks_inputs",
+            "integrity",
+            "work",
+            "work",
+            true,
+            "pass",
+            Some("COVERS_INPUT"),
+        );
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Serialization Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -1546,5 +1753,20 @@ mod tests {
         let json = serde_json::to_string(&scope).expect("serialization failed");
         assert!(json.contains("\"type\":\"execution\""));
         assert!(json.contains("\"pointer\":\"/chat_id\""));
+    }
+
+    #[test]
+    fn approval_scope_declassification_serialization() {
+        let scope = ApprovalScope::Declassification(DeclassificationScope {
+            from_zone: ZoneId::private(),
+            to_zone: ZoneId::work(),
+            object_ids: vec![test_object_id("obj-1"), test_object_id("obj-2")],
+            target_confidentiality: ConfidentialityLevel::Work,
+        });
+
+        let json = serde_json::to_string(&scope).expect("serialization failed");
+        assert!(json.contains("\"type\":\"declassification\""));
+        assert!(json.contains(ZoneId::PRIVATE));
+        assert!(json.contains(ZoneId::WORK));
     }
 }
