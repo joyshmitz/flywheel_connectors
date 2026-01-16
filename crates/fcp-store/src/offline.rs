@@ -194,10 +194,7 @@ impl OfflineCapability {
     /// Get the number of objects available offline.
     #[must_use]
     pub fn available_count(&self) -> usize {
-        self.objects
-            .values()
-            .filter(|a| a.can_access())
-            .count()
+        self.objects.values().filter(|a| a.can_access()).count()
     }
 
     /// Get the number of partially cached objects.
@@ -356,9 +353,7 @@ impl AccessPatternTracker {
     /// Get the access count for an object.
     #[must_use]
     pub fn access_count(&self, object_id: &ObjectId) -> u64 {
-        self.patterns
-            .get(object_id)
-            .map_or(0, |e| e.access_count)
+        self.patterns.get(object_id).map_or(0, |e| e.access_count)
     }
 
     /// Calculate a priority score for pre-staging.
@@ -560,112 +555,142 @@ mod tests {
 
     #[test]
     fn offline_access_can_access_false() {
-        run_offline_test("offline_access_can_access_false", "verify", "access", 2, || {
-            let object_id = test_object_id();
-            let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
-            access.set_local_symbols(5);
+        run_offline_test(
+            "offline_access_can_access_false",
+            "verify",
+            "access",
+            2,
+            || {
+                let object_id = test_object_id();
+                let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
+                access.set_local_symbols(5);
 
-            assert!(!access.can_access());
-            assert_eq!(access.symbols_needed(), 5);
+                assert!(!access.can_access());
+                assert_eq!(access.symbols_needed(), 5);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: Some(access.local_symbols),
-                k: Some(access.k),
-                coverage_bps: Some(access.coverage_bps()),
-                details: Some(json!({"can_access": false, "symbols_needed": 5})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: Some(access.coverage_bps()),
+                    details: Some(json!({"can_access": false, "symbols_needed": 5})),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_access_can_access_true() {
-        run_offline_test("offline_access_can_access_true", "verify", "access", 2, || {
-            let object_id = test_object_id();
-            let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
-            access.set_local_symbols(10);
+        run_offline_test(
+            "offline_access_can_access_true",
+            "verify",
+            "access",
+            2,
+            || {
+                let object_id = test_object_id();
+                let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
+                access.set_local_symbols(10);
 
-            assert!(access.can_access());
-            assert_eq!(access.symbols_needed(), 0);
+                assert!(access.can_access());
+                assert_eq!(access.symbols_needed(), 0);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: Some(access.local_symbols),
-                k: Some(access.k),
-                coverage_bps: Some(access.coverage_bps()),
-                details: Some(json!({"can_access": true})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: Some(access.coverage_bps()),
+                    details: Some(json!({"can_access": true})),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_access_overcoverage() {
-        run_offline_test("offline_access_overcoverage", "verify", "coverage", 2, || {
-            let object_id = test_object_id();
-            let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
-            access.set_local_symbols(15);
+        run_offline_test(
+            "offline_access_overcoverage",
+            "verify",
+            "coverage",
+            2,
+            || {
+                let object_id = test_object_id();
+                let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
+                access.set_local_symbols(15);
 
-            assert!(access.can_access());
-            assert_eq!(access.coverage_bps(), 15000);
+                assert!(access.can_access());
+                assert_eq!(access.coverage_bps(), 15000);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: Some(access.local_symbols),
-                k: Some(access.k),
-                coverage_bps: Some(access.coverage_bps()),
-                details: Some(json!({"coverage": access.coverage()})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: Some(access.coverage_bps()),
+                    details: Some(json!({"coverage": access.coverage()})),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_access_coverage_calculation() {
-        run_offline_test("offline_access_coverage_calculation", "verify", "coverage", 3, || {
-            let object_id = test_object_id();
-            let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
-            access.set_local_symbols(5);
+        run_offline_test(
+            "offline_access_coverage_calculation",
+            "verify",
+            "coverage",
+            3,
+            || {
+                let object_id = test_object_id();
+                let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
+                access.set_local_symbols(5);
 
-            assert_eq!(access.coverage_bps(), 5000);
-            assert!((access.coverage() - 0.5).abs() < f64::EPSILON);
-            assert_eq!(access.bytes_needed(), 5 * 1024);
+                assert_eq!(access.coverage_bps(), 5000);
+                assert!((access.coverage() - 0.5).abs() < f64::EPSILON);
+                assert_eq!(access.bytes_needed(), 5 * 1024);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: Some(access.local_symbols),
-                k: Some(access.k),
-                coverage_bps: Some(access.coverage_bps()),
-                details: Some(json!({"bytes_needed": access.bytes_needed()})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: Some(access.coverage_bps()),
+                    details: Some(json!({"bytes_needed": access.bytes_needed()})),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_access_add_remove_symbols() {
-        run_offline_test("offline_access_add_remove_symbols", "verify", "mutation", 4, || {
-            let object_id = test_object_id();
-            let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
+        run_offline_test(
+            "offline_access_add_remove_symbols",
+            "verify",
+            "mutation",
+            4,
+            || {
+                let object_id = test_object_id();
+                let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
 
-            access.add_symbols(5);
-            assert_eq!(access.local_symbols, 5);
+                access.add_symbols(5);
+                assert_eq!(access.local_symbols, 5);
 
-            access.add_symbols(3);
-            assert_eq!(access.local_symbols, 8);
+                access.add_symbols(3);
+                assert_eq!(access.local_symbols, 8);
 
-            access.remove_symbols(2);
-            assert_eq!(access.local_symbols, 6);
+                access.remove_symbols(2);
+                assert_eq!(access.local_symbols, 6);
 
-            // Test saturating subtraction
-            access.remove_symbols(100);
-            assert_eq!(access.local_symbols, 0);
+                // Test saturating subtraction
+                access.remove_symbols(100);
+                assert_eq!(access.local_symbols, 0);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: Some(access.local_symbols),
-                k: Some(access.k),
-                coverage_bps: Some(access.coverage_bps()),
-                details: Some(json!({"final_symbols": 0})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: Some(access.coverage_bps()),
+                    details: Some(json!({"final_symbols": 0})),
+                }
+            },
+        );
     }
 
     #[test]
@@ -717,123 +742,147 @@ mod tests {
 
     #[test]
     fn offline_capability_track_objects() {
-        run_offline_test("offline_capability_track_objects", "verify", "track", 4, || {
-            let mut cap = OfflineCapability::new();
+        run_offline_test(
+            "offline_capability_track_objects",
+            "verify",
+            "track",
+            4,
+            || {
+                let mut cap = OfflineCapability::new();
 
-            let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
-            access1.set_local_symbols(10); // Available
-            cap.track(access1);
+                let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                access1.set_local_symbols(10); // Available
+                cap.track(access1);
 
-            let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
-            access2.set_local_symbols(5); // Partial
-            cap.track(access2);
+                let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
+                access2.set_local_symbols(5); // Partial
+                cap.track(access2);
 
-            let access3 = OfflineAccess::new(test_object_id_3(), 10, 15, 1024);
-            // Not cached
-            cap.track(access3);
+                let access3 = OfflineAccess::new(test_object_id_3(), 10, 15, 1024);
+                // Not cached
+                cap.track(access3);
 
-            assert_eq!(cap.object_count(), 3);
-            assert_eq!(cap.available_count(), 1);
-            assert_eq!(cap.partial_count(), 1);
-            assert_eq!(cap.readiness_bps(), 3333); // 1/3 ≈ 33.33%
+                assert_eq!(cap.object_count(), 3);
+                assert_eq!(cap.available_count(), 1);
+                assert_eq!(cap.partial_count(), 1);
+                assert_eq!(cap.readiness_bps(), 3333); // 1/3 ≈ 33.33%
 
-            OfflineLogData {
-                object_id: None,
-                local_symbols: None,
-                k: None,
-                coverage_bps: Some(cap.readiness_bps()),
-                details: Some(json!({
-                    "object_count": 3,
-                    "available_count": 1,
-                    "partial_count": 1
-                })),
-            }
-        });
+                OfflineLogData {
+                    object_id: None,
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: Some(cap.readiness_bps()),
+                    details: Some(json!({
+                        "object_count": 3,
+                        "available_count": 1,
+                        "partial_count": 1
+                    })),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_capability_can_access() {
-        run_offline_test("offline_capability_can_access", "verify", "access", 3, || {
-            let mut cap = OfflineCapability::new();
+        run_offline_test(
+            "offline_capability_can_access",
+            "verify",
+            "access",
+            3,
+            || {
+                let mut cap = OfflineCapability::new();
 
-            let mut access = OfflineAccess::new(test_object_id(), 10, 15, 1024);
-            access.set_local_symbols(10);
-            cap.track(access);
+                let mut access = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                access.set_local_symbols(10);
+                cap.track(access);
 
-            let access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
-            cap.track(access2);
+                let access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
+                cap.track(access2);
 
-            assert!(cap.can_access(&test_object_id()));
-            assert!(!cap.can_access(&test_object_id_2()));
-            assert!(!cap.can_access(&test_object_id_3())); // Not tracked
+                assert!(cap.can_access(&test_object_id()));
+                assert!(!cap.can_access(&test_object_id_2()));
+                assert!(!cap.can_access(&test_object_id_3())); // Not tracked
 
-            OfflineLogData {
-                object_id: Some(test_object_id()),
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({"can_access_obj1": true, "can_access_obj2": false})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(test_object_id()),
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({"can_access_obj1": true, "can_access_obj2": false})),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_capability_bytes_needed() {
-        run_offline_test("offline_capability_bytes_needed", "verify", "calculation", 1, || {
-            let mut cap = OfflineCapability::new();
+        run_offline_test(
+            "offline_capability_bytes_needed",
+            "verify",
+            "calculation",
+            1,
+            || {
+                let mut cap = OfflineCapability::new();
 
-            let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
-            access1.set_local_symbols(5); // Needs 5 * 1024 = 5120 bytes
-            cap.track(access1);
+                let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                access1.set_local_symbols(5); // Needs 5 * 1024 = 5120 bytes
+                cap.track(access1);
 
-            let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 512);
-            access2.set_local_symbols(7); // Needs 3 * 512 = 1536 bytes
-            cap.track(access2);
+                let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 512);
+                access2.set_local_symbols(7); // Needs 3 * 512 = 1536 bytes
+                cap.track(access2);
 
-            assert_eq!(cap.total_bytes_needed(), 5120 + 1536);
+                assert_eq!(cap.total_bytes_needed(), 5120 + 1536);
 
-            OfflineLogData {
-                object_id: None,
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({"total_bytes_needed": cap.total_bytes_needed()})),
-            }
-        });
+                OfflineLogData {
+                    object_id: None,
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({"total_bytes_needed": cap.total_bytes_needed()})),
+                }
+            },
+        );
     }
 
     #[test]
     fn offline_capability_objects_by_coverage() {
-        run_offline_test("offline_capability_objects_by_coverage", "verify", "sort", 3, || {
-            let mut cap = OfflineCapability::new();
+        run_offline_test(
+            "offline_capability_objects_by_coverage",
+            "verify",
+            "sort",
+            3,
+            || {
+                let mut cap = OfflineCapability::new();
 
-            let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
-            access1.set_local_symbols(8); // 80%
-            cap.track(access1);
+                let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                access1.set_local_symbols(8); // 80%
+                cap.track(access1);
 
-            let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
-            access2.set_local_symbols(3); // 30%
-            cap.track(access2);
+                let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
+                access2.set_local_symbols(3); // 30%
+                cap.track(access2);
 
-            let mut access3 = OfflineAccess::new(test_object_id_3(), 10, 15, 1024);
-            access3.set_local_symbols(5); // 50%
-            cap.track(access3);
+                let mut access3 = OfflineAccess::new(test_object_id_3(), 10, 15, 1024);
+                access3.set_local_symbols(5); // 50%
+                cap.track(access3);
 
-            let sorted = cap.objects_by_coverage();
-            assert_eq!(sorted[0].coverage_bps(), 3000); // obj2
-            assert_eq!(sorted[1].coverage_bps(), 5000); // obj3
-            assert_eq!(sorted[2].coverage_bps(), 8000); // obj1
+                let sorted = cap.objects_by_coverage();
+                assert_eq!(sorted[0].coverage_bps(), 3000); // obj2
+                assert_eq!(sorted[1].coverage_bps(), 5000); // obj3
+                assert_eq!(sorted[2].coverage_bps(), 8000); // obj1
 
-            OfflineLogData {
-                object_id: None,
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({
-                    "sorted_coverages": [3000, 5000, 8000]
-                })),
-            }
-        });
+                OfflineLogData {
+                    object_id: None,
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({
+                        "sorted_coverages": [3000, 5000, 8000]
+                    })),
+                }
+            },
+        );
     }
 
     #[test]
@@ -900,79 +949,97 @@ mod tests {
 
     #[test]
     fn access_pattern_tracker_record_access() {
-        run_offline_test("access_pattern_tracker_record_access", "verify", "record", 2, || {
-            let mut tracker = AccessPatternTracker::new();
-            let object_id = test_object_id();
+        run_offline_test(
+            "access_pattern_tracker_record_access",
+            "verify",
+            "record",
+            2,
+            || {
+                let mut tracker = AccessPatternTracker::new();
+                let object_id = test_object_id();
 
-            tracker.record_access(object_id);
-            assert_eq!(tracker.access_count(&object_id), 1);
+                tracker.record_access(object_id);
+                assert_eq!(tracker.access_count(&object_id), 1);
 
-            tracker.record_access(object_id);
-            assert_eq!(tracker.access_count(&object_id), 2);
+                tracker.record_access(object_id);
+                assert_eq!(tracker.access_count(&object_id), 2);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({"access_count": 2})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({"access_count": 2})),
+                }
+            },
+        );
     }
 
     #[test]
     fn access_pattern_tracker_priority_score() {
-        run_offline_test("access_pattern_tracker_priority_score", "verify", "priority", 2, || {
-            let mut tracker = AccessPatternTracker::new();
-            let object_id = test_object_id();
+        run_offline_test(
+            "access_pattern_tracker_priority_score",
+            "verify",
+            "priority",
+            2,
+            || {
+                let mut tracker = AccessPatternTracker::new();
+                let object_id = test_object_id();
 
-            // No accesses = 0 score
-            assert_eq!(tracker.priority_score(&object_id), 0.0);
+                // No accesses = 0 score
+                assert_eq!(tracker.priority_score(&object_id), 0.0);
 
-            tracker.record_access(object_id);
-            let score = tracker.priority_score(&object_id);
-            assert!(score > 0.0);
+                tracker.record_access(object_id);
+                let score = tracker.priority_score(&object_id);
+                assert!(score > 0.0);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({"priority_score": score})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({"priority_score": score})),
+                }
+            },
+        );
     }
 
     #[test]
     fn access_pattern_tracker_prioritized_objects() {
-        run_offline_test("access_pattern_tracker_prioritized_objects", "verify", "sort", 2, || {
-            let mut tracker = AccessPatternTracker::new();
+        run_offline_test(
+            "access_pattern_tracker_prioritized_objects",
+            "verify",
+            "sort",
+            2,
+            || {
+                let mut tracker = AccessPatternTracker::new();
 
-            // Access obj1 once
-            tracker.record_access(test_object_id());
+                // Access obj1 once
+                tracker.record_access(test_object_id());
 
-            // Access obj2 multiple times (higher frequency)
-            for _ in 0..5 {
-                tracker.record_access(test_object_id_2());
-            }
+                // Access obj2 multiple times (higher frequency)
+                for _ in 0..5 {
+                    tracker.record_access(test_object_id_2());
+                }
 
-            let prioritized = tracker.prioritized_objects();
+                let prioritized = tracker.prioritized_objects();
 
-            // obj2 should have higher priority due to more accesses
-            assert_eq!(prioritized.len(), 2);
-            assert_eq!(prioritized[0].0, test_object_id_2());
+                // obj2 should have higher priority due to more accesses
+                assert_eq!(prioritized.len(), 2);
+                assert_eq!(prioritized[0].0, test_object_id_2());
 
-            OfflineLogData {
-                object_id: None,
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({
-                    "top_object": prioritized[0].0.to_string(),
-                    "top_score": prioritized[0].1
-                })),
-            }
-        });
+                OfflineLogData {
+                    object_id: None,
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({
+                        "top_object": prioritized[0].0.to_string(),
+                        "top_score": prioritized[0].1
+                    })),
+                }
+            },
+        );
     }
 
     #[test]
@@ -1007,25 +1074,32 @@ mod tests {
 
     #[test]
     fn access_pattern_tracker_eviction() {
-        run_offline_test("access_pattern_tracker_eviction", "verify", "eviction", 2, || {
-            let mut tracker = AccessPatternTracker::with_config(0.3, Duration::from_secs(3600), 2);
+        run_offline_test(
+            "access_pattern_tracker_eviction",
+            "verify",
+            "eviction",
+            2,
+            || {
+                let mut tracker =
+                    AccessPatternTracker::with_config(0.3, Duration::from_secs(3600), 2);
 
-            tracker.record_access(test_object_id());
-            tracker.record_access(test_object_id_2());
-            assert_eq!(tracker.tracked_count(), 2);
+                tracker.record_access(test_object_id());
+                tracker.record_access(test_object_id_2());
+                assert_eq!(tracker.tracked_count(), 2);
 
-            // Adding a third should evict the oldest
-            tracker.record_access(test_object_id_3());
-            assert_eq!(tracker.tracked_count(), 2);
+                // Adding a third should evict the oldest
+                tracker.record_access(test_object_id_3());
+                assert_eq!(tracker.tracked_count(), 2);
 
-            OfflineLogData {
-                object_id: None,
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({"tracked_count": 2, "max_entries": 2})),
-            }
-        });
+                OfflineLogData {
+                    object_id: None,
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({"tracked_count": 2, "max_entries": 2})),
+                }
+            },
+        );
     }
 
     #[test]
@@ -1077,5 +1151,180 @@ mod tests {
                 details: Some(json!({"cleared": true})),
             }
         });
+    }
+
+    // =====================================================================
+    // Edge case tests (per f3xi requirements)
+    // =====================================================================
+
+    #[test]
+    fn offline_access_k_zero_edge_case() {
+        run_offline_test("offline_access_k_zero_edge_case", "verify", "edge_case", 4, || {
+            let object_id = test_object_id();
+            // k=0 is an edge case - should return 0 coverage and can_access true (no symbols needed)
+            let access = OfflineAccess::new(object_id, 0, 0, 1024);
+
+            // With k=0, can_access should be true (0 >= 0)
+            assert!(access.can_access());
+            // Coverage should be 0 (division by zero protection)
+            assert_eq!(access.coverage_bps(), 0);
+            assert_eq!(access.coverage(), 0.0);
+            // No symbols needed
+            assert_eq!(access.symbols_needed(), 0);
+
+            OfflineLogData {
+                object_id: Some(object_id),
+                local_symbols: Some(access.local_symbols),
+                k: Some(access.k),
+                coverage_bps: Some(access.coverage_bps()),
+                details: Some(json!({"edge_case": "k=0"})),
+            }
+        });
+    }
+
+    #[test]
+    fn offline_access_overflow_protection() {
+        run_offline_test(
+            "offline_access_overflow_protection",
+            "verify",
+            "edge_case",
+            2,
+            || {
+                let object_id = test_object_id();
+                let mut access = OfflineAccess::new(object_id, 10, 15, 1024);
+
+                // Test saturating add
+                access.set_local_symbols(u32::MAX - 5);
+                access.add_symbols(100);
+                assert_eq!(access.local_symbols, u32::MAX);
+
+                // Test saturating sub from max
+                access.remove_symbols(10);
+                assert_eq!(access.local_symbols, u32::MAX - 10);
+
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: None,
+                    details: Some(json!({"edge_case": "overflow_protection"})),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn offline_capability_remove_object() {
+        run_offline_test(
+            "offline_capability_remove_object",
+            "verify",
+            "remove",
+            5,
+            || {
+                let mut cap = OfflineCapability::new();
+
+                let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                access1.set_local_symbols(10); // Available
+                cap.track(access1);
+
+                let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
+                access2.set_local_symbols(10); // Available
+                cap.track(access2);
+
+                assert_eq!(cap.object_count(), 2);
+                assert_eq!(cap.available_count(), 2);
+
+                // Remove one object
+                let removed = cap.remove(&test_object_id());
+                assert!(removed.is_some());
+                assert_eq!(cap.object_count(), 1);
+                assert_eq!(cap.available_count(), 1);
+
+                // Remove non-existent object
+                let removed_none = cap.remove(&test_object_id_3());
+                assert!(removed_none.is_none());
+
+                OfflineLogData {
+                    object_id: Some(test_object_id()),
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({
+                        "removed": true,
+                        "remaining_objects": cap.object_count()
+                    })),
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn offline_capability_get_mut() {
+        run_offline_test("offline_capability_get_mut", "verify", "mutation", 3, || {
+            let mut cap = OfflineCapability::new();
+
+            let access = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+            cap.track(access);
+
+            assert!(!cap.can_access(&test_object_id()));
+
+            // Mutate through get_mut
+            if let Some(access) = cap.get_mut(&test_object_id()) {
+                access.set_local_symbols(10);
+            }
+
+            assert!(cap.can_access(&test_object_id()));
+            assert_eq!(cap.available_count(), 1);
+
+            OfflineLogData {
+                object_id: Some(test_object_id()),
+                local_symbols: None,
+                k: None,
+                coverage_bps: None,
+                details: Some(json!({"mutated": true})),
+            }
+        });
+    }
+
+    #[test]
+    fn offline_capability_incomplete_objects_iter() {
+        run_offline_test(
+            "offline_capability_incomplete_objects_iter",
+            "verify",
+            "iteration",
+            2,
+            || {
+                let mut cap = OfflineCapability::new();
+
+                let mut access1 = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                access1.set_local_symbols(10); // Complete
+                cap.track(access1);
+
+                let mut access2 = OfflineAccess::new(test_object_id_2(), 10, 15, 1024);
+                access2.set_local_symbols(5); // Incomplete
+                cap.track(access2);
+
+                let access3 = OfflineAccess::new(test_object_id_3(), 10, 15, 1024);
+                // Incomplete (0 symbols)
+                cap.track(access3);
+
+                let incomplete: Vec<_> = cap.incomplete_objects().collect();
+                assert_eq!(incomplete.len(), 2);
+
+                let available: Vec<_> = cap.available_objects().collect();
+                assert_eq!(available.len(), 1);
+
+                OfflineLogData {
+                    object_id: None,
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({
+                        "incomplete_count": 2,
+                        "available_count": 1
+                    })),
+                }
+            },
+        );
     }
 }
