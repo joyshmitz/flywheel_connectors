@@ -7,7 +7,7 @@
 
 use fcp_protocol::{
     FCPC_HEADER_LEN, FCPC_MAGIC, FCPC_TAG_LEN, FCPC_VERSION, FcpcFrame, FcpcFrameFlags,
-    FcpcFrameHeader, MeshSessionId,
+    FcpcFrameHeader, MeshSessionId, SessionDirection,
 };
 
 // ============================================================================
@@ -163,9 +163,11 @@ fn frame_seal_empty_payload_golden_vector() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"";
 
+    let dir = SessionDirection::InitiatorToResponder;
     let frame = FcpcFrame::seal(
         session_id,
         0,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -182,7 +184,7 @@ fn frame_seal_empty_payload_golden_vector() {
 
     // Verify we can decode and open
     let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
-    let opened = decoded.open(&GOLDEN_K_CTX).expect("open should succeed");
+    let opened = decoded.open(dir, &GOLDEN_K_CTX).expect("open should succeed");
     assert_eq!(opened, plaintext);
 }
 
@@ -191,10 +193,12 @@ fn frame_seal_known_payload_golden_vector() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"Hello, FCPC!";
     let seq = 1;
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame = FcpcFrame::seal(
         session_id,
         seq,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -217,7 +221,7 @@ fn frame_seal_known_payload_golden_vector() {
 
     // Verify we can decode and open
     let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
-    let opened = decoded.open(&GOLDEN_K_CTX).expect("open should succeed");
+    let opened = decoded.open(dir, &GOLDEN_K_CTX).expect("open should succeed");
     assert_eq!(opened, plaintext);
 }
 
@@ -225,10 +229,12 @@ fn frame_seal_known_payload_golden_vector() {
 fn frame_different_seq_produces_different_ciphertext() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"Same message";
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame1 = FcpcFrame::seal(
         session_id,
         0,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -238,6 +244,7 @@ fn frame_different_seq_produces_different_ciphertext() {
     let frame2 = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -254,10 +261,12 @@ fn frame_different_session_produces_different_ciphertext() {
     let session1 = MeshSessionId([0x11; 16]);
     let session2 = MeshSessionId([0x22; 16]);
     let plaintext = b"Same message";
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame1 = FcpcFrame::seal(
         session1,
         0,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -267,6 +276,7 @@ fn frame_different_session_produces_different_ciphertext() {
     let frame2 = FcpcFrame::seal(
         session2,
         0,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -285,10 +295,12 @@ fn frame_different_session_produces_different_ciphertext() {
 fn aad_binds_session_id() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"test payload";
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame = FcpcFrame::seal(
         session_id,
         0,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -300,7 +312,7 @@ fn aad_binds_session_id() {
     tampered.header.session_id = MeshSessionId([0xFF; 16]);
 
     // Open should fail because AAD doesn't match
-    let result = tampered.open(&GOLDEN_K_CTX);
+    let result = tampered.open(dir, &GOLDEN_K_CTX);
     assert!(result.is_err(), "tampered session_id should fail AEAD");
 }
 
@@ -308,10 +320,12 @@ fn aad_binds_session_id() {
 fn aad_binds_seq() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"test payload";
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame = FcpcFrame::seal(
         session_id,
         0,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -323,7 +337,7 @@ fn aad_binds_seq() {
     tampered.header.seq = 999;
 
     // Open should fail because nonce and AAD are wrong
-    let result = tampered.open(&GOLDEN_K_CTX);
+    let result = tampered.open(dir, &GOLDEN_K_CTX);
     assert!(result.is_err(), "tampered seq should fail AEAD");
 }
 
@@ -331,10 +345,12 @@ fn aad_binds_seq() {
 fn aad_binds_flags() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"test payload";
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame = FcpcFrame::seal(
         session_id,
         0,
+        dir,
         FcpcFrameFlags::ENCRYPTED,
         plaintext,
         &GOLDEN_K_CTX,
@@ -346,7 +362,7 @@ fn aad_binds_flags() {
     tampered.header.flags = FcpcFrameFlags::ENCRYPTED | FcpcFrameFlags::COMPRESSED;
 
     // Open should fail because AAD doesn't match
-    let result = tampered.open(&GOLDEN_K_CTX);
+    let result = tampered.open(dir, &GOLDEN_K_CTX);
     assert!(result.is_err(), "tampered flags should fail AEAD");
 }
 
@@ -405,6 +421,7 @@ fn frame_wire_format_spec_compliance() {
     let frame = FcpcFrame::seal(
         session_id,
         seq,
+        SessionDirection::InitiatorToResponder,
         FcpcFrameFlags::ENCRYPTED,
         plaintext,
         &GOLDEN_K_CTX,
@@ -453,6 +470,7 @@ fn frame_deterministic_encoding() {
     let frame1 = FcpcFrame::seal(
         session_id,
         seq,
+        SessionDirection::InitiatorToResponder,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -462,6 +480,7 @@ fn frame_deterministic_encoding() {
     let frame2 = FcpcFrame::seal(
         session_id,
         seq,
+        SessionDirection::InitiatorToResponder,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -476,10 +495,12 @@ fn frame_deterministic_encoding() {
 fn frame_open_wrong_key_fails() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
     let plaintext = b"secret message";
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,
@@ -493,7 +514,7 @@ fn frame_open_wrong_key_fails() {
         0xE1, 0xE0,
     ];
 
-    let result = frame.open(&wrong_key);
+    let result = frame.open(dir, &wrong_key);
     assert!(result.is_err(), "open with wrong key should fail AEAD");
 }
 
@@ -504,9 +525,11 @@ fn frame_open_wrong_key_fails() {
 #[test]
 fn replay_window_accepts_new_sequence() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
+    let dir = SessionDirection::InitiatorToResponder;
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         b"msg",
         &GOLDEN_K_CTX,
@@ -522,9 +545,11 @@ fn replay_window_accepts_new_sequence() {
 #[test]
 fn replay_window_rejects_duplicate() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
+    let dir = SessionDirection::InitiatorToResponder;
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         b"msg",
         &GOLDEN_K_CTX,
@@ -545,10 +570,12 @@ fn replay_window_rejects_duplicate() {
 #[test]
 fn replay_window_accepts_out_of_order_within_window() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
+    let dir = SessionDirection::InitiatorToResponder;
 
     let frame100 = FcpcFrame::seal(
         session_id,
         100,
+        dir,
         FcpcFrameFlags::default(),
         b"m1",
         &GOLDEN_K_CTX,
@@ -557,6 +584,7 @@ fn replay_window_accepts_out_of_order_within_window() {
     let frame90 = FcpcFrame::seal(
         session_id,
         90,
+        dir,
         FcpcFrameFlags::default(),
         b"m2",
         &GOLDEN_K_CTX,
@@ -579,11 +607,13 @@ fn replay_window_accepts_out_of_order_within_window() {
 #[test]
 fn replay_window_rejects_stale_sequence() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
+    let dir = SessionDirection::InitiatorToResponder;
 
     // Push the window forward past what seq=1 would be in
     let frame_high = FcpcFrame::seal(
         session_id,
         1000,
+        dir,
         FcpcFrameFlags::default(),
         b"high",
         &GOLDEN_K_CTX,
@@ -592,6 +622,7 @@ fn replay_window_rejects_stale_sequence() {
     let frame_stale = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         b"stale",
         &GOLDEN_K_CTX,
@@ -620,9 +651,11 @@ fn replay_window_rejects_stale_sequence() {
 #[test]
 fn dos_reject_payload_too_large() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
+    let dir = SessionDirection::InitiatorToResponder;
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         b"data",
         &GOLDEN_K_CTX,
@@ -645,6 +678,7 @@ fn dos_reject_truncated_tag() {
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        SessionDirection::InitiatorToResponder,
         FcpcFrameFlags::default(),
         b"data",
         &GOLDEN_K_CTX,
@@ -664,9 +698,11 @@ fn dos_reject_truncated_tag() {
 #[test]
 fn dos_tampered_ciphertext_fails_aead() {
     let session_id = MeshSessionId(GOLDEN_SESSION_ID);
+    let dir = SessionDirection::InitiatorToResponder;
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        dir,
         FcpcFrameFlags::default(),
         b"secret",
         &GOLDEN_K_CTX,
@@ -680,7 +716,7 @@ fn dos_tampered_ciphertext_fails_aead() {
     }
 
     let err = tampered_frame
-        .open(&GOLDEN_K_CTX)
+        .open(dir, &GOLDEN_K_CTX)
         .expect_err("tampered ciphertext should fail");
     assert!(matches!(err, fcp_protocol::FcpcError::Crypto(_)));
 }
@@ -691,6 +727,7 @@ fn dos_tampered_tag_fails_aead() {
     let frame = FcpcFrame::seal(
         session_id,
         1,
+        SessionDirection::InitiatorToResponder,
         FcpcFrameFlags::default(),
         b"secret",
         &GOLDEN_K_CTX,
@@ -702,7 +739,7 @@ fn dos_tampered_tag_fails_aead() {
     tampered_frame.tag[0] ^= 0xFF;
 
     let err = tampered_frame
-        .open(&GOLDEN_K_CTX)
+        .open(SessionDirection::InitiatorToResponder, &GOLDEN_K_CTX)
         .expect_err("tampered tag should fail");
     assert!(matches!(err, fcp_protocol::FcpcError::Crypto(_)));
 }
@@ -735,6 +772,7 @@ fn generate_fcpc_reference_vectors() {
     let frame = FcpcFrame::seal(
         session_id,
         100,
+        SessionDirection::InitiatorToResponder,
         FcpcFrameFlags::default(),
         plaintext,
         &GOLDEN_K_CTX,

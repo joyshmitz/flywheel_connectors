@@ -6,6 +6,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fcp_protocol::{
     FCPC_HEADER_LEN, FCPC_TAG_LEN, FcpcFrame, FcpcFrameFlags, FcpcFrameHeader, MeshSessionId,
+    SessionDirection,
 };
 
 /// Test session ID for benchmarking.
@@ -13,6 +14,9 @@ const SESSION_ID_BYTES: [u8; 16] = [0xAA; 16];
 
 /// Test encryption key for benchmarking.
 const K_CTX: [u8; 32] = [0x11; 32];
+
+/// Test direction for benchmarking.
+const DIR: SessionDirection = SessionDirection::InitiatorToResponder;
 
 /// Build a test header for benchmarking.
 const fn test_header(payload_len: u32) -> FcpcFrameHeader {
@@ -67,6 +71,7 @@ fn bench_frame_seal(c: &mut Criterion) {
                     black_box(FcpcFrame::seal(
                         session_id,
                         42,
+                        DIR,
                         FcpcFrameFlags::default(),
                         &plaintext,
                         &K_CTX,
@@ -88,6 +93,7 @@ fn bench_frame_open(c: &mut Criterion) {
         let frame = FcpcFrame::seal(
             session_id,
             42,
+            DIR,
             FcpcFrameFlags::default(),
             &plaintext,
             &K_CTX,
@@ -99,7 +105,7 @@ fn bench_frame_open(c: &mut Criterion) {
             BenchmarkId::from_parameter(payload_size),
             &payload_size,
             |b, _| {
-                b.iter(|| black_box(frame.open(&K_CTX)));
+                b.iter(|| black_box(frame.open(DIR, &K_CTX)));
             },
         );
     }
@@ -116,6 +122,7 @@ fn bench_frame_encode(c: &mut Criterion) {
         let frame = FcpcFrame::seal(
             session_id,
             42,
+            DIR,
             FcpcFrameFlags::default(),
             &plaintext,
             &K_CTX,
@@ -144,6 +151,7 @@ fn bench_frame_decode(c: &mut Criterion) {
         let frame = FcpcFrame::seal(
             session_id,
             42,
+            DIR,
             FcpcFrameFlags::default(),
             &plaintext,
             &K_CTX,

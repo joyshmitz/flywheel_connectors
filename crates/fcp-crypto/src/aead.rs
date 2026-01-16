@@ -102,6 +102,18 @@ impl ChaCha20Nonce {
         Self(bytes)
     }
 
+    /// Create from a counter value and a direction byte.
+    ///
+    /// Useful for preventing nonce reuse in bidirectional streams using the same key.
+    /// The direction byte is placed at index 0.
+    #[must_use]
+    pub fn from_counter_directional(counter: u64, direction: u8) -> Self {
+        let mut bytes = [0u8; CHACHA20_NONCE_SIZE];
+        bytes[0] = direction;
+        bytes[4..12].copy_from_slice(&counter.to_le_bytes());
+        Self(bytes)
+    }
+
     /// Try to create from a slice.
     ///
     /// # Errors

@@ -779,6 +779,8 @@ pub fn compute_cookie(
     append_cbor(&mut data, &hello.eph_pubkey)?;
     append_cbor(&mut data, &hello.nonce)?;
     append_cbor(&mut data, &hello.timestamp)?;
+    append_cbor(&mut data, &hello.suites)?;
+    append_cbor(&mut data, &hello.transport_limits)?;
 
     let mut mac = Hmac::<Sha256>::new_from_slice(cookie_key)
         .map_err(|_| SessionError::InvalidMacKeyLength)?;

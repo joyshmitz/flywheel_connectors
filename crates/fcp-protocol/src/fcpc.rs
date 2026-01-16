@@ -8,7 +8,7 @@ use fcp_crypto::aead::{AEAD_TAG_SIZE, chacha20_decrypt, chacha20_encrypt};
 use fcp_crypto::{AeadKey, ChaCha20Nonce, CryptoError};
 use thiserror::Error;
 
-use crate::{MeshSessionId, ReplayWindow, SessionReplayPolicy};
+use crate::{MeshSessionId, ReplayWindow, SessionDirection, SessionReplayPolicy};
 
 /// FCPC magic bytes: "FCPC".
 pub const FCPC_MAGIC: [u8; 4] = [0x46, 0x43, 0x50, 0x43];
@@ -162,6 +162,7 @@ impl FcpcFrame {
     pub fn seal(
         session_id: MeshSessionId,
         seq: u64,
+        direction: SessionDirection,
         mut flags: FcpcFrameFlags,
         plaintext: &[u8],
         k_ctx: &[u8; 32],
@@ -175,7 +176,7 @@ impl FcpcFrame {
             len: 0,
         };
         let aad = build_fcpc_aad(&header);
-        let nonce = ChaCha20Nonce::from_counter(seq);
+        let nonce = ChaCha20Nonce::from_counter_directional(seq, direction.as_u8());
         let key = AeadKey::from_bytes(*k_ctx);
         let mut ciphertext = chacha20_encrypt(&key, &nonce, plaintext, &aad)?;
         let tag = split_tag(&mut ciphertext);
@@ -256,9 +257,9 @@ impl FcpcFrame {
     ///
     /// # Errors
     /// Returns `FcpcError` if decryption fails.
-    pub fn open(&self, k_ctx: &[u8; 32]) -> Result<Vec<u8>, FcpcError> {
+    pub fn open(&self, direction: SessionDirection, k_ctx: &[u8; 32]) -> Result<Vec<u8>, FcpcError> {
         let aad = build_fcpc_aad(&self.header);
-        let nonce = ChaCha20Nonce::from_counter(self.header.seq);
+        let nonce = ChaCha20Nonce::from_counter_directional(self.header.seq, direction.as_u8());
         let key = AeadKey::from_bytes(*k_ctx);
         let mut combined = Vec::with_capacity(self.ciphertext.len() + FCPC_TAG_LEN);
         combined.extend_from_slice(&self.ciphertext);
@@ -314,19 +315,35 @@ mod tests {
     fn seal_round_trip() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
         let plaintext = b"fcpc payload bytes";
-        let frame = FcpcFrame::seal(session_id, 42, FcpcFrameFlags::default(), plaintext, &K_CTX)
-            .expect("seal should succeed");
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            42,
+            dir,
+            FcpcFrameFlags::default(),
+            plaintext,
+            &K_CTX,
+        )
+        .expect("seal should succeed");
         let encoded = frame.encode();
         let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
-        let opened = decoded.open(&K_CTX).expect("open should succeed");
+        let opened = decoded.open(dir, &K_CTX).expect("open should succeed");
         assert_eq!(opened, plaintext);
     }
 
     #[test]
     fn decode_rejects_bad_magic() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
-        let frame = FcpcFrame::seal(session_id, 1, FcpcFrameFlags::default(), b"x", &K_CTX)
-            .expect("seal should succeed");
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            dir,
+            FcpcFrameFlags::default(),
+            b"x",
+            &K_CTX,
+        )
+        .expect("seal should succeed");
         let mut bytes = frame.encode();
         bytes[0] = 0x00;
         let err = FcpcFrame::decode(&bytes).expect_err("bad magic should fail");
@@ -336,8 +353,16 @@ mod tests {
     #[test]
     fn decode_rejects_length_mismatch() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
-        let frame = FcpcFrame::seal(session_id, 2, FcpcFrameFlags::default(), b"data", &K_CTX)
-            .expect("seal should succeed");
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            2,
+            dir,
+            FcpcFrameFlags::default(),
+            b"data",
+            &K_CTX,
+        )
+        .expect("seal should succeed");
         let mut bytes = frame.encode();
         bytes.pop();
         let err = FcpcFrame::decode(&bytes).expect_err("length mismatch should fail");
@@ -347,8 +372,16 @@ mod tests {
     #[test]
     fn replay_window_rejects_replay() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
-        let frame = FcpcFrame::seal(session_id, 7, FcpcFrameFlags::default(), b"data", &K_CTX)
-            .expect("seal should succeed");
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            7,
+            dir,
+            FcpcFrameFlags::default(),
+            b"data",
+            &K_CTX,
+        )
+        .expect("seal should succeed");
         let mut window = default_replay_window();
         frame.check_replay(&mut window).expect("first seen");
         let err = frame
@@ -360,8 +393,16 @@ mod tests {
     #[test]
     fn decode_rejects_payload_too_large() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
-        let frame = FcpcFrame::seal(session_id, 9, FcpcFrameFlags::default(), b"data", &K_CTX)
-            .expect("seal should succeed");
+        let dir = SessionDirection::InitiatorToResponder;
+        let frame = FcpcFrame::seal(
+            session_id,
+            9,
+            dir,
+            FcpcFrameFlags::default(),
+            b"data",
+            &K_CTX,
+        )
+        .expect("seal should succeed");
         let bytes = frame.encode();
         let err = FcpcFrame::decode_with_limit(&bytes, 1).expect_err("payload too large");
         assert!(matches!(err, FcpcError::PayloadTooLarge { .. }));
