@@ -342,6 +342,126 @@ fn decision_vector_denies_capability_ceiling() {
 }
 
 #[test]
+fn decision_vector_denies_connector_deny() {
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    policy.connector_deny = vec![PolicyPattern {
+        pattern: "connector:test".to_string(),
+    }];
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-3e"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::ZonePolicyConnectorDenied
+    );
+
+    make_allow_vector("decision_deny_connector", &decision);
+}
+
+#[test]
+fn decision_vector_denies_capability_deny() {
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    policy.capability_deny = vec![PolicyPattern {
+        pattern: "cap.write".to_string(),
+    }];
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-3f"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.write"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.write"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::ZonePolicyCapabilityDenied
+    );
+
+    make_allow_vector("decision_deny_capability", &decision);
+}
+
+#[test]
+fn decision_vector_denies_missing_execution_approval() {
+    let zone = ZoneId::work();
+    let policy = base_policy(zone.clone());
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-3g"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.run"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.exec"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: true,
+        now_ms: 1_700_000_000_000,
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::ApprovalMissingExecution
+    );
+
+    make_allow_vector("decision_deny_missing_execution", &decision);
+}
+
+#[test]
 fn decision_vector_denies_public_input_dangerous() {
     let zone = ZoneId::work();
     let policy = base_policy(zone.clone());
@@ -1343,7 +1463,8 @@ fn decision_reason_code_string_roundtrip() {
         );
         // Verify strings use dot-separated format (e.g., "capability.insufficient")
         assert!(
-            s.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == '.'),
+            s.chars()
+                .all(|c| c.is_ascii_lowercase() || c == '_' || c == '.'),
             "DecisionReasonCode string should be valid format: {s}"
         );
     }

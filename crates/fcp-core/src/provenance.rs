@@ -28,7 +28,7 @@
 //! - `integrity = MIN(effective_integrity(inputs))`
 //! - `confidentiality = MAX(effective_confidentiality(inputs))`
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -156,7 +156,7 @@ impl fmt::Display for ConfidentialityLevel {
 ///
 /// Taint is compositional via OR: if any input is tainted, output is tainted.
 /// Taint can ONLY be reduced by referencing a valid `SanitizerReceipt`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TaintFlag {
     /// Input came from public/untrusted internet source
@@ -205,19 +205,19 @@ impl fmt::Display for TaintFlag {
 
 /// Collection of taint flags with set semantics.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaintFlags(HashSet<TaintFlag>);
+pub struct TaintFlags(BTreeSet<TaintFlag>);
 
 impl TaintFlags {
     /// Create an empty taint flag set.
     #[must_use]
-    pub fn new() -> Self {
-        Self(HashSet::new())
+    pub const fn new() -> Self {
+        Self(BTreeSet::new())
     }
 
     /// Create from a single flag.
     #[must_use]
     pub fn from_flag(flag: TaintFlag) -> Self {
-        let mut set = HashSet::new();
+        let mut set = BTreeSet::new();
         set.insert(flag);
         Self(set)
     }
