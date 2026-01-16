@@ -428,10 +428,7 @@ impl MockTransparencyVerifier {
     }
 
     pub fn add_valid_entry(&self, entry_hash: String, entry: TransparencyLogEntry) {
-        self.valid_entries
-            .lock()
-            .unwrap()
-            .insert(entry_hash, entry);
+        self.valid_entries.lock().unwrap().insert(entry_hash, entry);
     }
 }
 
@@ -3111,10 +3108,7 @@ sig = "base64:{sig_b64}"
                     .expect_err("rollback detected");
                 assert!(matches!(
                     err,
-                    SupplyChainVerificationError::TufRollback {
-                        current: 5,
-                        got: 3
-                    }
+                    SupplyChainVerificationError::TufRollback { current: 5, got: 3 }
                 ));
 
                 RegistryLogData {
