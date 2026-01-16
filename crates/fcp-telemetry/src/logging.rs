@@ -459,10 +459,7 @@ mod tests {
             "api_key": ""
         });
 
-        let redacted = redact_sensitive(
-            &value,
-            &["password".to_string(), "api_key".to_string()],
-        );
+        let redacted = redact_sensitive(&value, &["password".to_string(), "api_key".to_string()]);
 
         // Empty strings in sensitive fields should still be redacted
         assert_eq!(redacted["password"], "[REDACTED]");
@@ -477,10 +474,7 @@ mod tests {
             "user_id": 42
         });
 
-        let redacted = redact_sensitive(
-            &value,
-            &["password".to_string(), "token".to_string()],
-        );
+        let redacted = redact_sensitive(&value, &["password".to_string(), "token".to_string()]);
 
         // Numeric values in sensitive fields should be redacted
         assert_eq!(redacted["password"], "[REDACTED]");

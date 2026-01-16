@@ -1220,8 +1220,7 @@ mod tests {
     #[test]
     fn test_trace_context_serde_invalid_hex() {
         // Invalid hex in trace_id
-        let json =
-            r#"{"trace_id":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","span_id":"0123456789abcdef","trace_flags":1}"#;
+        let json = r#"{"trace_id":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz","span_id":"0123456789abcdef","trace_flags":1}"#;
         let result: Result<TraceContext, _> = serde_json::from_str(json);
         assert!(result.is_err());
     }
@@ -1294,13 +1293,22 @@ mod tests {
 
     #[test]
     fn test_trace_context_trace_id_hex_format() {
-        let ctx = TraceContext::new([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88], [0xaa; SPAN_ID_SIZE]);
+        let ctx = TraceContext::new(
+            [
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+                0x77, 0x88,
+            ],
+            [0xaa; SPAN_ID_SIZE],
+        );
         assert_eq!(ctx.trace_id_hex(), "123456789abcdef01122334455667788");
     }
 
     #[test]
     fn test_trace_context_span_id_hex_format() {
-        let ctx = TraceContext::new([0xaa; TRACE_ID_SIZE], [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0]);
+        let ctx = TraceContext::new(
+            [0xaa; TRACE_ID_SIZE],
+            [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0],
+        );
         assert_eq!(ctx.span_id_hex(), "123456789abcdef0");
     }
 
@@ -1354,7 +1362,11 @@ mod tests {
         assert!(fields.iter().any(|(k, _)| k == "trace_id"));
         assert!(fields.iter().any(|(k, _)| k == "span_id"));
         assert!(fields.iter().any(|(k, _)| k == "correlation_id"));
-        assert!(fields.iter().any(|(k, v)| k == "zone_id" && v == "work-zone"));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "zone_id" && v == "work-zone")
+        );
         assert!(
             fields
                 .iter()

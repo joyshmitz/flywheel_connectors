@@ -31,9 +31,7 @@ impl MockApiServer {
     /// Start a new mock server.
     pub async fn start() -> Self {
         let server = MockServer::start().await;
-        Self {
-            server,
-        }
+        Self { server }
     }
 
     /// Get the base URL of the mock server.

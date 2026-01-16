@@ -69,16 +69,17 @@ impl SignatureVerifier for HmacSha256Verifier {
         let sig_hex = signature
             .strip_prefix("sha256=")
             .or_else(|| signature.strip_prefix("v1="))
+            .or_else(|| signature.strip_prefix("v0="))
             .unwrap_or(signature);
 
-        let expected = self.compute(payload);
+        let sig_bytes = hex::decode(sig_hex).map_err(|_| WebhookError::InvalidSignature)?;
 
-        // Constant-time comparison
-        if constant_time_eq(expected.as_bytes(), sig_hex.as_bytes()) {
-            Ok(())
-        } else {
-            Err(WebhookError::InvalidSignature)
-        }
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
+        mac.update(payload);
+
+        mac.verify_slice(&sig_bytes)
+            .map_err(|_| WebhookError::InvalidSignature)
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
@@ -122,13 +123,14 @@ impl HmacSha1Verifier {
 impl SignatureVerifier for HmacSha1Verifier {
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()> {
         let sig_hex = signature.strip_prefix("sha1=").unwrap_or(signature);
-        let expected = self.compute(payload);
+        let sig_bytes = hex::decode(sig_hex).map_err(|_| WebhookError::InvalidSignature)?;
 
-        if constant_time_eq(expected.as_bytes(), sig_hex.as_bytes()) {
-            Ok(())
-        } else {
-            Err(WebhookError::InvalidSignature)
-        }
+        let mut mac =
+            Hmac::<Sha1>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
+        mac.update(payload);
+
+        mac.verify_slice(&sig_bytes)
+            .map_err(|_| WebhookError::InvalidSignature)
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
@@ -194,19 +196,6 @@ impl SignatureVerifier for Ed25519Verifier {
     }
 }
 
-/// Constant-time byte comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,13 +236,6 @@ mod tests {
         let signature = format!("sha1={}", verifier.compute(payload));
 
         assert!(verifier.verify(payload, &signature).is_ok());
-    }
-
-    #[test]
-    fn test_constant_time_eq() {
-        assert!(constant_time_eq(b"hello", b"hello"));
-        assert!(!constant_time_eq(b"hello", b"world"));
-        assert!(!constant_time_eq(b"hello", b"helloworld"));
     }
 
     #[test]
