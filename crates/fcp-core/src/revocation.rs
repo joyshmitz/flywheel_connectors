@@ -122,7 +122,7 @@ pub struct RevocationObject {
     pub expires_at: Option<u64>,
 
     /// Owner signature (Ed25519, REQUIRED).
-    #[serde(with = "hex::serde")]
+    #[serde(with = "crate::util::hex_or_bytes")]
     pub signature: [u8; 64],
 }
 
@@ -173,7 +173,7 @@ pub struct RevocationEvent {
     pub occurred_at: u64,
 
     /// Signature over the event (from the issuing node).
-    #[serde(with = "hex::serde")]
+    #[serde(with = "crate::util::hex_or_bytes")]
     pub signature: [u8; 64],
 }
 
@@ -874,8 +874,7 @@ mod tests {
         for i in 0..100u32 {
             assert!(
                 bf.might_contain(&i.to_le_bytes()),
-                "Bloom filter false negative for {}",
-                i
+                "Bloom filter false negative for {i}"
             );
         }
     }

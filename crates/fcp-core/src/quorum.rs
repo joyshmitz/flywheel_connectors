@@ -262,7 +262,7 @@ pub struct NodeSignature {
     pub node_id: NodeId,
 
     /// The Ed25519 signature bytes (64 bytes), hex-encoded for serialization.
-    #[serde(with = "hex::serde")]
+    #[serde(with = "crate::util::hex_or_bytes")]
     pub signature: [u8; 64],
 
     /// Timestamp when the signature was created (UNIX seconds).
@@ -1008,7 +1008,7 @@ mod tests {
     // For BFT systems: n >= 3f + 1, so f_max = floor((n-1)/3)
 
     /// Helper: Calculate maximum tolerable Byzantine faults for n nodes.
-    /// For BFT: f_max = floor((n-1)/3)
+    /// For BFT: `f_max` = floor((n-1)/3)
     fn max_byzantine_faults(n: u32) -> u32 {
         if n == 0 {
             return 0;
@@ -1078,10 +1078,10 @@ mod tests {
 
         // 5 of 7 needed for critical operations
         let mut set = SignatureSet::new();
-        for i in 0..4 {
+        for i in 0u8..4 {
             set.add(NodeSignature::new(
                 NodeId::new(format!("node-{i}")),
-                [i as u8; 64],
+                [i; 64],
                 1000,
             ));
         }
@@ -1178,10 +1178,10 @@ mod tests {
         assert_eq!(required, 5); // 7 - 2 = 5
 
         let mut set = SignatureSet::new();
-        for i in 0..4 {
+        for i in 0u8..4 {
             set.add(NodeSignature::new(
                 NodeId::new(format!("node-{i}")),
-                [i as u8; 64],
+                [i; 64],
                 1000,
             ));
         }
@@ -1453,13 +1453,14 @@ mod tests {
         }
 
         fn size(&self) -> u32 {
-            self.nodes.len() as u32
+            u32::try_from(self.nodes.len()).expect("partition size fits u32")
         }
 
         fn create_signature_set(&self) -> SignatureSet {
             let mut set = SignatureSet::new();
             for (i, node) in self.nodes.iter().enumerate() {
-                set.add(NodeSignature::new(node.clone(), [i as u8; 64], 1000));
+                let idx = u8::try_from(i).expect("node index fits u8");
+                set.add(NodeSignature::new(node.clone(), [idx; 64], 1000));
             }
             set
         }
@@ -1645,11 +1646,11 @@ mod tests {
         // Stress test signature set with many nodes
         let mut set = SignatureSet::new();
 
-        for i in 0u64..100 {
+        for i in 0u8..100 {
             let added = set.add(NodeSignature::new(
                 NodeId::new(format!("node-{i:03}")), // Zero-padded for consistent ordering
-                [i as u8; 64],
-                1000 + i,
+                [i; 64],
+                1000 + u64::from(i),
             ));
             assert!(added, "Adding node-{i:03} should succeed");
         }
@@ -1659,7 +1660,7 @@ mod tests {
         // Verify ordering is maintained
         let ids: Vec<_> = set.iter().map(|s| s.node_id.as_str()).collect();
         let mut sorted_ids = ids.clone();
-        sorted_ids.sort();
+        sorted_ids.sort_unstable();
         assert_eq!(ids, sorted_ids, "Signatures should be sorted by node_id");
     }
 
@@ -1687,7 +1688,7 @@ mod tests {
         )
     }
 
-    /// Golden vector wrapper for quorum scenarios (SignatureSet + metadata).
+    /// Golden vector wrapper for quorum scenarios (`SignatureSet` + metadata).
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
     struct QuorumGoldenVector {
         scenario: String,
@@ -1830,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "generates golden vector files on demand"]
     fn generate_golden_vector_files() {
         use std::fs;
         use std::path::Path;

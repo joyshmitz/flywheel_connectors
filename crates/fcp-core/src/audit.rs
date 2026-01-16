@@ -269,9 +269,10 @@ mod tests {
     }
 
     fn create_audit_event(seq: u64, prev: Option<ObjectId>, event_type: &str) -> AuditEvent {
+        let seq_byte = u8::try_from(seq).expect("seq fits in u8 for test data");
         AuditEvent {
             header: test_header("AuditEvent"),
-            correlation_id: CorrelationId(Uuid::from_bytes([seq as u8; 16])),
+            correlation_id: CorrelationId(Uuid::from_bytes([seq_byte; 16])),
             trace_context: None,
             event_type: event_type.to_string(),
             actor: test_actor(),
@@ -293,9 +294,10 @@ mod tests {
         prev: Option<ObjectId>,
         trace_context: Option<TraceContext>,
     ) -> AuditEvent {
+        let seq_byte = u8::try_from(seq).expect("seq fits in u8 for test data");
         AuditEvent {
             header: test_header("AuditEvent"),
-            correlation_id: CorrelationId(Uuid::from_bytes([seq as u8; 16])),
+            correlation_id: CorrelationId(Uuid::from_bytes([seq_byte; 16])),
             trace_context,
             event_type: EVENT_CAPABILITY_INVOKE.to_string(),
             actor: test_actor(),
@@ -452,17 +454,17 @@ mod tests {
         for seq in 1..=5 {
             let event = create_audit_event(seq, prev_id, EVENT_CAPABILITY_INVOKE);
             prev_id = Some(test_object_id(&format!("event-{seq}")));
-            chain.push((event, prev_id.clone()));
+            chain.push((event, prev_id));
         }
 
         // Validate chain integrity
         for i in 1..chain.len() {
-            let (prev_event, prev_oid) = &chain[i - 1];
+            let (prev_event, prev_object_id) = &chain[i - 1];
             let (current_event, _) = &chain[i];
 
             // Each event should follow its predecessor
             assert!(
-                current_event.follows(prev_event, prev_oid.as_ref().unwrap()),
+                current_event.follows(prev_event, prev_object_id.as_ref().unwrap()),
                 "Event {} should follow event {}",
                 i + 1,
                 i
@@ -615,8 +617,7 @@ mod tests {
                 !head
                     .quorum_signatures
                     .satisfies_quorum(&policy, RiskTier::CriticalWrite),
-                "Should reject {} signatures when 5 required",
-                sig_count
+                "Should reject {sig_count} signatures when 5 required"
             );
         }
 
@@ -640,7 +641,7 @@ mod tests {
             .map(|s| s.node_id.as_str())
             .collect();
         let mut sorted_sigs = sigs.clone();
-        sorted_sigs.sort();
+        sorted_sigs.sort_unstable();
         assert_eq!(sigs, sorted_sigs);
     }
 
@@ -696,14 +697,8 @@ mod tests {
     #[test]
     fn zone_checkpoint_binds_revocation_head() {
         let rev_head_id = test_object_id("rev-head-50");
-        let checkpoint = create_zone_checkpoint(
-            rev_head_id,
-            50,
-            test_object_id("audit-head"),
-            100,
-            1,
-            4,
-        );
+        let checkpoint =
+            create_zone_checkpoint(rev_head_id, 50, test_object_id("audit-head"), 100, 1, 4);
 
         assert_eq!(checkpoint.rev_head, rev_head_id);
         assert_eq!(checkpoint.rev_seq, 50);
@@ -795,14 +790,8 @@ mod tests {
 
     #[test]
     fn zone_checkpoint_zone_binding() {
-        let checkpoint = create_zone_checkpoint(
-            test_object_id("rev"),
-            10,
-            test_object_id("audit"),
-            20,
-            1,
-            4,
-        );
+        let checkpoint =
+            create_zone_checkpoint(test_object_id("rev"), 10, test_object_id("audit"), 20, 1, 4);
         assert_eq!(checkpoint.zone_id().as_str(), "z:work");
     }
 
@@ -813,24 +802,12 @@ mod tests {
     #[test]
     fn decision_receipt_content_addressed() {
         let request_id = test_object_id("invoke-request");
-        let evidence = vec![
-            test_object_id("cap-token"),
-            test_object_id("provenance"),
-        ];
+        let evidence = vec![test_object_id("cap-token"), test_object_id("provenance")];
 
-        let receipt1 = create_decision_receipt(
-            request_id,
-            Decision::Deny,
-            "FCP-4010",
-            evidence.clone(),
-        );
+        let receipt1 =
+            create_decision_receipt(request_id, Decision::Deny, "FCP-4010", evidence.clone());
 
-        let receipt2 = create_decision_receipt(
-            request_id,
-            Decision::Deny,
-            "FCP-4010",
-            evidence.clone(),
-        );
+        let receipt2 = create_decision_receipt(request_id, Decision::Deny, "FCP-4010", evidence);
 
         // Same inputs should produce same serialization
         let json1 = serde_json::to_string(&receipt1).unwrap();
@@ -1031,7 +1008,7 @@ mod tests {
             flags: 0x01,
         };
 
-        let event = create_audit_event_with_trace(1, None, Some(trace.clone()));
+        let event = create_audit_event_with_trace(1, None, Some(trace));
 
         let ctx = event.trace_context.as_ref().unwrap();
         assert_eq!(ctx.trace_id, trace_id);
@@ -1078,7 +1055,10 @@ mod tests {
     #[test]
     fn trace_context_serialization_roundtrip() {
         let trace = TraceContext {
-            trace_id: [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB],
+            trace_id: [
+                0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+                0xAA, 0xBB,
+            ],
             span_id: [0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0],
             flags: 0x01,
         };
@@ -1119,7 +1099,10 @@ mod tests {
         let bytes1 = fcp_cbor::CanonicalSerializer::serialize(&event, &schema).unwrap();
         let bytes2 = fcp_cbor::CanonicalSerializer::serialize(&event, &schema).unwrap();
 
-        assert_eq!(bytes1, bytes2, "AuditEvent serialization must be deterministic");
+        assert_eq!(
+            bytes1, bytes2,
+            "AuditEvent serialization must be deterministic"
+        );
     }
 
     #[test]
@@ -1130,25 +1113,25 @@ mod tests {
         let bytes1 = fcp_cbor::CanonicalSerializer::serialize(&head, &schema).unwrap();
         let bytes2 = fcp_cbor::CanonicalSerializer::serialize(&head, &schema).unwrap();
 
-        assert_eq!(bytes1, bytes2, "AuditHead serialization must be deterministic");
+        assert_eq!(
+            bytes1, bytes2,
+            "AuditHead serialization must be deterministic"
+        );
     }
 
     #[test]
     fn golden_zone_checkpoint_deterministic() {
-        let checkpoint = create_zone_checkpoint(
-            test_object_id("rev"),
-            10,
-            test_object_id("audit"),
-            20,
-            1,
-            4,
-        );
+        let checkpoint =
+            create_zone_checkpoint(test_object_id("rev"), 10, test_object_id("audit"), 20, 1, 4);
 
         let schema = zone_checkpoint_schema();
         let bytes1 = fcp_cbor::CanonicalSerializer::serialize(&checkpoint, &schema).unwrap();
         let bytes2 = fcp_cbor::CanonicalSerializer::serialize(&checkpoint, &schema).unwrap();
 
-        assert_eq!(bytes1, bytes2, "ZoneCheckpoint serialization must be deterministic");
+        assert_eq!(
+            bytes1, bytes2,
+            "ZoneCheckpoint serialization must be deterministic"
+        );
     }
 
     #[test]
@@ -1164,7 +1147,10 @@ mod tests {
         let bytes1 = fcp_cbor::CanonicalSerializer::serialize(&receipt, &schema).unwrap();
         let bytes2 = fcp_cbor::CanonicalSerializer::serialize(&receipt, &schema).unwrap();
 
-        assert_eq!(bytes1, bytes2, "DecisionReceipt serialization must be deterministic");
+        assert_eq!(
+            bytes1, bytes2,
+            "DecisionReceipt serialization must be deterministic"
+        );
     }
 
     #[test]

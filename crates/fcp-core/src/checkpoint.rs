@@ -252,14 +252,7 @@ impl ForkEvidence {
         if id_a == id_b {
             None
         } else {
-            Some(Self::new(
-                zone_id.clone(),
-                seq,
-                *id_a,
-                *id_b,
-                now,
-                detector,
-            ))
+            Some(Self::new(zone_id.clone(), seq, *id_a, *id_b, now, detector))
         }
     }
 
@@ -280,7 +273,10 @@ impl ForkEvidence {
     /// Find nodes that signed both conflicting checkpoints (Byzantine nodes).
     #[must_use]
     pub fn double_signers(&self) -> BTreeSet<String> {
-        self.signers_a.intersection(&self.signers_b).cloned().collect()
+        self.signers_a
+            .intersection(&self.signers_b)
+            .cloned()
+            .collect()
     }
 }
 
@@ -293,11 +289,7 @@ impl ForkEvidence {
 /// Uses BLAKE3 hash of (`zone_id`, "checkpoint", epoch, `node_id`) to produce
 /// a deterministic ordering of nodes. The highest hash value wins.
 #[must_use]
-pub fn hrw_hash_checkpoint(
-    zone_id: &ZoneId,
-    epoch: &EpochId,
-    node_id: &TailscaleNodeId,
-) -> u64 {
+pub fn hrw_hash_checkpoint(zone_id: &ZoneId, epoch: &EpochId, node_id: &TailscaleNodeId) -> u64 {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"FCP2-HRW-CHECKPOINT-V1");
     hasher.update(zone_id.as_bytes());
@@ -310,8 +302,7 @@ pub fn hrw_hash_checkpoint(
     let bytes = hash.as_bytes();
     // Take first 8 bytes as u64 for comparison
     u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ])
 }
 
@@ -449,10 +440,7 @@ impl CheckpointAdvanceState {
 #[serde(tag = "error", rename_all = "snake_case")]
 pub enum CheckpointValidationError {
     /// Sequence number does not follow previous checkpoint.
-    InvalidSequence {
-        expected: u64,
-        got: u64,
-    },
+    InvalidSequence { expected: u64, got: u64 },
     /// Proposal timestamp outside acceptable skew.
     TimestampSkew {
         local_time: u64,
@@ -480,15 +468,9 @@ pub enum CheckpointValidationError {
     /// Fork was detected.
     ForkDetected(ForkEvidence),
     /// Zone mismatch.
-    ZoneMismatch {
-        expected: ZoneId,
-        got: ZoneId,
-    },
+    ZoneMismatch { expected: ZoneId, got: ZoneId },
     /// Epoch mismatch.
-    EpochMismatch {
-        expected: EpochId,
-        got: EpochId,
-    },
+    EpochMismatch { expected: EpochId, got: EpochId },
 }
 
 impl CheckpointValidationError {
@@ -607,7 +589,11 @@ mod tests {
     fn trigger_time_elapsed_met() {
         let trigger = CheckpointTrigger::check_time_elapsed(65, 60);
         assert!(trigger.is_some());
-        if let Some(CheckpointTrigger::TimeElapsed { elapsed_secs, threshold_secs }) = trigger {
+        if let Some(CheckpointTrigger::TimeElapsed {
+            elapsed_secs,
+            threshold_secs,
+        }) = trigger
+        {
             assert_eq!(elapsed_secs, 65);
             assert_eq!(threshold_secs, 60);
         }
@@ -630,7 +616,11 @@ mod tests {
     fn trigger_audit_growth_met() {
         let trigger = CheckpointTrigger::check_audit_growth(150, 100);
         assert!(trigger.is_some());
-        if let Some(CheckpointTrigger::AuditChainGrowth { new_events, threshold }) = trigger {
+        if let Some(CheckpointTrigger::AuditChainGrowth {
+            new_events,
+            threshold,
+        }) = trigger
+        {
             assert_eq!(new_events, 150);
             assert_eq!(threshold, 100);
         }
@@ -693,7 +683,7 @@ mod tests {
         let id_b = test_object_id("checkpoint-b");
         let detector = test_node("detector-node");
 
-        let evidence = ForkEvidence::detect(&zone, 10, &id_a, &id_b, 1700000000, detector.clone());
+        let evidence = ForkEvidence::detect(&zone, 10, &id_a, &id_b, 1_700_000_000, detector);
 
         assert!(evidence.is_some());
         let ev = evidence.unwrap();
@@ -710,7 +700,7 @@ mod tests {
         let id_b = test_object_id("checkpoint-same");
         let detector = test_node("detector-node");
 
-        let evidence = ForkEvidence::detect(&zone, 10, &id_a, &id_b, 1700000000, detector);
+        let evidence = ForkEvidence::detect(&zone, 10, &id_a, &id_b, 1_700_000_000, detector);
 
         assert!(evidence.is_none());
     }
@@ -722,11 +712,19 @@ mod tests {
             10,
             test_object_id("a"),
             test_object_id("b"),
-            1700000000,
+            1_700_000_000,
             test_node("detector"),
         )
-        .with_signers_a(["alice".to_string(), "bob".to_string(), "charlie".to_string()])
-        .with_signers_b(["bob".to_string(), "david".to_string(), "charlie".to_string()]);
+        .with_signers_a([
+            "alice".to_string(),
+            "bob".to_string(),
+            "charlie".to_string(),
+        ])
+        .with_signers_b([
+            "bob".to_string(),
+            "david".to_string(),
+            "charlie".to_string(),
+        ]);
 
         let double_signers = evidence.double_signers();
 
@@ -746,7 +744,7 @@ mod tests {
             10,
             test_object_id("a"),
             test_object_id("b"),
-            1700000000,
+            1_700_000_000,
             test_node("detector"),
         );
         let result = ForkDetectionResult::ForkDetected(evidence);
@@ -871,7 +869,7 @@ mod tests {
 
     #[test]
     fn advance_state_idle() {
-        let state = CheckpointAdvanceState::idle(10, 1700000000);
+        let state = CheckpointAdvanceState::idle(10, 1_700_000_000);
 
         assert!(!state.is_halted());
         assert!(state.can_advance());
@@ -885,12 +883,12 @@ mod tests {
             10,
             test_object_id("a"),
             test_object_id("b"),
-            1700000000,
+            1_700_000_000,
             test_node("detector"),
         );
         let state = CheckpointAdvanceState::Halted {
-            fork_evidence: evidence.clone(),
-            halted_at: 1700000001,
+            fork_evidence: evidence,
+            halted_at: 1_700_000_001,
         };
 
         assert!(state.is_halted());
@@ -917,12 +915,12 @@ mod tests {
             zone_policy_head: test_object_id("policy"),
             active_zone_key_manifest: test_object_id("zkm"),
             epoch_id: test_epoch(),
-            proposed_at: 1700000000,
+            proposed_at: 1_700_000_000,
             coordinator: test_node("coord"),
             coordinator_signature: NodeSignature::new(
                 NodeId::new("coord"),
                 [0u8; 64],
-                1700000000,
+                1_700_000_000,
             ),
             triggers: vec![],
         };
@@ -946,12 +944,12 @@ mod tests {
             zone_policy_head: test_object_id("policy"),
             active_zone_key_manifest: test_object_id("zkm"),
             epoch_id: test_epoch(),
-            proposed_at: 1700000000,
+            proposed_at: 1_700_000_000,
             coordinator: test_node("coord"),
             coordinator_signature: NodeSignature::new(
                 NodeId::new("coord"),
                 [0u8; 64],
-                1700000000,
+                1_700_000_000,
             ),
             triggers: vec![],
         };
@@ -974,24 +972,24 @@ mod tests {
             zone_policy_head: test_object_id("policy"),
             active_zone_key_manifest: test_object_id("zkm"),
             epoch_id: test_epoch(),
-            proposed_at: 1700000000,
+            proposed_at: 1_700_000_000,
             coordinator: test_node("coord"),
             coordinator_signature: NodeSignature::new(
                 NodeId::new("coord"),
                 [0u8; 64],
-                1700000000,
+                1_700_000_000,
             ),
             triggers: vec![],
         };
 
         // Within skew
-        assert!(proposal.timestamp_within_skew(1700000005, 10));
-        assert!(proposal.timestamp_within_skew(1699999995, 10));
+        assert!(proposal.timestamp_within_skew(1_700_000_005, 10));
+        assert!(proposal.timestamp_within_skew(1_699_999_995, 10));
         // Exactly at boundary
-        assert!(proposal.timestamp_within_skew(1700000010, 10));
+        assert!(proposal.timestamp_within_skew(1_700_000_010, 10));
         // Outside skew
-        assert!(!proposal.timestamp_within_skew(1700000015, 10));
-        assert!(!proposal.timestamp_within_skew(1699999985, 10));
+        assert!(!proposal.timestamp_within_skew(1_700_000_015, 10));
+        assert!(!proposal.timestamp_within_skew(1_699_999_985, 10));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1001,14 +999,61 @@ mod tests {
     #[test]
     fn validation_error_reason_codes() {
         let errors = vec![
-            (CheckpointValidationError::InvalidSequence { expected: 10, got: 12 }, "FCP-5001"),
-            (CheckpointValidationError::TimestampSkew { local_time: 100, proposal_time: 200, max_skew: 10 }, "FCP-5002"),
-            (CheckpointValidationError::UnknownHead { head_type: "audit".to_string(), head_id: test_object_id("h") }, "FCP-5003"),
-            (CheckpointValidationError::InvalidHead { head_type: "rev".to_string(), head_id: test_object_id("h"), reason: "bad".to_string() }, "FCP-5004"),
-            (CheckpointValidationError::NotCoordinator { expected: test_node("a"), got: test_node("b") }, "FCP-5005"),
-            (CheckpointValidationError::InvalidCoordinatorSignature, "FCP-5006"),
-            (CheckpointValidationError::ZoneMismatch { expected: test_zone(), got: ZoneId::public() }, "FCP-5007"),
-            (CheckpointValidationError::EpochMismatch { expected: test_epoch(), got: EpochId::new("other") }, "FCP-5008"),
+            (
+                CheckpointValidationError::InvalidSequence {
+                    expected: 10,
+                    got: 12,
+                },
+                "FCP-5001",
+            ),
+            (
+                CheckpointValidationError::TimestampSkew {
+                    local_time: 100,
+                    proposal_time: 200,
+                    max_skew: 10,
+                },
+                "FCP-5002",
+            ),
+            (
+                CheckpointValidationError::UnknownHead {
+                    head_type: "audit".to_string(),
+                    head_id: test_object_id("h"),
+                },
+                "FCP-5003",
+            ),
+            (
+                CheckpointValidationError::InvalidHead {
+                    head_type: "rev".to_string(),
+                    head_id: test_object_id("h"),
+                    reason: "bad".to_string(),
+                },
+                "FCP-5004",
+            ),
+            (
+                CheckpointValidationError::NotCoordinator {
+                    expected: test_node("a"),
+                    got: test_node("b"),
+                },
+                "FCP-5005",
+            ),
+            (
+                CheckpointValidationError::InvalidCoordinatorSignature,
+                "FCP-5006",
+            ),
+            (
+                CheckpointValidationError::ZoneMismatch {
+                    expected: test_zone(),
+                    got: ZoneId::public(),
+                },
+                "FCP-5007",
+            ),
+            (
+                CheckpointValidationError::EpochMismatch {
+                    expected: test_epoch(),
+                    got: EpochId::new("other"),
+                },
+                "FCP-5008",
+            ),
         ];
 
         for (error, expected_code) in errors {
@@ -1022,7 +1067,7 @@ mod tests {
             10,
             test_object_id("a"),
             test_object_id("b"),
-            1700000000,
+            1_700_000_000,
             test_node("d"),
         ));
         assert_eq!(fork_error.reason_code(), "FCP-5010");
@@ -1091,8 +1136,7 @@ mod tests {
         // This is a golden vector - if it changes, the hash algorithm changed
         // Hash: BLAKE3("FCP2-HRW-CHECKPOINT-V1" || zone_bytes || "|checkpoint|" || epoch || "|" || node)
         assert_eq!(
-            hash,
-            2_827_109_689_116_985_122,
+            hash, 2_827_109_689_116_985_122,
             "HRW checkpoint hash golden vector mismatch"
         );
     }
@@ -1126,16 +1170,23 @@ mod tests {
             conflicting_seq: 42,
             checkpoint_a: ObjectId::from_bytes([0xAA; 32]),
             checkpoint_b: ObjectId::from_bytes([0xBB; 32]),
-            detected_at: 1700000000,
+            detected_at: 1_700_000_000,
             detected_by: TailscaleNodeId::new("detector-node"),
-            signers_a: ["alice".to_string(), "bob".to_string()].into_iter().collect(),
-            signers_b: ["bob".to_string(), "charlie".to_string()].into_iter().collect(),
+            signers_a: ["alice".to_string(), "bob".to_string()]
+                .into_iter()
+                .collect(),
+            signers_b: ["bob".to_string(), "charlie".to_string()]
+                .into_iter()
+                .collect(),
         };
 
         let json = serde_json::to_string(&evidence).unwrap();
         let decoded: ForkEvidence = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.conflicting_seq, 42);
-        assert_eq!(decoded.double_signers(), ["bob".to_string()].into_iter().collect());
+        assert_eq!(
+            decoded.double_signers(),
+            std::iter::once("bob".to_string()).collect()
+        );
     }
 }

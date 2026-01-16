@@ -379,10 +379,7 @@ pub enum OperationValidationError {
     SignatureInvalid { reason: String },
 
     /// Request object ID mismatch.
-    RequestMismatch {
-        expected: ObjectId,
-        got: ObjectId,
-    },
+    RequestMismatch { expected: ObjectId, got: ObjectId },
 }
 
 impl std::fmt::Display for OperationValidationError {
@@ -500,7 +497,10 @@ pub const fn is_intent_orphaned(
 /// - Risky operations SHOULD be Strict
 /// - Safe operations MAY be any class
 #[must_use]
-pub const fn required_idempotency_for_safety_tier(is_dangerous: bool, is_risky: bool) -> IdempotencyClass {
+pub const fn required_idempotency_for_safety_tier(
+    is_dangerous: bool,
+    is_risky: bool,
+) -> IdempotencyClass {
     // Both Dangerous and Risky require Strict idempotency per spec
     if is_dangerous || is_risky {
         IdempotencyClass::Strict
@@ -533,11 +533,7 @@ mod tests {
     }
 
     fn test_signature() -> NodeSignature {
-        NodeSignature::new(
-            crate::NodeId::new("test-node"),
-            [0u8; 64],
-            1000,
-        )
+        NodeSignature::new(crate::NodeId::new("test-node"), [0u8; 64], 1000)
     }
 
     fn create_test_header() -> ObjectHeader {
@@ -667,7 +663,8 @@ mod tests {
         let mut receipt = create_test_receipt();
         assert_eq!(receipt.total_objects_produced(), 1);
 
-        receipt.resource_object_ids = vec![test_object_id("resource-1"), test_object_id("resource-2")];
+        receipt.resource_object_ids =
+            vec![test_object_id("resource-1"), test_object_id("resource-2")];
         assert_eq!(receipt.total_objects_produced(), 3);
     }
 
@@ -688,7 +685,10 @@ mod tests {
         assert_eq!(receipt.request_object_id, deserialized.request_object_id);
         assert_eq!(receipt.idempotency_key, deserialized.idempotency_key);
         assert_eq!(receipt.executed_at, deserialized.executed_at);
-        assert_eq!(receipt.outcome_object_ids.len(), deserialized.outcome_object_ids.len());
+        assert_eq!(
+            receipt.outcome_object_ids.len(),
+            deserialized.outcome_object_ids.len()
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -887,7 +887,7 @@ mod tests {
 
         // First: Create entry when intent is recorded
         let entry = IdempotencyEntry {
-            key: idempotency_key.clone(),
+            key: idempotency_key,
             zone_id: test_zone(),
             intent_id: test_object_id("intent-1"),
             receipt_id: Some(test_object_id("receipt-1")),
@@ -1048,15 +1048,7 @@ mod tests {
     fn idempotency_key_collision_resistance() {
         // Keys that are similar but not identical should not collide
         let keys = [
-            "op-1",
-            "op-10",
-            "op-100",
-            "op-1000",
-            "op_1",
-            "op.1",
-            "op:1",
-            "OP-1",
-            "Op-1",
+            "op-1", "op-10", "op-100", "op-1000", "op_1", "op.1", "op:1", "OP-1", "Op-1",
         ];
 
         // All keys should be unique
@@ -1209,7 +1201,12 @@ mod tests {
         let orphan_threshold = 3600; // 1 hour threshold
 
         // Intent should be detected as orphaned
-        assert!(is_intent_orphaned(&intent, has_receipt, now, orphan_threshold));
+        assert!(is_intent_orphaned(
+            &intent,
+            has_receipt,
+            now,
+            orphan_threshold
+        ));
     }
 
     #[test]
@@ -1220,7 +1217,12 @@ mod tests {
         let now = intent.planned_at + 7200; // 2 hours later
         let orphan_threshold = 3600;
 
-        assert!(!is_intent_orphaned(&intent, has_receipt, now, orphan_threshold));
+        assert!(!is_intent_orphaned(
+            &intent,
+            has_receipt,
+            now,
+            orphan_threshold
+        ));
     }
 
     #[test]
@@ -1232,7 +1234,12 @@ mod tests {
         let orphan_threshold = 3600; // 1 hour threshold
 
         // Still within threshold, not orphaned yet
-        assert!(!is_intent_orphaned(&intent, has_receipt, now, orphan_threshold));
+        assert!(!is_intent_orphaned(
+            &intent,
+            has_receipt,
+            now,
+            orphan_threshold
+        ));
     }
 
     #[test]
@@ -1243,11 +1250,21 @@ mod tests {
 
         // Exactly at threshold - not orphaned (> not >=)
         let at_threshold = intent.planned_at + orphan_threshold;
-        assert!(!is_intent_orphaned(&intent, has_receipt, at_threshold, orphan_threshold));
+        assert!(!is_intent_orphaned(
+            &intent,
+            has_receipt,
+            at_threshold,
+            orphan_threshold
+        ));
 
         // One second past threshold - orphaned
         let past_threshold = intent.planned_at + orphan_threshold + 1;
-        assert!(is_intent_orphaned(&intent, has_receipt, past_threshold, orphan_threshold));
+        assert!(is_intent_orphaned(
+            &intent,
+            has_receipt,
+            past_threshold,
+            orphan_threshold
+        ));
     }
 
     #[test]
@@ -1424,13 +1441,12 @@ mod tests {
 
             // Each error should have meaningful content
             match error {
-                OperationValidationError::IntentNotFound { idempotency_key } => {
+                OperationValidationError::IntentNotFound { idempotency_key }
+                | OperationValidationError::AlreadyCompleted { idempotency_key } => {
                     assert!(display.contains(idempotency_key));
                 }
-                OperationValidationError::AlreadyCompleted { idempotency_key } => {
-                    assert!(display.contains(idempotency_key));
-                }
-                OperationValidationError::ZoneMismatch { .. } => {
+                OperationValidationError::ZoneMismatch { .. }
+                | OperationValidationError::RequestMismatch { .. } => {
                     assert!(display.contains("mismatch"));
                 }
                 OperationValidationError::IntentReferenceMissing { .. } => {
@@ -1445,20 +1461,16 @@ mod tests {
                 OperationValidationError::SignatureInvalid { reason } => {
                     assert!(display.contains(reason));
                 }
-                OperationValidationError::RequestMismatch { .. } => {
-                    assert!(display.contains("mismatch"));
-                }
             }
         }
     }
 
     #[test]
     fn validation_error_is_std_error() {
-        let error: Box<dyn std::error::Error> = Box::new(
-            OperationValidationError::IntentNotFound {
+        let error: Box<dyn std::error::Error> =
+            Box::new(OperationValidationError::IntentNotFound {
                 idempotency_key: "test".to_string(),
-            }
-        );
+            });
 
         // Should implement std::error::Error
         assert!(!error.to_string().is_empty());
@@ -1507,14 +1519,14 @@ mod tests {
 
         // Signable bytes should include the empty key
         let bytes = intent.signable_bytes();
-        assert!(bytes.len() > 0);
+        assert!(!bytes.is_empty());
     }
 
     #[test]
     fn edge_very_long_idempotency_key() {
         let mut intent = create_test_intent();
         let long_key = "x".repeat(10_000);
-        intent.idempotency_key = Some(long_key.clone());
+        intent.idempotency_key = Some(long_key);
 
         // Should handle long keys
         assert!(intent.requires_strict_idempotency());

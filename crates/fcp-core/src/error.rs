@@ -235,7 +235,8 @@ impl FcpError {
             Self::InvalidRequest { .. }
             | Self::MalformedFrame { .. }
             | Self::ChecksumMismatch
-            | Self::VersionMismatch { .. } => ErrorCategory::Protocol,
+            | Self::VersionMismatch { .. }
+            | Self::MissingField { .. } => ErrorCategory::Protocol,
 
             Self::Unauthorized { .. } | Self::TokenExpired | Self::InvalidSignature => {
                 ErrorCategory::Auth
@@ -265,7 +266,6 @@ impl FcpError {
             | Self::DependencyUnavailable { .. } => ErrorCategory::External,
 
             Self::Internal { .. } => ErrorCategory::Internal,
-            Self::MissingField { .. } => ErrorCategory::Protocol,
         }
     }
 

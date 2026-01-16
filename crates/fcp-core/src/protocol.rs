@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId,
-    IdempotencyClass, InstanceId, OperationId, Provenance, RiskLevel, SafetyTier, SessionId,
-    ZoneId,
+    ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId, IdempotencyClass,
+    InstanceId, OperationId, Provenance, RiskLevel, SafetyTier, SessionId, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

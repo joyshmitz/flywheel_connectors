@@ -231,9 +231,7 @@ pub enum LeaseResponse {
     },
 
     /// Request invalid (e.g., wrong zone).
-    Invalid {
-        reason: String,
-    },
+    Invalid { reason: String },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,10 +317,7 @@ pub enum LeaseValidationError {
     Expired { expired_at: u64, now: u64 },
 
     /// Lease is for wrong subject.
-    SubjectMismatch {
-        expected: ObjectId,
-        got: ObjectId,
-    },
+    SubjectMismatch { expected: ObjectId, got: ObjectId },
 
     /// Lease is for wrong zone.
     ZoneMismatch { expected: ZoneId, got: ZoneId },
@@ -334,10 +329,7 @@ pub enum LeaseValidationError {
     },
 
     /// Lease has been superseded by a newer lease.
-    Superseded {
-        held_seq: u64,
-        current_seq: u64,
-    },
+    Superseded { held_seq: u64, current_seq: u64 },
 
     /// Coordinator mismatch (wrong coordinator signed).
     CoordinatorMismatch {
@@ -374,7 +366,12 @@ impl std::fmt::Display for LeaseValidationError {
                 )
             }
             Self::CoordinatorMismatch { expected, got } => {
-                write!(f, "coordinator mismatch: expected {}, got {}", expected.as_str(), got.as_str())
+                write!(
+                    f,
+                    "coordinator mismatch: expected {}, got {}",
+                    expected.as_str(),
+                    got.as_str()
+                )
             }
             Self::InsufficientQuorum { required, got } => {
                 write!(
@@ -538,7 +535,9 @@ mod tests {
         ];
 
         // Different subjects may (probabilistically) get different coordinators
-        let subjects: Vec<_> = (0..20).map(|i| test_object_id(&format!("subject-{i}"))).collect();
+        let subjects: Vec<_> = (0..20)
+            .map(|i| test_object_id(&format!("subject-{i}")))
+            .collect();
 
         let coords: Vec<_> = subjects
             .iter()
@@ -550,10 +549,7 @@ mod tests {
         let all_same = coords.iter().all(|c| c == first);
 
         // This is probabilistic but should pass with overwhelming probability
-        assert!(
-            !all_same,
-            "HRW should distribute load across nodes"
-        );
+        assert!(!all_same, "HRW should distribute load across nodes");
     }
 
     #[test]
@@ -620,16 +616,16 @@ mod tests {
     fn test_validate_lease_success() {
         let subject = test_object_id("subject");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(5, 2000, subject);
 
         let result = validate_lease(
             &lease,
             &subject,
             &zone,
             LeasePurpose::OperationExecution,
-            5, // current_known_seq
+            5,    // current_known_seq
             1500, // now (before expiry)
-            0, // no signatures required
+            0,    // no signatures required
         );
 
         assert!(result.is_ok());
@@ -639,7 +635,7 @@ mod tests {
     fn test_validate_lease_expired() {
         let subject = test_object_id("subject");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(5, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -658,7 +654,7 @@ mod tests {
     fn test_validate_lease_superseded() {
         let subject = test_object_id("subject");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(5, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -680,7 +676,7 @@ mod tests {
     fn test_validate_lease_purpose_mismatch() {
         let subject = test_object_id("subject");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(5, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -726,7 +722,7 @@ mod tests {
         let subject = test_object_id("subject");
         // Lease is created with test_zone() (work), but we validate against private
         let wrong_zone = ZoneId::private();
-        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(5, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -748,7 +744,7 @@ mod tests {
     fn test_validate_lease_insufficient_quorum() {
         let subject = test_object_id("subject");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(5, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(5, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -762,7 +758,10 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(LeaseValidationError::InsufficientQuorum { required: 3, got: 0 })
+            Err(LeaseValidationError::InsufficientQuorum {
+                required: 3,
+                got: 0
+            })
         ));
     }
 
@@ -809,7 +808,7 @@ mod tests {
         let coord_before = select_coordinator(&zone, &subject, &original_nodes);
 
         // Add a new node
-        let mut nodes_with_new = original_nodes.clone();
+        let mut nodes_with_new = original_nodes;
         nodes_with_new.push(test_node("node-d"));
 
         let coord_after = select_coordinator(&zone, &subject, &nodes_with_new);
@@ -836,11 +835,7 @@ mod tests {
         assert_eq!(ranked.len(), 3);
 
         // If primary (ranked[0]) fails, secondary (ranked[1]) should be next
-        let remaining_nodes: Vec<_> = nodes
-            .iter()
-            .filter(|n| *n != &ranked[0])
-            .cloned()
-            .collect();
+        let remaining_nodes: Vec<_> = nodes.iter().filter(|n| *n != &ranked[0]).cloned().collect();
 
         let new_coord = select_coordinator(&zone, &subject, &remaining_nodes);
         assert_eq!(new_coord, Some(ranked[1].clone()));
@@ -867,7 +862,10 @@ mod tests {
         let coord1 = select_coordinator(&zone, &subject, &nodes1);
         let coord2 = select_coordinator(&zone, &subject, &nodes2);
 
-        assert_eq!(coord1, coord2, "HRW should be stable regardless of input order");
+        assert_eq!(
+            coord1, coord2,
+            "HRW should be stable regardless of input order"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -911,7 +909,10 @@ mod tests {
     #[test]
     fn test_lease_purpose_all_variants_display() {
         // Test all LeasePurpose variants have correct Display output
-        assert_eq!(LeasePurpose::CoordinatorElection.to_string(), "coordinator_election");
+        assert_eq!(
+            LeasePurpose::CoordinatorElection.to_string(),
+            "coordinator_election"
+        );
         assert_eq!(LeasePurpose::Migration.to_string(), "migration");
         assert_eq!(LeasePurpose::ResourceAccess.to_string(), "resource_access");
     }
@@ -937,7 +938,7 @@ mod tests {
     #[test]
     fn test_lease_serde_preserves_all_fields() {
         let subject = test_object_id("specific-subject");
-        let lease = create_test_lease_with_subject(100, 9999, subject.clone());
+        let lease = create_test_lease_with_subject(100, 9999, subject);
 
         let json = serde_json::to_string_pretty(&lease).unwrap();
 
@@ -1116,7 +1117,7 @@ mod tests {
         let subject = test_object_id("shared-resource");
         let zone = test_zone();
 
-        let zombie_lease = create_test_lease_with_subject(10, 5000, subject.clone());
+        let zombie_lease = create_test_lease_with_subject(10, 5000, subject);
 
         // Current known seq is 15 (someone else got a newer lease)
         let result = validate_lease(
@@ -1145,10 +1146,10 @@ mod tests {
         let zone = test_zone();
 
         // Old lease: seq 5, expires far in future
-        let old_lease = create_test_lease_with_subject(5, 99999, subject.clone());
+        let old_lease = create_test_lease_with_subject(5, 99999, subject);
 
         // New lease: seq 10
-        let new_lease = create_test_lease_with_subject(10, 2000, subject.clone());
+        let new_lease = create_test_lease_with_subject(10, 2000, subject);
 
         // Old lease should fail validation
         let old_result = validate_lease(
@@ -1180,7 +1181,7 @@ mod tests {
         // Lease with seq == current_known_seq should be valid
         let subject = test_object_id("resource");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(10, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(10, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -1201,7 +1202,7 @@ mod tests {
         // (node might have received newer lease info)
         let subject = test_object_id("resource");
         let zone = test_zone();
-        let lease = create_test_lease_with_subject(15, 2000, subject.clone());
+        let lease = create_test_lease_with_subject(15, 2000, subject);
 
         let result = validate_lease(
             &lease,
@@ -1222,9 +1223,9 @@ mod tests {
 
     #[test]
     fn test_lease_new_sets_expiry_correctly() {
+        use crate::Provenance;
         use fcp_cbor::SchemaId;
         use semver::Version;
-        use crate::Provenance;
 
         let zone = test_zone();
         let subject = test_object_id("subject");
@@ -1236,7 +1237,7 @@ mod tests {
             holder: test_node("holder"),
             lease_seq: 1,
             ttl_secs,
-            subject_object_id: subject.clone(),
+            subject_object_id: subject,
             provenance: Provenance::new(zone),
             purpose: LeasePurpose::OperationExecution,
             quorum_signatures: SignatureSet::default(),
@@ -1267,9 +1268,9 @@ mod tests {
     }
 
     fn create_test_lease_with_subject(lease_seq: u64, exp: u64, subject: ObjectId) -> Lease {
+        use crate::Provenance;
         use fcp_cbor::SchemaId;
         use semver::Version;
-        use crate::Provenance;
 
         let zone = test_zone();
         Lease {
@@ -1278,7 +1279,7 @@ mod tests {
                 zone_id: zone.clone(),
                 created_at: 1000,
                 provenance: Provenance::new(zone),
-                refs: vec![subject.clone()],
+                refs: vec![subject],
                 foreign_refs: vec![],
                 ttl_secs: None,
                 placement: None,

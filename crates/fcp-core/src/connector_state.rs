@@ -32,7 +32,7 @@ use crate::{ConnectorId, InstanceId, ObjectHeader, ObjectId, TailscaleNodeId, Zo
 
 /// Ed25519 signature (64 bytes) (NORMATIVE).
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Signature(#[serde(with = "hex::serde")] pub [u8; 64]);
+pub struct Signature(#[serde(with = "crate::util::hex_or_bytes")] pub [u8; 64]);
 
 impl Signature {
     /// Create a signature from raw bytes.
@@ -584,7 +584,6 @@ impl std::error::Error for FencingError {}
 /// # Arguments
 ///
 /// * `state_obj` - The state object to validate
-/// * `expected_subject` - The expected lease subject (usually the state root ID)
 /// * `current_known_seq` - The highest known `lease_seq` for this subject
 /// * `now` - Current timestamp for expiry checking
 /// * `lease_exp` - Expiration time of the referenced lease
@@ -594,7 +593,6 @@ impl std::error::Error for FencingError {}
 /// Returns an error if fencing validation fails.
 pub fn validate_singleton_writer_fencing(
     state_obj: &ConnectorStateObject,
-    expected_subject: &ObjectId,
     current_known_seq: u64,
     now: u64,
     lease_exp: u64,
@@ -624,7 +622,6 @@ pub fn validate_singleton_writer_fencing(
 
     // Note: Subject and purpose validation require the actual Lease object,
     // which should be done by the caller with access to the object store.
-    let _ = expected_subject; // Used by caller for full validation
 
     Ok(())
 }

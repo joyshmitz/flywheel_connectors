@@ -692,8 +692,6 @@ pub struct RoleAssignment {
 pub struct CapabilityToken {
     /// The raw `COSE_Sign1` token
     pub raw: CoseToken,
-    /// The parsed claims (cached)
-    pub claims: CwtClaims,
 }
 
 impl Serialize for CapabilityToken {
@@ -761,35 +759,8 @@ impl<'de> Deserialize<'de> for CapabilityToken {
 
         // Note: Claims are not verified here! They are just parsed.
         // The verifier MUST be called.
-        // We can't easily extract claims without verification key if we want to be safe,
-        // but CoseToken allows parsing structure.
-        // However, CoseToken::verify returns claims.
-        // We might want to parse "unverified" claims here for inspection,
-        // OR just store raw and require verify() to get claims.
-        // But the struct has `pub claims: CwtClaims`.
-        // Ideally we shouldn't expose unverified claims.
-        // But for pragmatic reasons (inspection), we might.
-        // WARNING: Using unverified claims is dangerous.
-        // Let's assume we parse them but mark them as unverified in docs.
-        // Actually, CoseToken doesn't expose `get_claims_unverified`.
-        // I should probably update CoseToken to allow unverified peek?
-        // Or just store raw and parse on verify.
-        // The issue says "Capability tokens ... carry proof".
-        // Let's assume we only store raw and verification produces the usable object?
-        // But the struct definition above has `claims`.
-        // I will change the struct to NOT have public claims, or make them Option.
-        // Or, assume we can peek.
-        // I'll stick to: `pub raw: CoseToken` and maybe helper methods that require key.
 
-        // For now, I'll modify CoseToken or just error if I can't parse.
-        // Wait, CoseToken::from_cbor returns the token structure.
-        // It doesn't parse the payload (which is inside protected bucket).
-        // I'll update struct to `pub struct CapabilityToken { pub raw: CoseToken }`.
-
-        Ok(Self {
-            raw,
-            claims: CwtClaims::new(),
-        }) // Dummy claims for now, fix struct
+        Ok(Self { raw })
     }
 }
 
@@ -821,10 +792,7 @@ impl CapabilityToken {
             .sign(&signing_key)
             .expect("Failed to create test token");
 
-        Self {
-            raw: cose_token,
-            claims: CwtClaims::new(), // empty claims, verified on use
-        }
+        Self { raw: cose_token }
     }
 }
 
@@ -1434,10 +1402,7 @@ mod tests {
             .expect("Failed to sign token");
 
         // 3. Wrap in CapabilityToken
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         // 4. Verify
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
@@ -1468,10 +1433,7 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
 
@@ -1496,10 +1458,7 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
 

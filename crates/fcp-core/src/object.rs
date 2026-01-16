@@ -11,7 +11,8 @@ use crate::{Provenance, ZoneId};
 
 /// Content-addressed identifier (NORMATIVE).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ObjectId([u8; 32]);
+#[serde(transparent)] // Use transparent to delegate to the inner array via hex_or_bytes
+pub struct ObjectId(#[serde(with = "crate::util::hex_or_bytes")] [u8; 32]);
 
 impl ObjectId {
     /// Construct an `ObjectId` from raw bytes.
@@ -44,6 +45,15 @@ impl ObjectId {
         h.update(b"FCP2-CONTENT-V2");
         h.update(content);
         Self(*h.finalize().as_bytes())
+    }
+
+    /// Create a test `ObjectId` from a string identifier.
+    ///
+    /// This is a convenience method for tests only.
+    #[cfg(test)]
+    #[must_use]
+    pub fn test_id(name: &str) -> Self {
+        Self::from_unscoped_bytes(name.as_bytes())
     }
 }
 
