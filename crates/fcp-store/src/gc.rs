@@ -200,24 +200,7 @@ impl GarbageCollector {
             }
 
             if live.contains(&object_id) {
-                // Object is reachable, but check lease expiry
-                if self.config.enforce_lease_expiry {
-                    if let Ok(meta) = store.get_storage_meta(&object_id).await {
-                        if let RetentionClass::Lease { expires_at } = meta.retention {
-                            if expires_at <= current_time {
-                                // Lease expired, evict unless pinned
-                                if !roots.pinned.contains(&object_id) {
-                                    if store.delete(&object_id).await.is_ok() {
-                                        expired_leases += 1;
-                                        evicted += 1;
-                                        evicted_ids.push(object_id);
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Reachable objects are never evicted.
                 continue;
             }
 
@@ -540,6 +523,39 @@ mod tests {
             StoreLogData {
                 object_id: Some(ObjectId::from_bytes([2; 32])),
                 details: Some(json!({"expired_leases": result.expired_leases})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_keeps_reachable_lease() {
+        run_store_test("gc_keeps_reachable_lease", "verify", "gc", 3, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            let id = ObjectId::from_bytes([1; 32]);
+            store
+                .put(test_object(
+                    1,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 500 },
+                ))
+                .await
+                .unwrap();
+
+            let mut roots = GcRoots::new();
+            roots.set_checkpoint(id);
+
+            let result = gc.collect(&test_zone(), &roots, &store, 1000).await.unwrap();
+
+            assert_eq!(result.evicted, 0);
+            assert_eq!(result.expired_leases, 0);
+            assert!(store.exists(&id).await);
+
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({"evicted": result.evicted, "reachable": true})),
                 ..StoreLogData::default()
             }
         });
