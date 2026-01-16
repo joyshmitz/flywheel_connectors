@@ -42,10 +42,17 @@ impl TokenBucket {
     /// * `window` - Duration of the rate limit window
     #[must_use]
     pub fn new(requests_per_window: u32, window: Duration) -> Self {
+        // Ensure refill interval is never zero to prevent division by zero
+        let refill_interval = if window.is_zero() {
+            Duration::from_nanos(1)
+        } else {
+            window
+        };
+
         Self {
             capacity: requests_per_window,
             refill_amount: requests_per_window,
-            refill_interval: window,
+            refill_interval,
             tokens: AtomicU32::new(requests_per_window),
             last_refill: Mutex::new(Instant::now()),
         }
@@ -55,10 +62,39 @@ impl TokenBucket {
     #[must_use]
     pub fn from_config(config: &RateLimitConfig) -> Self {
         let capacity = config.burst_size.unwrap_or(config.requests_per_window);
+
+        // Normalize rate for smoothness (avoid "burst-then-wait" behavior).
+        // Instead of adding N tokens every T seconds, add 1 token every T/N seconds.
+        let (refill_amount, refill_interval) = if config.requests_per_window > 0 {
+            let window_nanos = config.window.as_nanos();
+            let nanos_per_request = window_nanos / u128::from(config.requests_per_window);
+
+            if nanos_per_request > 0 {
+                // Smooth rate: 1 token per calculated interval
+                (
+                    1,
+                    Duration::from_nanos(u64::try_from(nanos_per_request).unwrap_or(u64::MAX)),
+                )
+            } else {
+                // Rate too high for smooth 1-token refilling (e.g. > 1 req/ns),
+                // or window is zero. Fallback to window-based.
+                (config.requests_per_window, config.window)
+            }
+        } else {
+            (0, config.window)
+        };
+
+        // Ensure refill interval is never zero
+        let refill_interval = if refill_interval.is_zero() {
+            Duration::from_nanos(1)
+        } else {
+            refill_interval
+        };
+
         Self {
             capacity,
-            refill_amount: config.requests_per_window,
-            refill_interval: config.window,
+            refill_amount,
+            refill_interval,
             tokens: AtomicU32::new(capacity),
             last_refill: Mutex::new(Instant::now()),
         }
@@ -67,10 +103,17 @@ impl TokenBucket {
     /// Create with burst capacity.
     #[must_use]
     pub fn with_burst(requests_per_window: u32, window: Duration, burst: u32) -> Self {
+        // Ensure refill interval is never zero
+        let refill_interval = if window.is_zero() {
+            Duration::from_nanos(1)
+        } else {
+            window
+        };
+
         Self {
             capacity: burst,
             refill_amount: requests_per_window,
-            refill_interval: window,
+            refill_interval,
             tokens: AtomicU32::new(burst),
             last_refill: Mutex::new(Instant::now()),
         }
@@ -307,5 +350,25 @@ mod tests {
         // Taking 2 works.
         assert!(limiter.try_acquire_n(2).await);
         assert_eq!(limiter.remaining(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_token_bucket_zero_window_safety() {
+        // Ensure we don't panic if window is zero (e.g. from bad config)
+        let config = RateLimitConfig {
+            requests_per_window: 100,
+            window: Duration::ZERO,
+            ..Default::default()
+        };
+
+        // Should not panic
+        let limiter = TokenBucket::from_config(&config);
+
+        // Should work safely (likely using fallback 1ns interval or similar logic)
+        assert!(limiter.try_acquire().await);
+
+        // Direct constructor safety
+        let limiter_direct = TokenBucket::new(100, Duration::ZERO);
+        assert!(limiter_direct.try_acquire().await);
     }
 }

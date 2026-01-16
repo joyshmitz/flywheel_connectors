@@ -320,4 +320,45 @@ mod tests {
         assert!(limiter.try_acquire().await);
         assert!(limiter.try_acquire().await);
     }
+
+    #[tokio::test]
+    async fn test_sliding_window_wait_time() {
+        let limiter = SlidingWindow::new(1, Duration::from_millis(100));
+
+        // Acquire the only permit
+        assert!(limiter.try_acquire().await);
+
+        // Now it should be limited
+        assert!(!limiter.try_acquire().await);
+
+        // Check wait time - should be approx 100ms
+        let wait = limiter.wait_time().await;
+        assert!(wait.as_millis() > 0);
+        assert!(wait.as_millis() <= 100);
+
+        // Wait that amount
+        sleep(wait).await;
+
+        // Should be available now
+        assert!(limiter.try_acquire().await);
+    }
+
+    #[tokio::test]
+    async fn test_fixed_window_wait_time() {
+        let limiter = FixedWindow::new(1, Duration::from_millis(100));
+
+        // Acquire
+        assert!(limiter.try_acquire().await);
+        assert!(!limiter.try_acquire().await);
+
+        // Check wait time
+        let wait = limiter.wait_time().await;
+        assert!(wait.as_millis() > 0);
+        assert!(wait.as_millis() <= 100);
+
+        sleep(wait).await;
+
+        // Should reset
+        assert!(limiter.try_acquire().await);
+    }
 }
