@@ -455,6 +455,9 @@ impl std::fmt::Debug for SessionKeys {
 pub struct SessionReplayPolicy {
     /// Allow limited reordering; MUST be bounded.
     pub max_reorder_window: u64,
+    /// Maximum number of frames into the future to accept (anti-DoS).
+    /// Prevents window jumping attacks where a peer sends `seq=u64::MAX`.
+    pub max_future_window: u64,
     /// Rekey periodically for operational hygiene and suite agility.
     pub rekey_after_frames: u64,
     /// Rekey after elapsed time to avoid pathological long-lived sessions.
@@ -467,6 +470,7 @@ impl Default for SessionReplayPolicy {
     fn default() -> Self {
         Self {
             max_reorder_window: 128,
+            max_future_window: 1024,
             rekey_after_frames: 1_000_000_000,
             rekey_after_seconds: 86400,           // 24 hours
             rekey_after_bytes: 1_099_511_627_776, // 1 TiB
@@ -700,6 +704,13 @@ impl MeshSession {
         }
         // Check if seq is in acceptable range before MAC computation
         let highest = self.recv_window.highest_seq();
+        let future_limit = highest.saturating_add(self.replay_policy.max_future_window);
+
+        // Anti-DoS: Prevent window jumping (seq >> highest)
+        if seq > future_limit {
+            return false;
+        }
+
         if highest > 0 {
             let diff = highest.saturating_sub(seq);
             if diff >= self.replay_policy.max_reorder_window || diff >= 128 {
@@ -1225,6 +1236,7 @@ mod tests {
 
         let policy = SessionReplayPolicy {
             max_reorder_window: 128,
+            max_future_window: 1024,
             rekey_after_frames: 100,
             rekey_after_seconds: 3600,
             rekey_after_bytes: 10000,
@@ -1437,5 +1449,66 @@ ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59\
 11111111111111111111111111111111",
             "Ack transcript golden vector mismatch"
         );
+    }
+
+    #[test]
+    fn test_verify_incoming_rejects_future_window_exceeded() {
+        let keys = SessionKeys {
+            k_mac_i2r: [0x01u8; 32],
+            k_mac_r2i: [0x02u8; 32],
+            k_ctx: [0x03u8; 32],
+        };
+
+        let policy = SessionReplayPolicy {
+            max_future_window: 100, // Small window for testing
+            ..Default::default()
+        };
+
+        let mut responder = MeshSession::new(
+            [0xAAu8; 16],
+            NodeId::new("initiator"),
+            SessionCryptoSuite::Suite1,
+            keys,
+            TransportLimits::default(),
+            false,
+            1_700_000_000,
+            policy,
+        );
+
+        // Sequence 1 should be accepted (within window of 0+100)
+        // We can't easily compute valid MAC without access to session keys logic here or exposing it
+        // But we can check that it returns false. The tricky part is distinguishing "mac fail" from "window fail".
+        // verify_incoming returns false for both.
+        // However, if we use a seq > max_future_window, it should return false FAST,
+        // without even checking MAC.
+
+        // Let's create a valid MAC for a future packet to prove rejection is due to window
+        let k_mac_i2r = [0x01u8; 32]; // initiator->responder key
+        let session_id = [0xAAu8; 16];
+        let direction = 0x00; // initiator->responder
+        let frame = b"future attack";
+
+        let seq_too_far = 200u64; // > 100
+        let mac_valid_for_far_seq = SessionCryptoSuite::Suite1.compute_mac(
+            &k_mac_i2r,
+            &session_id,
+            direction,
+            seq_too_far,
+            frame,
+        );
+
+        // Should return false due to window check
+        assert!(!responder.verify_incoming(seq_too_far, frame, &mac_valid_for_far_seq));
+
+        // Let's verify a valid seq *would* be accepted if window was respected
+        let seq_valid = 50u64;
+        let mac_valid = SessionCryptoSuite::Suite1.compute_mac(
+            &k_mac_i2r,
+            &session_id,
+            direction,
+            seq_valid,
+            frame,
+        );
+        assert!(responder.verify_incoming(seq_valid, frame, &mac_valid));
     }
 }
