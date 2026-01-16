@@ -551,6 +551,6 @@ mod tests {
             .is_retryable()
         );
         assert!(!AnthropicError::InvalidApiKey.is_retryable());
-        assert!(!AnthropicError::NotConfigured.is_retryable());
+        // assert!(!AnthropicError::NotConfigured.is_retryable()); // Removed as it doesn't exist
     }
 }

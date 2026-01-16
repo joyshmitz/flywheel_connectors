@@ -273,10 +273,28 @@ impl Usage {
     /// Calculate cost for this usage with a given model.
     #[must_use]
     pub fn calculate_cost(&self, model: Model) -> f64 {
-        let input_cost =
-            (f64::from(self.input_tokens) / 1_000_000.0) * model.input_price_per_million();
-        let output_cost =
-            (f64::from(self.output_tokens) / 1_000_000.0) * model.output_price_per_million();
+        let base_input_price = model.input_price_per_million();
+        let output_price = model.output_price_per_million();
+
+        // Anthropic pricing for caching:
+        // Cache writes are 25% more expensive than base input
+        // Cache reads are 90% cheaper than base input (0.1x multiplier)
+        let creation_price = base_input_price * 1.25;
+        let read_price = base_input_price * 0.10;
+
+        // input_tokens includes creation and read tokens, so we must subtract them
+        // to get the uncached input count
+        let uncached_input = self
+            .input_tokens
+            .saturating_sub(self.cache_creation_input_tokens)
+            .saturating_sub(self.cache_read_input_tokens);
+
+        let input_cost = (f64::from(uncached_input) / 1_000_000.0) * base_input_price
+            + (f64::from(self.cache_creation_input_tokens) / 1_000_000.0) * creation_price
+            + (f64::from(self.cache_read_input_tokens) / 1_000_000.0) * read_price;
+
+        let output_cost = (f64::from(self.output_tokens) / 1_000_000.0) * output_price;
+
         input_cost + output_cost
     }
 }

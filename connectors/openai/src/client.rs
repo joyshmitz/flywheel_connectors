@@ -555,11 +555,27 @@ mod tests {
             prompt_tokens: 1000,
             completion_tokens: 500,
             total_tokens: 1500,
+            prompt_tokens_details: None,
         };
 
         // GPT-4o: 1000 input * $2.50/1M + 500 output * $10/1M
         let cost = usage.calculate_cost(Model::Gpt4o);
         assert!((cost - 0.0075).abs() < 0.0001);
+
+        // Test with cached tokens (GPT-4o, 50% discount)
+        // 1000 uncached * $2.50/1M = 0.0025
+        // 1000 cached * $1.25/1M = 0.00125
+        // Total = 0.00375
+        let cached_usage = Usage {
+            prompt_tokens: 2000,
+            completion_tokens: 0,
+            total_tokens: 2000,
+            prompt_tokens_details: Some(crate::types::PromptTokensDetails {
+                cached_tokens: 1000,
+            }),
+        };
+        let cost_cached = cached_usage.calculate_cost(Model::Gpt4o);
+        assert!((cost_cached - 0.00375).abs() < 0.0001);
     }
 
     #[test]
@@ -577,6 +593,5 @@ mod tests {
             .is_retryable()
         );
         assert!(!OpenAIError::InvalidApiKey.is_retryable());
-        assert!(!OpenAIError::NotConfigured.is_retryable());
     }
 }

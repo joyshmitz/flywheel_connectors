@@ -375,16 +375,38 @@ pub struct Usage {
     pub completion_tokens: u32,
     /// Total tokens used
     pub total_tokens: u32,
+    /// Detailed breakdown of prompt tokens
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+/// Detailed breakdown of prompt tokens.
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub struct PromptTokensDetails {
+    /// Number of tokens retrieved from the cache
+    pub cached_tokens: u32,
 }
 
 impl Usage {
     /// Calculate cost for this usage with a given model.
     #[must_use]
     pub fn calculate_cost(&self, model: Model) -> f64 {
-        let input_cost =
-            (f64::from(self.prompt_tokens) / 1_000_000.0) * model.input_price_per_million();
-        let output_cost =
-            (f64::from(self.completion_tokens) / 1_000_000.0) * model.output_price_per_million();
+        let base_input_price = model.input_price_per_million();
+        let output_price = model.output_price_per_million();
+
+        let cached_tokens = self
+            .prompt_tokens_details
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0);
+
+        // OpenAI pricing: Cached input tokens are 50% discounted
+        let uncached_input = self.prompt_tokens.saturating_sub(cached_tokens);
+
+        let input_cost = (f64::from(uncached_input) / 1_000_000.0) * base_input_price
+            + (f64::from(cached_tokens) / 1_000_000.0) * (base_input_price * 0.5);
+
+        let output_cost = (f64::from(self.completion_tokens) / 1_000_000.0) * output_price;
+
         input_cost + output_cost
     }
 }
