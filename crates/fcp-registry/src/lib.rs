@@ -1580,4 +1580,910 @@ trusted_builders = ["trusted-builder"]
             },
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Additional Manifest Verification Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_rejects_invalid_signature() {
+        run_registry_test(
+            "verify_bundle_rejects_invalid_signature",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let wrong_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                // Sign with the wrong key
+                let sig = sign_manifest_toml(&unsigned, &wrong_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("invalid signature");
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+
+                RegistryLogData {
+                    reason_code: Some("signature_invalid".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_rejects_missing_required_field() {
+        run_registry_test(
+            "verify_bundle_rejects_missing_required_field",
+            "verify",
+            "manifest",
+            1,
+            || async {
+                // Manifest missing connector section
+                let incomplete_toml = r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+"#;
+                let bundle = ConnectorBundle {
+                    manifest_toml: incomplete_toml.to_string(),
+                    binary: b"binary".to_vec(),
+                    target: test_target(),
+                };
+
+                let verifier = RegistryVerifier::new(RegistryTrustPolicy::default());
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("missing required field");
+                assert!(matches!(err, RegistryError::ManifestParse(_)));
+
+                RegistryLogData {
+                    reason_code: Some("missing_required_field".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_rejects_malformed_signature_bytes() {
+        run_registry_test(
+            "verify_bundle_rejects_malformed_signature_bytes",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                // Create a signature that's too short (not 64 bytes)
+                let malformed_sig =
+                    Base64Bytes::try_from("base64:AQIDBA==".to_string()).expect("base64");
+                let unsigned = unsigned_manifest_toml("");
+                let manifest_toml = with_signatures(
+                    &unsigned,
+                    &publisher_signature_section("pub1", &malformed_sig),
+                );
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary: b"binary".to_vec(),
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("malformed signature");
+                assert!(matches!(err, RegistryError::SignatureBytes));
+
+                RegistryLogData {
+                    reason_code: Some("signature_bytes_malformed".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Binary Verification Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_accepts_zero_length_binary() {
+        run_registry_test(
+            "verify_bundle_accepts_zero_length_binary",
+            "verify",
+            "checksum",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                // Empty binary is valid if hash matches
+                let binary: Vec<u8> = vec![];
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("empty binary valid");
+
+                assert_eq!(verified.binary_hash, hash_bytes(&[]));
+
+                RegistryLogData {
+                    binary_hash: Some(verified.binary_hash),
+                    reason_code: Some("zero_length_binary_accepted".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_rejects_truncated_binary() {
+        run_registry_test(
+            "verify_bundle_rejects_truncated_binary",
+            "verify",
+            "checksum",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let original_binary = b"this is the full binary content".to_vec();
+                let truncated_binary = b"this is the".to_vec();
+                let original_hash = hash_bytes(&original_binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &original_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary: truncated_binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("truncated binary");
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+
+                RegistryLogData {
+                    reason_code: Some("binary_truncated".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_rejects_extra_bytes_in_binary() {
+        run_registry_test(
+            "verify_bundle_rejects_extra_bytes_in_binary",
+            "verify",
+            "checksum",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let original_binary = b"original content".to_vec();
+                let mut extended_binary = original_binary.clone();
+                extended_binary.extend_from_slice(b"extra malicious bytes");
+                let original_hash = hash_bytes(&original_binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &original_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary: extended_binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("extra bytes");
+                assert!(matches!(err, RegistryError::SignatureInvalid { .. }));
+
+                RegistryLogData {
+                    reason_code: Some("binary_extra_bytes".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Platform/Architecture Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_rejects_wrong_architecture() {
+        run_registry_test(
+            "verify_bundle_rejects_wrong_architecture",
+            "verify",
+            "target",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: ConnectorTarget {
+                        os: "linux".to_string(),
+                        arch: "amd64".to_string(),
+                    },
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(
+                        &bundle,
+                        None,
+                        None,
+                        Some(&ConnectorTarget {
+                            os: "linux".to_string(),
+                            arch: "arm64".to_string(),
+                        }),
+                    )
+                    .expect_err("arch mismatch");
+                assert!(matches!(err, RegistryError::TargetMismatch { .. }));
+
+                RegistryLogData {
+                    reason_code: Some("arch_mismatch".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn connector_target_from_env_matches_runtime() {
+        run_registry_test(
+            "connector_target_from_env_matches_runtime",
+            "verify",
+            "target",
+            2,
+            || async {
+                let target = ConnectorTarget::from_env();
+                assert_eq!(target.os, std::env::consts::OS);
+                assert_eq!(target.arch, std::env::consts::ARCH);
+
+                RegistryLogData {
+                    target: Some(target.as_string()),
+                    reason_code: Some("target_matches_runtime".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Publisher Threshold Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_rejects_publisher_threshold_unmet() {
+        run_registry_test(
+            "verify_bundle_rejects_publisher_threshold_unmet",
+            "verify",
+            "signature",
+            1,
+            || async {
+                let signing_key1 = Ed25519SigningKey::generate();
+                let verifying_key1 = signing_key1.verifying_key();
+                let verifying_key2 = Ed25519SigningKey::generate().verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig1 = sign_manifest_toml(&unsigned, &signing_key1, &binary_hash);
+
+                // Create threshold 2-of-2 but only provide 1 signature
+                let signatures = format!(
+                    r#"[signatures]
+publisher_threshold = "2-of-2"
+
+[[signatures.publisher_signatures]]
+kid = "pub1"
+sig = "{}"
+"#,
+                    String::from(sig1)
+                );
+
+                let manifest_toml = with_signatures(&unsigned, &signatures);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key1);
+                trust
+                    .publisher_keys
+                    .insert("pub2".to_string(), verifying_key2);
+
+                let verifier = RegistryVerifier::new(trust);
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("threshold unmet");
+                // Manifest parsing validates signature count >= threshold before verification
+                assert!(
+                    matches!(&err, RegistryError::ManifestParse(e)
+                        if e.to_string().contains("insufficient signatures"))
+                );
+
+                RegistryLogData {
+                    reason_code: Some("manifest_parse_insufficient_signatures".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Attestation Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_accepts_valid_attestation() {
+        run_registry_test(
+            "verify_bundle_accepts_valid_attestation",
+            "verify",
+            "attestation",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let policy = r#"[policy]
+require_attestation_types = ["in-toto"]
+min_slsa_level = 2
+trusted_builders = ["trusted-builder"]
+"#;
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml(policy);
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: Some(3),
+                        builder_id: Some("trusted-builder".to_string()),
+                    }],
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, Some(&evidence), None)
+                    .expect("attestation valid");
+
+                RegistryLogData {
+                    connector_id: Some(verified.manifest.connector.id.to_string()),
+                    reason_code: Some("attestation_valid".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_accepts_transparency_log_with_evidence() {
+        run_registry_test(
+            "verify_bundle_accepts_transparency_log_with_evidence",
+            "verify",
+            "transparency",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let policy = r#"[policy]
+require_transparency_log = true
+"#;
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml(policy);
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+
+                // Combined signatures section with transparency_log_entry
+                let signatures_section = format!(
+                    r#"[signatures]
+publisher_threshold = "1-of-1"
+transparency_log_entry = "objectid:{}"
+
+[[signatures.publisher_signatures]]
+kid = "pub1"
+sig = "{}"
+"#,
+                    hex::encode([0u8; 32]),
+                    String::from(sig)
+                );
+                let manifest_toml = with_signatures(&unsigned, &signatures_section);
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: true,
+                    attestations: vec![],
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, Some(&evidence), None)
+                    .expect("transparency log valid");
+
+                RegistryLogData {
+                    connector_id: Some(verified.manifest.connector.id.to_string()),
+                    reason_code: Some("transparency_log_valid".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Capability Ceiling Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_accepts_capabilities_within_ceiling() {
+        run_registry_test(
+            "verify_bundle_accepts_capabilities_within_ceiling",
+            "verify",
+            "policy",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                // Allow all capabilities required by the minimal manifest
+                let zone_policy = test_zone_policy(vec![
+                    CapabilityId::from_static("network.dns"),
+                    CapabilityId::from_static("minimal.op"),
+                ]);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, Some(&zone_policy), None, None)
+                    .expect("capabilities within ceiling");
+
+                RegistryLogData {
+                    connector_id: Some(verified.manifest.connector.id.to_string()),
+                    reason_code: Some("capabilities_within_ceiling".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Verification Report Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verification_report_contains_all_fields() {
+        run_registry_test(
+            "verification_report_contains_all_fields",
+            "verify",
+            "report",
+            5,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml: manifest_toml.clone(),
+                    binary: binary.clone(),
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                let report = verified.report("success");
+                assert_eq!(report.connector_id, "fcp.minimal");
+                assert_eq!(report.manifest_hash, hash_bytes(manifest_toml.as_bytes()));
+                assert_eq!(report.binary_hash, binary_hash);
+                assert_eq!(report.target.os, "linux");
+                assert_eq!(report.outcome, "success");
+
+                RegistryLogData {
+                    connector_id: Some(report.connector_id),
+                    manifest_hash: Some(report.manifest_hash),
+                    binary_hash: Some(report.binary_hash),
+                    target: Some(report.target.as_string()),
+                    reason_code: Some("report_complete".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Multiple Attestation Types Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_bundle_accepts_multiple_attestation_types() {
+        run_registry_test(
+            "verify_bundle_accepts_multiple_attestation_types",
+            "verify",
+            "attestation",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let policy = r#"[policy]
+require_attestation_types = ["in-toto", "code-review"]
+"#;
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml(policy);
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![
+                        AttestationEvidence {
+                            attestation_type: AttestationType::InToto,
+                            slsa_level: Some(2),
+                            builder_id: None,
+                        },
+                        AttestationEvidence {
+                            attestation_type: AttestationType::CodeReview,
+                            slsa_level: None,
+                            builder_id: None,
+                        },
+                    ],
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, Some(&evidence), None)
+                    .expect("multiple attestations valid");
+
+                RegistryLogData {
+                    connector_id: Some(verified.manifest.connector.id.to_string()),
+                    reason_code: Some("multiple_attestations_valid".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // MockRegistry Implementation for Structured Testing
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Mock registry for deterministic testing.
+    struct MockRegistry {
+        connectors: HashMap<String, MockConnectorEntry>,
+    }
+
+    struct MockConnectorEntry {
+        manifest_toml: String,
+        binary: Vec<u8>,
+        target: ConnectorTarget,
+        signing_key: Ed25519SigningKey,
+    }
+
+    impl MockRegistry {
+        fn new() -> Self {
+            Self {
+                connectors: HashMap::new(),
+            }
+        }
+
+        fn with_valid_connector(mut self, id: &str, version: &str) -> Self {
+            let signing_key = Ed25519SigningKey::generate();
+            let binary = format!("binary-for-{id}-{version}").into_bytes();
+            let binary_hash = hash_bytes(&binary);
+
+            let manifest_toml = format!(
+                r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 1200
+interface_hash = "{placeholder}"
+
+[connector]
+id = "{id}"
+name = "Test Connector"
+version = "{version}"
+description = "Test connector"
+archetypes = ["operational"]
+format = "native"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = []
+optional = []
+forbidden = []
+
+[provides.operations.test_op]
+description = "Test operation"
+capability = "test.op"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = {{ type = "object" }}
+output_schema = {{ type = "object" }}
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#,
+                placeholder = PLACEHOLDER_HASH
+            );
+
+            // Parse and compute interface hash
+            let unchecked =
+                ConnectorManifest::parse_str_unchecked(&manifest_toml).expect("manifest");
+            let interface_hash = unchecked.compute_interface_hash().expect("interface hash");
+            let manifest_toml = manifest_toml.replace(PLACEHOLDER_HASH, &interface_hash.to_string());
+
+            // Sign
+            let manifest = ConnectorManifest::parse_str(&manifest_toml).expect("manifest");
+            let signing_bytes = manifest_signing_bytes(&manifest).expect("signing bytes");
+            let message = signature_message(&signing_bytes, &binary_hash);
+            let signature = signing_key.sign_with_context(MANIFEST_SIGNATURE_CONTEXT, &message);
+            let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+            let signed_manifest = format!(
+                r#"{manifest_toml}
+
+[signatures]
+publisher_threshold = "1-of-1"
+
+[[signatures.publisher_signatures]]
+kid = "{id}-key"
+sig = "base64:{sig_b64}"
+"#
+            );
+
+            self.connectors.insert(
+                id.to_string(),
+                MockConnectorEntry {
+                    manifest_toml: signed_manifest,
+                    binary,
+                    target: test_target(),
+                    signing_key,
+                },
+            );
+            self
+        }
+
+        fn get_bundle(&self, connector_id: &str) -> Option<ConnectorBundle> {
+            self.connectors.get(connector_id).map(|entry| ConnectorBundle {
+                manifest_toml: entry.manifest_toml.clone(),
+                binary: entry.binary.clone(),
+                target: entry.target.clone(),
+            })
+        }
+
+        fn get_trust_policy(&self, connector_id: &str) -> Option<RegistryTrustPolicy> {
+            self.connectors.get(connector_id).map(|entry| {
+                let mut policy = RegistryTrustPolicy::default();
+                policy.publisher_keys.insert(
+                    format!("{connector_id}-key"),
+                    entry.signing_key.verifying_key(),
+                );
+                policy
+            })
+        }
+    }
+
+    #[test]
+    fn mock_registry_creates_verifiable_bundles() {
+        run_registry_test(
+            "mock_registry_creates_verifiable_bundles",
+            "mock",
+            "registry",
+            2,
+            || async {
+                let registry = MockRegistry::new()
+                    .with_valid_connector("fcp.test", "1.0.0")
+                    .with_valid_connector("fcp.another", "2.0.0");
+
+                let bundle = registry.get_bundle("fcp.test").expect("bundle");
+                let trust = registry.get_trust_policy("fcp.test").expect("trust");
+
+                let verifier = RegistryVerifier::new(trust);
+                let verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("verify");
+
+                assert_eq!(verified.manifest.connector.id.as_str(), "fcp.test");
+                assert_eq!(verified.manifest.connector.version.to_string(), "1.0.0");
+
+                RegistryLogData {
+                    connector_id: Some(verified.manifest.connector.id.to_string()),
+                    version: Some(verified.manifest.connector.version.to_string()),
+                    reason_code: Some("mock_registry_valid".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_registry_nonexistent_connector_returns_none() {
+        run_registry_test(
+            "mock_registry_nonexistent_connector_returns_none",
+            "mock",
+            "registry",
+            1,
+            || async {
+                let registry = MockRegistry::new().with_valid_connector("fcp.exists", "1.0.0");
+
+                let bundle = registry.get_bundle("fcp.nonexistent");
+                assert!(bundle.is_none());
+
+                RegistryLogData {
+                    reason_code: Some("nonexistent_connector".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
 }
