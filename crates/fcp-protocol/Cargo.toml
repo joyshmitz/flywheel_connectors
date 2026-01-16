@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+bitflags.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -32,3 +33,4 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 hex.workspace = true
+semver.workspace = true
