@@ -14,3 +14,21 @@ workspace = true
 [dependencies]
 bytes.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+ciborium.workspace = true
+blake3.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+rand.workspace = true
+subtle.workspace = true
+
+fcp-core.workspace = true
+fcp-crypto.workspace = true
+fcp-cbor.workspace = true
+fcp-tailscale.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+hex.workspace = true

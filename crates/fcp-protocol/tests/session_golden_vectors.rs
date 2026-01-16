@@ -605,8 +605,7 @@ mod ack_parsing {
 
     #[test]
     fn ack_chosen_suite_in_hello_list() {
-        let mut log =
-            TestLogEntry::new("ack_chosen_suite_in_hello_list", "suite_validation", None);
+        let mut log = TestLogEntry::new("ack_chosen_suite_in_hello_list", "suite_validation", None);
         let (initiator_sign, responder_sign) = fixed_signing_keys();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
         let hello = build_hello(&initiator_sign, &initiator_eph);
@@ -648,8 +647,11 @@ mod suite_negotiation {
 
     #[test]
     fn negotiation_prefers_initiator_order() {
-        let mut log =
-            TestLogEntry::new("negotiation_prefers_initiator_order", "suite_negotiate", None);
+        let mut log = TestLogEntry::new(
+            "negotiation_prefers_initiator_order",
+            "suite_negotiate",
+            None,
+        );
 
         // Initiator prefers Suite2
         let initiator = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
@@ -664,8 +666,12 @@ mod suite_negotiation {
 
     #[test]
     fn negotiation_no_overlap_returns_none() {
-        let mut log = TestLogEntry::new("negotiation_no_overlap_returns_none", "suite_negotiate", None)
-            .with_reason("FCP-3001");
+        let mut log = TestLogEntry::new(
+            "negotiation_no_overlap_returns_none",
+            "suite_negotiate",
+            None,
+        )
+        .with_reason("FCP-3001");
 
         let initiator = [SessionCryptoSuite::Suite1];
         let responder = [SessionCryptoSuite::Suite2];
@@ -678,8 +684,11 @@ mod suite_negotiation {
 
     #[test]
     fn negotiation_empty_initiator_returns_none() {
-        let mut log =
-            TestLogEntry::new("negotiation_empty_initiator_returns_none", "suite_negotiate", None);
+        let mut log = TestLogEntry::new(
+            "negotiation_empty_initiator_returns_none",
+            "suite_negotiate",
+            None,
+        );
 
         let initiator: [SessionCryptoSuite; 0] = [];
         let responder = [SessionCryptoSuite::Suite1];
@@ -692,8 +701,11 @@ mod suite_negotiation {
 
     #[test]
     fn negotiation_empty_responder_returns_none() {
-        let mut log =
-            TestLogEntry::new("negotiation_empty_responder_returns_none", "suite_negotiate", None);
+        let mut log = TestLogEntry::new(
+            "negotiation_empty_responder_returns_none",
+            "suite_negotiate",
+            None,
+        );
 
         let initiator = [SessionCryptoSuite::Suite1];
         let responder: [SessionCryptoSuite; 0] = [];
@@ -711,7 +723,7 @@ mod suite_negotiation {
 
 mod adversarial_handshakes {
     use super::*;
-    use fcp_protocol::{decode_hello_cbor, decode_ack_cbor, MAX_HANDSHAKE_BYTES};
+    use fcp_protocol::{MAX_HANDSHAKE_BYTES, decode_ack_cbor, decode_hello_cbor};
 
     #[test]
     fn truncated_hello_rejected() {
@@ -728,7 +740,10 @@ mod adversarial_handshakes {
         for truncate_at in [1, 10, 50, cbor_bytes.len() / 2] {
             if truncate_at < cbor_bytes.len() {
                 let truncated = &cbor_bytes[..truncate_at];
-                assert!(decode_hello_cbor(truncated).is_err(), "truncated at {truncate_at}");
+                assert!(
+                    decode_hello_cbor(truncated).is_err(),
+                    "truncated at {truncate_at}"
+                );
             }
         }
 
@@ -763,12 +778,12 @@ mod adversarial_handshakes {
                 .with_reason("FCP-3012");
 
         let malformed_inputs = [
-            vec![0xFF],                                // Invalid CBOR
-            vec![0x00],                                // Just a zero
-            vec![0xA0],                                // Empty map
-            vec![0x80],                                // Empty array
+            vec![0xFF],                               // Invalid CBOR
+            vec![0x00],                               // Just a zero
+            vec![0xA0],                               // Empty map
+            vec![0x80],                               // Empty array
             vec![0x1B, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], // Truncated integer
-            vec![0xBF],                                // Indefinite map start
+            vec![0xBF],                               // Indefinite map start
             b"not cbor at all".to_vec(),
         ];
 
@@ -829,8 +844,8 @@ mod adversarial_handshakes {
 
     #[test]
     fn truncated_ack_rejected() {
-        let mut log = TestLogEntry::new("truncated_ack_rejected", "ack_parse", None)
-            .with_reason("FCP-3015");
+        let mut log =
+            TestLogEntry::new("truncated_ack_rejected", "ack_parse", None).with_reason("FCP-3015");
 
         let (initiator_sign, responder_sign) = fixed_signing_keys();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
@@ -843,7 +858,10 @@ mod adversarial_handshakes {
         for truncate_at in [1, 10, 50] {
             if truncate_at < cbor_bytes.len() {
                 let truncated = &cbor_bytes[..truncate_at];
-                assert!(decode_ack_cbor(truncated).is_err(), "truncated at {truncate_at}");
+                assert!(
+                    decode_ack_cbor(truncated).is_err(),
+                    "truncated at {truncate_at}"
+                );
             }
         }
 
@@ -877,9 +895,8 @@ mod signature_verification {
 
     #[test]
     fn hello_signature_wrong_key_rejected() {
-        let mut log =
-            TestLogEntry::new("hello_signature_wrong_key_rejected", "hello_verify", None)
-                .with_reason("FCP-3020");
+        let mut log = TestLogEntry::new("hello_signature_wrong_key_rejected", "hello_verify", None)
+            .with_reason("FCP-3020");
 
         let (initiator_sign, responder_sign) = fixed_signing_keys();
         let (initiator_eph, _) = fixed_ephemeral_keys();
@@ -895,9 +912,8 @@ mod signature_verification {
 
     #[test]
     fn hello_missing_signature_rejected() {
-        let mut log =
-            TestLogEntry::new("hello_missing_signature_rejected", "hello_verify", None)
-                .with_reason("FCP-3021");
+        let mut log = TestLogEntry::new("hello_missing_signature_rejected", "hello_verify", None)
+            .with_reason("FCP-3021");
 
         let (initiator_sign, _) = fixed_signing_keys();
         let (initiator_eph, _) = fixed_ephemeral_keys();
@@ -1036,8 +1052,7 @@ mod transcript_tests {
 
     #[test]
     fn hello_transcript_is_deterministic() {
-        let mut log =
-            TestLogEntry::new("hello_transcript_is_deterministic", "transcript", None);
+        let mut log = TestLogEntry::new("hello_transcript_is_deterministic", "transcript", None);
 
         let (initiator_sign, _) = fixed_signing_keys();
         let (initiator_eph, _) = fixed_ephemeral_keys();
@@ -1056,8 +1071,11 @@ mod transcript_tests {
 
     #[test]
     fn hello_transcript_includes_domain_separation() {
-        let mut log =
-            TestLogEntry::new("hello_transcript_includes_domain_separation", "transcript", None);
+        let mut log = TestLogEntry::new(
+            "hello_transcript_includes_domain_separation",
+            "transcript",
+            None,
+        );
 
         let (initiator_sign, _) = fixed_signing_keys();
         let (initiator_eph, _) = fixed_ephemeral_keys();
@@ -1092,8 +1110,11 @@ mod transcript_tests {
 
     #[test]
     fn ack_transcript_includes_domain_separation() {
-        let mut log =
-            TestLogEntry::new("ack_transcript_includes_domain_separation", "transcript", None);
+        let mut log = TestLogEntry::new(
+            "ack_transcript_includes_domain_separation",
+            "transcript",
+            None,
+        );
 
         let (initiator_sign, responder_sign) = fixed_signing_keys();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
@@ -1111,8 +1132,7 @@ mod transcript_tests {
 
     #[test]
     fn ack_transcript_includes_hello_data() {
-        let mut log =
-            TestLogEntry::new("ack_transcript_includes_hello_data", "transcript", None);
+        let mut log = TestLogEntry::new("ack_transcript_includes_hello_data", "transcript", None);
 
         let (initiator_sign, responder_sign) = fixed_signing_keys();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
@@ -1146,7 +1166,7 @@ mod transcript_tests {
 
 mod cookie_tests {
     use super::*;
-    use fcp_protocol::{compute_cookie, verify_cookie, decode_cookie_bytes};
+    use fcp_protocol::{compute_cookie, decode_cookie_bytes, verify_cookie};
 
     #[test]
     fn cookie_round_trip() {
@@ -1165,8 +1185,8 @@ mod cookie_tests {
 
     #[test]
     fn cookie_wrong_key_rejected() {
-        let mut log = TestLogEntry::new("cookie_wrong_key_rejected", "cookie", None)
-            .with_reason("FCP-3030");
+        let mut log =
+            TestLogEntry::new("cookie_wrong_key_rejected", "cookie", None).with_reason("FCP-3030");
 
         let (initiator_sign, _) = fixed_signing_keys();
         let (initiator_eph, _) = fixed_ephemeral_keys();
@@ -1325,8 +1345,11 @@ mod key_derivation_tests {
 
     #[test]
     fn different_session_id_yields_different_keys() {
-        let mut log =
-            TestLogEntry::new("different_session_id_yields_different_keys", "key_derive", None);
+        let mut log = TestLogEntry::new(
+            "different_session_id_yields_different_keys",
+            "key_derive",
+            None,
+        );
 
         let (initiator, responder) = fixed_node_ids();
         let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
@@ -1457,11 +1480,14 @@ mod anti_replay_tests {
 
     #[test]
     fn replay_window_allows_out_of_order_in_window() {
-        let mut log =
-            TestLogEntry::new("replay_window_allows_out_of_order_in_window", "replay_check", None)
-                .with_details(serde_json::json!({
-                    "reason": "IN_WINDOW"
-                }));
+        let mut log = TestLogEntry::new(
+            "replay_window_allows_out_of_order_in_window",
+            "replay_check",
+            None,
+        )
+        .with_details(serde_json::json!({
+            "reason": "IN_WINDOW"
+        }));
 
         let mut window = ReplayWindow::new(128);
         assert!(window.check_and_update(100));
@@ -1474,11 +1500,14 @@ mod anti_replay_tests {
 
     #[test]
     fn replay_window_rejects_stale_outside_window() {
-        let mut log =
-            TestLogEntry::new("replay_window_rejects_stale_outside_window", "replay_check", None)
-                .with_details(serde_json::json!({
-                    "reason": "STALE"
-                }));
+        let mut log = TestLogEntry::new(
+            "replay_window_rejects_stale_outside_window",
+            "replay_check",
+            None,
+        )
+        .with_details(serde_json::json!({
+            "reason": "STALE"
+        }));
 
         let mut window = ReplayWindow::new(64);
         assert!(window.check_and_update(200));
@@ -1493,8 +1522,11 @@ mod anti_replay_tests {
 
     #[test]
     fn replay_window_handles_large_jump_forward() {
-        let mut log =
-            TestLogEntry::new("replay_window_handles_large_jump_forward", "replay_check", None);
+        let mut log = TestLogEntry::new(
+            "replay_window_handles_large_jump_forward",
+            "replay_check",
+            None,
+        );
 
         let mut window = ReplayWindow::new(128);
         assert!(window.check_and_update(1));
@@ -1528,7 +1560,7 @@ mod anti_replay_tests {
 
 mod transport_limits_tests {
     use super::*;
-    use fcp_protocol::{FcpsDatagram, DEFAULT_MAX_DATAGRAM_BYTES, FCPS_DATAGRAM_HEADER_LEN};
+    use fcp_protocol::{DEFAULT_MAX_DATAGRAM_BYTES, FCPS_DATAGRAM_HEADER_LEN, FcpsDatagram};
 
     #[test]
     fn transport_limits_default_value() {
@@ -1596,8 +1628,11 @@ mod transport_limits_tests {
 
     #[test]
     fn datagram_exactly_header_size_accepted() {
-        let mut log =
-            TestLogEntry::new("datagram_exactly_header_size_accepted", "datagram_decode", None);
+        let mut log = TestLogEntry::new(
+            "datagram_exactly_header_size_accepted",
+            "datagram_decode",
+            None,
+        );
 
         let minimal = vec![0u8; FCPS_DATAGRAM_HEADER_LEN];
         let result = FcpsDatagram::decode(&minimal, DEFAULT_MAX_DATAGRAM_BYTES);
@@ -1610,8 +1645,7 @@ mod transport_limits_tests {
 
     #[test]
     fn datagram_encode_decode_roundtrip() {
-        let mut log =
-            TestLogEntry::new("datagram_encode_decode_roundtrip", "datagram", None);
+        let mut log = TestLogEntry::new("datagram_encode_decode_roundtrip", "datagram", None);
 
         let datagram = FcpsDatagram {
             session_id: MeshSessionId(SESSION_ID),
@@ -1623,7 +1657,10 @@ mod transport_limits_tests {
         let encoded = datagram.encode();
         let decoded = FcpsDatagram::decode(&encoded, DEFAULT_MAX_DATAGRAM_BYTES).expect("decode");
 
-        assert_eq!(decoded.session_id.as_bytes(), datagram.session_id.as_bytes());
+        assert_eq!(
+            decoded.session_id.as_bytes(),
+            datagram.session_id.as_bytes()
+        );
         assert_eq!(decoded.seq, datagram.seq);
         assert_eq!(decoded.mac, datagram.mac);
         assert_eq!(decoded.frame_bytes, datagram.frame_bytes);
@@ -1640,7 +1677,10 @@ mod transport_limits_tests {
         let exceeds_custom = vec![0u8; 101];
 
         let result = FcpsDatagram::decode(&exceeds_custom, custom_limit);
-        assert!(matches!(result, Err(SessionError::DatagramTooLarge { len: 101, max: 100 })));
+        assert!(matches!(
+            result,
+            Err(SessionError::DatagramTooLarge { len: 101, max: 100 })
+        ));
 
         log = log.pass();
         log.log();
@@ -1657,7 +1697,11 @@ mod session_mac_tests {
 
     #[test]
     fn mac_suite1_round_trip() {
-        let mut log = TestLogEntry::new("mac_suite1_round_trip", "mac", Some(SessionCryptoSuite::Suite1));
+        let mut log = TestLogEntry::new(
+            "mac_suite1_round_trip",
+            "mac",
+            Some(SessionCryptoSuite::Suite1),
+        );
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x11_u8; 32];
@@ -1690,7 +1734,11 @@ mod session_mac_tests {
 
     #[test]
     fn mac_suite2_round_trip() {
-        let mut log = TestLogEntry::new("mac_suite2_round_trip", "mac", Some(SessionCryptoSuite::Suite2));
+        let mut log = TestLogEntry::new(
+            "mac_suite2_round_trip",
+            "mac",
+            Some(SessionCryptoSuite::Suite2),
+        );
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x22_u8; 32];
@@ -1723,8 +1771,8 @@ mod session_mac_tests {
 
     #[test]
     fn mac_wrong_key_rejected() {
-        let mut log = TestLogEntry::new("mac_wrong_key_rejected", "mac", None)
-            .with_reason("FCP-3050");
+        let mut log =
+            TestLogEntry::new("mac_wrong_key_rejected", "mac", None).with_reason("FCP-3050");
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x11_u8; 32];
@@ -1758,8 +1806,8 @@ mod session_mac_tests {
 
     #[test]
     fn mac_tampered_frame_rejected() {
-        let mut log = TestLogEntry::new("mac_tampered_frame_rejected", "mac", None)
-            .with_reason("FCP-3051");
+        let mut log =
+            TestLogEntry::new("mac_tampered_frame_rejected", "mac", None).with_reason("FCP-3051");
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x11_u8; 32];
@@ -1795,8 +1843,8 @@ mod session_mac_tests {
 
     #[test]
     fn mac_wrong_sequence_rejected() {
-        let mut log = TestLogEntry::new("mac_wrong_sequence_rejected", "mac", None)
-            .with_reason("FCP-3052");
+        let mut log =
+            TestLogEntry::new("mac_wrong_sequence_rejected", "mac", None).with_reason("FCP-3052");
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x11_u8; 32];
@@ -1829,8 +1877,8 @@ mod session_mac_tests {
 
     #[test]
     fn mac_wrong_direction_rejected() {
-        let mut log = TestLogEntry::new("mac_wrong_direction_rejected", "mac", None)
-            .with_reason("FCP-3053");
+        let mut log =
+            TestLogEntry::new("mac_wrong_direction_rejected", "mac", None).with_reason("FCP-3053");
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x11_u8; 32];
@@ -1863,8 +1911,7 @@ mod session_mac_tests {
 
     #[test]
     fn mac_different_suites_produce_different_tags() {
-        let mut log =
-            TestLogEntry::new("mac_different_suites_produce_different_tags", "mac", None);
+        let mut log = TestLogEntry::new("mac_different_suites_produce_different_tags", "mac", None);
 
         let session_id = MeshSessionId(SESSION_ID);
         let key = [0x11_u8; 32];

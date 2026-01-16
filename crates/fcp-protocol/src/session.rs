@@ -1436,7 +1436,8 @@ mod tests {
             2,
             &context,
             || {
-                verify_hello_attested(&hello, &identity, &TimePolicy::default()).expect("attestation ok");
+                verify_hello_attested(&hello, &identity, &TimePolicy::default())
+                    .expect("attestation ok");
 
                 let mut expired = identity.clone();
                 if let Some(att) = expired.attestation.as_mut() {
