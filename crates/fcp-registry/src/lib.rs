@@ -137,6 +137,442 @@ pub struct RegistryVerificationReport {
     pub outcome: String,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Supply-Chain Verification Adapters
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Transparency log entry with proof data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransparencyLogEntry {
+    /// Log index of the entry.
+    pub log_index: u64,
+    /// SHA256 hash of the entry being logged.
+    pub entry_hash: String,
+    /// Merkle proof for inclusion verification.
+    pub inclusion_proof: InclusionProof,
+    /// Signed entry timestamp from the log server.
+    pub signed_entry_timestamp: Vec<u8>,
+    /// Log ID (public key hash of the log).
+    pub log_id: String,
+}
+
+/// Merkle inclusion proof for transparency log verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InclusionProof {
+    /// Merkle tree root hash.
+    pub root_hash: String,
+    /// Tree size at time of proof.
+    pub tree_size: u64,
+    /// Merkle audit path (hashes from leaf to root).
+    pub hashes: Vec<String>,
+    /// Index of the leaf in the tree.
+    pub leaf_index: u64,
+}
+
+/// TUF root metadata for anti-rollback protection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TufRootMetadata {
+    /// Version of the root metadata.
+    pub version: u32,
+    /// SHA256 hash of the canonical root.json.
+    pub root_hash: String,
+    /// Expiration timestamp (Unix seconds).
+    pub expires: u64,
+    /// Key IDs for threshold verification.
+    pub key_ids: Vec<String>,
+    /// Threshold required for valid signatures.
+    pub threshold: u8,
+}
+
+/// TUF delegation target for connector binaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TufTargetInfo {
+    /// Target path in the TUF repo.
+    pub target_path: String,
+    /// SHA256 hash of the target.
+    pub hash: String,
+    /// Length of the target in bytes.
+    pub length: u64,
+    /// Delegation chain from root to target.
+    pub delegations: Vec<String>,
+}
+
+/// Sigstore bundle containing signature and attestation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigstoreBundle {
+    /// Base64-encoded signature.
+    pub signature: String,
+    /// Certificate chain (PEM-encoded).
+    pub certificate: String,
+    /// Rekor log entry for the signature.
+    pub rekor_entry: Option<TransparencyLogEntry>,
+    /// OIDC identity that signed (e.g., "github-actions").
+    pub identity: String,
+    /// OIDC issuer URL.
+    pub issuer: String,
+}
+
+/// Result of transparency log verification.
+#[derive(Debug, Clone)]
+pub struct TransparencyVerificationResult {
+    /// Whether the entry was found and verified.
+    pub verified: bool,
+    /// Log index of the verified entry.
+    pub log_index: Option<u64>,
+    /// Timestamp when entry was logged.
+    pub logged_at: Option<u64>,
+}
+
+/// Result of TUF verification.
+#[derive(Debug, Clone)]
+pub struct TufVerificationResult {
+    /// Whether the target was found in valid TUF metadata.
+    pub verified: bool,
+    /// Root version used for verification.
+    pub root_version: u32,
+    /// Target info if found.
+    pub target: Option<TufTargetInfo>,
+}
+
+/// Result of Sigstore bundle verification.
+#[derive(Debug, Clone)]
+pub struct SigstoreVerificationResult {
+    /// Whether the signature is valid.
+    pub verified: bool,
+    /// OIDC identity from certificate.
+    pub identity: Option<String>,
+    /// OIDC issuer from certificate.
+    pub issuer: Option<String>,
+    /// Rekor log index if available.
+    pub rekor_log_index: Option<u64>,
+}
+
+/// Errors specific to supply-chain verification adapters.
+#[derive(Debug, thiserror::Error)]
+pub enum SupplyChainVerificationError {
+    #[error("transparency log entry not found")]
+    TransparencyEntryNotFound,
+    #[error("transparency log inclusion proof invalid")]
+    TransparencyProofInvalid,
+    #[error("transparency log signature invalid")]
+    TransparencySignatureInvalid,
+    #[error("TUF root hash mismatch (expected {expected}, got {actual})")]
+    TufRootMismatch { expected: String, actual: String },
+    #[error("TUF metadata expired")]
+    TufExpired,
+    #[error("TUF target not found: {target}")]
+    TufTargetNotFound { target: String },
+    #[error("TUF rollback detected (got version {got}, expected > {current})")]
+    TufRollback { current: u32, got: u32 },
+    #[error("TUF freeze attack detected: timestamp metadata unchanged")]
+    TufFreeze,
+    #[error("Sigstore signature invalid")]
+    SigstoreSignatureInvalid,
+    #[error("Sigstore certificate expired or not yet valid")]
+    SigstoreCertificateInvalid,
+    #[error("Sigstore identity mismatch (expected {expected}, got {actual})")]
+    SigstoreIdentityMismatch { expected: String, actual: String },
+    #[error("Sigstore issuer not trusted: {issuer}")]
+    SigstoreIssuerUntrusted { issuer: String },
+    #[error("network error: {0}")]
+    Network(String),
+    #[error("verification not configured")]
+    NotConfigured,
+}
+
+/// Trait for transparency log verification adapters.
+#[async_trait]
+pub trait TransparencyLogVerifier: Send + Sync {
+    /// Verify that an entry exists in the transparency log.
+    async fn verify_entry(
+        &self,
+        entry_hash: &str,
+        expected_entry: Option<&TransparencyLogEntry>,
+    ) -> Result<TransparencyVerificationResult, SupplyChainVerificationError>;
+}
+
+/// Trait for TUF metadata verification adapters.
+#[async_trait]
+pub trait TufVerifier: Send + Sync {
+    /// Verify TUF metadata chain and find target info.
+    ///
+    /// # Arguments
+    /// * `pinned_root` - Expected root metadata hash for anti-rollback
+    /// * `target_path` - Path to the target in the TUF repo
+    async fn verify_target(
+        &self,
+        pinned_root: &TufRootMetadata,
+        target_path: &str,
+    ) -> Result<TufVerificationResult, SupplyChainVerificationError>;
+
+    /// Fetch and verify the current root metadata.
+    async fn fetch_root(&self) -> Result<TufRootMetadata, SupplyChainVerificationError>;
+}
+
+/// Trait for Sigstore bundle verification adapters.
+#[async_trait]
+pub trait SigstoreVerifier: Send + Sync {
+    /// Verify a Sigstore bundle against an artifact.
+    ///
+    /// # Arguments
+    /// * `bundle` - The Sigstore bundle containing signature and certificate
+    /// * `artifact_hash` - SHA256 hash of the artifact being verified
+    /// * `trusted_identities` - Allowed OIDC identities (e.g., "github-actions")
+    /// * `trusted_issuers` - Allowed OIDC issuers
+    async fn verify_bundle(
+        &self,
+        bundle: &SigstoreBundle,
+        artifact_hash: &str,
+        trusted_identities: &[String],
+        trusted_issuers: &[String],
+    ) -> Result<SigstoreVerificationResult, SupplyChainVerificationError>;
+}
+
+/// Configuration for supply-chain verification.
+#[derive(Debug, Clone, Default)]
+pub struct SupplyChainVerificationConfig {
+    /// Pinned TUF root for anti-rollback.
+    pub tuf_pinned_root: Option<TufRootMetadata>,
+    /// Trusted OIDC identities for Sigstore.
+    pub trusted_sigstore_identities: Vec<String>,
+    /// Trusted OIDC issuers for Sigstore.
+    pub trusted_sigstore_issuers: Vec<String>,
+    /// Whether to require transparency log verification.
+    pub require_transparency: bool,
+    /// Whether to require TUF verification.
+    pub require_tuf: bool,
+    /// Whether to require Sigstore verification.
+    pub require_sigstore: bool,
+}
+
+/// No-op transparency log verifier for testing without external dependencies.
+#[derive(Debug, Default)]
+pub struct NoOpTransparencyVerifier;
+
+#[async_trait]
+impl TransparencyLogVerifier for NoOpTransparencyVerifier {
+    async fn verify_entry(
+        &self,
+        _entry_hash: &str,
+        _expected_entry: Option<&TransparencyLogEntry>,
+    ) -> Result<TransparencyVerificationResult, SupplyChainVerificationError> {
+        Ok(TransparencyVerificationResult {
+            verified: true,
+            log_index: Some(0),
+            logged_at: Some(0),
+        })
+    }
+}
+
+/// No-op TUF verifier for testing without external dependencies.
+#[derive(Debug, Default)]
+pub struct NoOpTufVerifier;
+
+#[async_trait]
+impl TufVerifier for NoOpTufVerifier {
+    async fn verify_target(
+        &self,
+        _pinned_root: &TufRootMetadata,
+        _target_path: &str,
+    ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
+        Ok(TufVerificationResult {
+            verified: true,
+            root_version: 1,
+            target: None,
+        })
+    }
+
+    async fn fetch_root(&self) -> Result<TufRootMetadata, SupplyChainVerificationError> {
+        Ok(TufRootMetadata {
+            version: 1,
+            root_hash: String::new(),
+            expires: u64::MAX,
+            key_ids: Vec::new(),
+            threshold: 1,
+        })
+    }
+}
+
+/// No-op Sigstore verifier for testing without external dependencies.
+#[derive(Debug, Default)]
+pub struct NoOpSigstoreVerifier;
+
+#[async_trait]
+impl SigstoreVerifier for NoOpSigstoreVerifier {
+    async fn verify_bundle(
+        &self,
+        _bundle: &SigstoreBundle,
+        _artifact_hash: &str,
+        _trusted_identities: &[String],
+        _trusted_issuers: &[String],
+    ) -> Result<SigstoreVerificationResult, SupplyChainVerificationError> {
+        Ok(SigstoreVerificationResult {
+            verified: true,
+            identity: None,
+            issuer: None,
+            rekor_log_index: None,
+        })
+    }
+}
+
+/// Mock transparency log verifier for controlled testing.
+#[derive(Debug, Default)]
+pub struct MockTransparencyVerifier {
+    /// Entries to accept as valid.
+    pub valid_entries: std::sync::Mutex<HashMap<String, TransparencyLogEntry>>,
+}
+
+impl MockTransparencyVerifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_valid_entry(&self, entry_hash: String, entry: TransparencyLogEntry) {
+        self.valid_entries
+            .lock()
+            .unwrap()
+            .insert(entry_hash, entry);
+    }
+}
+
+#[async_trait]
+impl TransparencyLogVerifier for MockTransparencyVerifier {
+    async fn verify_entry(
+        &self,
+        entry_hash: &str,
+        _expected_entry: Option<&TransparencyLogEntry>,
+    ) -> Result<TransparencyVerificationResult, SupplyChainVerificationError> {
+        let entries = self.valid_entries.lock().unwrap();
+        if let Some(entry) = entries.get(entry_hash) {
+            Ok(TransparencyVerificationResult {
+                verified: true,
+                log_index: Some(entry.log_index),
+                logged_at: Some(0),
+            })
+        } else {
+            Err(SupplyChainVerificationError::TransparencyEntryNotFound)
+        }
+    }
+}
+
+/// Mock TUF verifier for controlled testing.
+#[derive(Debug)]
+pub struct MockTufVerifier {
+    /// Root metadata to return.
+    pub root: TufRootMetadata,
+    /// Targets to accept as valid.
+    pub valid_targets: std::sync::Mutex<HashMap<String, TufTargetInfo>>,
+}
+
+impl MockTufVerifier {
+    pub fn new(root: TufRootMetadata) -> Self {
+        Self {
+            root,
+            valid_targets: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn add_valid_target(&self, path: String, target: TufTargetInfo) {
+        self.valid_targets.lock().unwrap().insert(path, target);
+    }
+}
+
+#[async_trait]
+impl TufVerifier for MockTufVerifier {
+    async fn verify_target(
+        &self,
+        pinned_root: &TufRootMetadata,
+        target_path: &str,
+    ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
+        // Check root hash matches
+        if pinned_root.root_hash != self.root.root_hash {
+            return Err(SupplyChainVerificationError::TufRootMismatch {
+                expected: pinned_root.root_hash.clone(),
+                actual: self.root.root_hash.clone(),
+            });
+        }
+        // Check for rollback
+        if self.root.version < pinned_root.version {
+            return Err(SupplyChainVerificationError::TufRollback {
+                current: pinned_root.version,
+                got: self.root.version,
+            });
+        }
+
+        let targets = self.valid_targets.lock().unwrap();
+        if let Some(target) = targets.get(target_path) {
+            Ok(TufVerificationResult {
+                verified: true,
+                root_version: self.root.version,
+                target: Some(target.clone()),
+            })
+        } else {
+            Err(SupplyChainVerificationError::TufTargetNotFound {
+                target: target_path.to_string(),
+            })
+        }
+    }
+
+    async fn fetch_root(&self) -> Result<TufRootMetadata, SupplyChainVerificationError> {
+        Ok(self.root.clone())
+    }
+}
+
+/// Mock Sigstore verifier for controlled testing.
+#[derive(Debug, Default)]
+pub struct MockSigstoreVerifier {
+    /// Bundles to accept as valid (keyed by artifact hash).
+    pub valid_bundles: std::sync::Mutex<HashMap<String, SigstoreVerificationResult>>,
+}
+
+impl MockSigstoreVerifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_valid_bundle(&self, artifact_hash: String, result: SigstoreVerificationResult) {
+        self.valid_bundles
+            .lock()
+            .unwrap()
+            .insert(artifact_hash, result);
+    }
+}
+
+#[async_trait]
+impl SigstoreVerifier for MockSigstoreVerifier {
+    async fn verify_bundle(
+        &self,
+        _bundle: &SigstoreBundle,
+        artifact_hash: &str,
+        trusted_identities: &[String],
+        trusted_issuers: &[String],
+    ) -> Result<SigstoreVerificationResult, SupplyChainVerificationError> {
+        let bundles = self.valid_bundles.lock().unwrap();
+        if let Some(result) = bundles.get(artifact_hash) {
+            // Verify identity if specified
+            if let Some(identity) = &result.identity {
+                if !trusted_identities.is_empty() && !trusted_identities.contains(identity) {
+                    return Err(SupplyChainVerificationError::SigstoreIdentityMismatch {
+                        expected: trusted_identities.join(","),
+                        actual: identity.clone(),
+                    });
+                }
+            }
+            // Verify issuer if specified
+            if let Some(issuer) = &result.issuer {
+                if !trusted_issuers.is_empty() && !trusted_issuers.contains(issuer) {
+                    return Err(SupplyChainVerificationError::SigstoreIssuerUntrusted {
+                        issuer: issuer.clone(),
+                    });
+                }
+            }
+            Ok(result.clone())
+        } else {
+            Err(SupplyChainVerificationError::SigstoreSignatureInvalid)
+        }
+    }
+}
+
 impl VerifiedConnectorBundle {
     #[must_use]
     pub fn report(&self, outcome: &str) -> RegistryVerificationReport {
@@ -2482,6 +2918,498 @@ sig = "base64:{sig_b64}"
 
                 RegistryLogData {
                     reason_code: Some("nonexistent_connector".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Supply-Chain Verification Adapter Tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn mock_transparency_verifier_accepts_valid_entry() {
+        run_registry_test(
+            "mock_transparency_verifier_accepts_valid_entry",
+            "verify",
+            "transparency-adapter",
+            1,
+            || async {
+                let verifier = MockTransparencyVerifier::new();
+                let entry = TransparencyLogEntry {
+                    log_index: 12345,
+                    entry_hash: "sha256:abc123".to_string(),
+                    inclusion_proof: InclusionProof {
+                        root_hash: "sha256:root".to_string(),
+                        tree_size: 10000,
+                        hashes: vec!["sha256:h1".to_string(), "sha256:h2".to_string()],
+                        leaf_index: 12345,
+                    },
+                    signed_entry_timestamp: vec![1, 2, 3, 4],
+                    log_id: "rekor.sigstore.dev".to_string(),
+                };
+                verifier.add_valid_entry("sha256:abc123".to_string(), entry);
+
+                let result = verifier
+                    .verify_entry("sha256:abc123", None)
+                    .await
+                    .expect("entry valid");
+                assert!(result.verified);
+                assert_eq!(result.log_index, Some(12345));
+
+                RegistryLogData {
+                    reason_code: Some("transparency_entry_verified".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_transparency_verifier_rejects_unknown_entry() {
+        run_registry_test(
+            "mock_transparency_verifier_rejects_unknown_entry",
+            "verify",
+            "transparency-adapter",
+            1,
+            || async {
+                let verifier = MockTransparencyVerifier::new();
+
+                let err = verifier
+                    .verify_entry("sha256:unknown", None)
+                    .await
+                    .expect_err("entry not found");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TransparencyEntryNotFound
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("transparency_entry_not_found".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_tuf_verifier_accepts_valid_target() {
+        run_registry_test(
+            "mock_tuf_verifier_accepts_valid_target",
+            "verify",
+            "tuf-adapter",
+            1,
+            || async {
+                let root = TufRootMetadata {
+                    version: 5,
+                    root_hash: "sha256:rootabc".to_string(),
+                    expires: u64::MAX,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+                let verifier = MockTufVerifier::new(root.clone());
+
+                let target = TufTargetInfo {
+                    target_path: "connectors/fcp.test-1.0.0.tar.gz".to_string(),
+                    hash: "sha256:binaryhash".to_string(),
+                    length: 1024,
+                    delegations: vec!["targets".to_string()],
+                };
+                verifier.add_valid_target(
+                    "connectors/fcp.test-1.0.0.tar.gz".to_string(),
+                    target.clone(),
+                );
+
+                let result = verifier
+                    .verify_target(&root, "connectors/fcp.test-1.0.0.tar.gz")
+                    .await
+                    .expect("target valid");
+                assert!(result.verified);
+                assert_eq!(result.root_version, 5);
+                assert!(result.target.is_some());
+
+                RegistryLogData {
+                    reason_code: Some("tuf_target_verified".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_tuf_verifier_rejects_root_mismatch() {
+        run_registry_test(
+            "mock_tuf_verifier_rejects_root_mismatch",
+            "verify",
+            "tuf-adapter",
+            1,
+            || async {
+                let root = TufRootMetadata {
+                    version: 5,
+                    root_hash: "sha256:rootabc".to_string(),
+                    expires: u64::MAX,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+                let verifier = MockTufVerifier::new(root);
+
+                let pinned = TufRootMetadata {
+                    version: 5,
+                    root_hash: "sha256:different".to_string(),
+                    expires: u64::MAX,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+
+                let err = verifier
+                    .verify_target(&pinned, "connectors/fcp.test-1.0.0.tar.gz")
+                    .await
+                    .expect_err("root mismatch");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TufRootMismatch { .. }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("tuf_root_mismatch".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_tuf_verifier_rejects_rollback() {
+        run_registry_test(
+            "mock_tuf_verifier_rejects_rollback",
+            "verify",
+            "tuf-adapter",
+            1,
+            || async {
+                let root = TufRootMetadata {
+                    version: 3,
+                    root_hash: "sha256:rootabc".to_string(),
+                    expires: u64::MAX,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+                let verifier = MockTufVerifier::new(root);
+
+                // Pinned root has higher version (rollback attempt)
+                let pinned = TufRootMetadata {
+                    version: 5,
+                    root_hash: "sha256:rootabc".to_string(),
+                    expires: u64::MAX,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+
+                let err = verifier
+                    .verify_target(&pinned, "connectors/fcp.test-1.0.0.tar.gz")
+                    .await
+                    .expect_err("rollback detected");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TufRollback {
+                        current: 5,
+                        got: 3
+                    }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("tuf_rollback_detected".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_tuf_verifier_rejects_target_not_found() {
+        run_registry_test(
+            "mock_tuf_verifier_rejects_target_not_found",
+            "verify",
+            "tuf-adapter",
+            1,
+            || async {
+                let root = TufRootMetadata {
+                    version: 5,
+                    root_hash: "sha256:rootabc".to_string(),
+                    expires: u64::MAX,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+                let verifier = MockTufVerifier::new(root.clone());
+
+                let err = verifier
+                    .verify_target(&root, "connectors/nonexistent.tar.gz")
+                    .await
+                    .expect_err("target not found");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TufTargetNotFound { .. }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("tuf_target_not_found".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_sigstore_verifier_accepts_valid_bundle() {
+        run_registry_test(
+            "mock_sigstore_verifier_accepts_valid_bundle",
+            "verify",
+            "sigstore-adapter",
+            1,
+            || async {
+                let verifier = MockSigstoreVerifier::new();
+                let result = SigstoreVerificationResult {
+                    verified: true,
+                    identity: Some("github-actions".to_string()),
+                    issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+                    rekor_log_index: Some(54321),
+                };
+                verifier.add_valid_bundle("sha256:artifact".to_string(), result);
+
+                let bundle = SigstoreBundle {
+                    signature: "base64sig".to_string(),
+                    certificate: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
+                        .to_string(),
+                    rekor_entry: None,
+                    identity: "github-actions".to_string(),
+                    issuer: "https://token.actions.githubusercontent.com".to_string(),
+                };
+
+                let result = verifier
+                    .verify_bundle(
+                        &bundle,
+                        "sha256:artifact",
+                        &["github-actions".to_string()],
+                        &["https://token.actions.githubusercontent.com".to_string()],
+                    )
+                    .await
+                    .expect("bundle valid");
+                assert!(result.verified);
+                assert_eq!(result.identity, Some("github-actions".to_string()));
+                assert_eq!(result.rekor_log_index, Some(54321));
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_bundle_verified".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_sigstore_verifier_rejects_untrusted_identity() {
+        run_registry_test(
+            "mock_sigstore_verifier_rejects_untrusted_identity",
+            "verify",
+            "sigstore-adapter",
+            1,
+            || async {
+                let verifier = MockSigstoreVerifier::new();
+                let result = SigstoreVerificationResult {
+                    verified: true,
+                    identity: Some("untrusted-ci".to_string()),
+                    issuer: Some("https://example.com".to_string()),
+                    rekor_log_index: Some(54321),
+                };
+                verifier.add_valid_bundle("sha256:artifact".to_string(), result);
+
+                let bundle = SigstoreBundle {
+                    signature: "base64sig".to_string(),
+                    certificate: "cert".to_string(),
+                    rekor_entry: None,
+                    identity: "untrusted-ci".to_string(),
+                    issuer: "https://example.com".to_string(),
+                };
+
+                let err = verifier
+                    .verify_bundle(
+                        &bundle,
+                        "sha256:artifact",
+                        &["github-actions".to_string()],
+                        &[],
+                    )
+                    .await
+                    .expect_err("identity mismatch");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::SigstoreIdentityMismatch { .. }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_identity_mismatch".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_sigstore_verifier_rejects_untrusted_issuer() {
+        run_registry_test(
+            "mock_sigstore_verifier_rejects_untrusted_issuer",
+            "verify",
+            "sigstore-adapter",
+            1,
+            || async {
+                let verifier = MockSigstoreVerifier::new();
+                let result = SigstoreVerificationResult {
+                    verified: true,
+                    identity: Some("github-actions".to_string()),
+                    issuer: Some("https://untrusted-issuer.com".to_string()),
+                    rekor_log_index: Some(54321),
+                };
+                verifier.add_valid_bundle("sha256:artifact".to_string(), result);
+
+                let bundle = SigstoreBundle {
+                    signature: "base64sig".to_string(),
+                    certificate: "cert".to_string(),
+                    rekor_entry: None,
+                    identity: "github-actions".to_string(),
+                    issuer: "https://untrusted-issuer.com".to_string(),
+                };
+
+                let err = verifier
+                    .verify_bundle(
+                        &bundle,
+                        "sha256:artifact",
+                        &[],
+                        &["https://token.actions.githubusercontent.com".to_string()],
+                    )
+                    .await
+                    .expect_err("issuer untrusted");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::SigstoreIssuerUntrusted { .. }
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_issuer_untrusted".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_sigstore_verifier_rejects_invalid_signature() {
+        run_registry_test(
+            "mock_sigstore_verifier_rejects_invalid_signature",
+            "verify",
+            "sigstore-adapter",
+            1,
+            || async {
+                let verifier = MockSigstoreVerifier::new();
+                // No valid bundles added
+
+                let bundle = SigstoreBundle {
+                    signature: "bad_sig".to_string(),
+                    certificate: "cert".to_string(),
+                    rekor_entry: None,
+                    identity: "github-actions".to_string(),
+                    issuer: "https://token.actions.githubusercontent.com".to_string(),
+                };
+
+                let err = verifier
+                    .verify_bundle(&bundle, "sha256:unknown_artifact", &[], &[])
+                    .await
+                    .expect_err("signature invalid");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::SigstoreSignatureInvalid
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("sigstore_signature_invalid".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn noop_verifiers_always_succeed() {
+        run_registry_test(
+            "noop_verifiers_always_succeed",
+            "verify",
+            "noop-adapters",
+            3,
+            || async {
+                // Test NoOp Transparency verifier
+                let transparency = NoOpTransparencyVerifier;
+                let result = transparency
+                    .verify_entry("any_hash", None)
+                    .await
+                    .expect("noop always succeeds");
+                assert!(result.verified);
+
+                // Test NoOp TUF verifier
+                let tuf = NoOpTufVerifier;
+                let pinned = TufRootMetadata {
+                    version: 1,
+                    root_hash: String::new(),
+                    expires: 0,
+                    key_ids: Vec::new(),
+                    threshold: 1,
+                };
+                let result = tuf
+                    .verify_target(&pinned, "any/target")
+                    .await
+                    .expect("noop always succeeds");
+                assert!(result.verified);
+                let root = tuf.fetch_root().await.expect("noop returns default root");
+                assert_eq!(root.version, 1);
+
+                // Test NoOp Sigstore verifier
+                let sigstore = NoOpSigstoreVerifier;
+                let bundle = SigstoreBundle {
+                    signature: String::new(),
+                    certificate: String::new(),
+                    rekor_entry: None,
+                    identity: String::new(),
+                    issuer: String::new(),
+                };
+                let result = sigstore
+                    .verify_bundle(&bundle, "any_hash", &[], &[])
+                    .await
+                    .expect("noop always succeeds");
+                assert!(result.verified);
+
+                RegistryLogData {
+                    reason_code: Some("noop_verifiers_succeed".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_verification_config_defaults() {
+        run_registry_test(
+            "supply_chain_verification_config_defaults",
+            "config",
+            "supply-chain",
+            1,
+            || async {
+                let config = SupplyChainVerificationConfig::default();
+                assert!(config.tuf_pinned_root.is_none());
+                assert!(config.trusted_sigstore_identities.is_empty());
+                assert!(config.trusted_sigstore_issuers.is_empty());
+                assert!(!config.require_transparency);
+                assert!(!config.require_tuf);
+                assert!(!config.require_sigstore);
+
+                RegistryLogData {
+                    reason_code: Some("config_defaults_correct".to_string()),
                     ..RegistryLogData::default()
                 }
             },
