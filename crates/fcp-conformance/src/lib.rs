@@ -19,17 +19,9 @@
 
 #![forbid(unsafe_code)]
 
-pub mod interop;
-pub mod schemas;
 pub mod vectors;
 
 // Re-export vector types for convenience
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;
 pub use vectors::session::SessionGoldenVector;
-
-// Re-export interop types for convenience
-pub use interop::{
-    CapabilityInteropTests, CrossZoneInteropTests, FcpcInteropTests, FcpsInteropTests,
-    InteropTestSummary, SessionInteropTests, TestFailure, run_all as run_all_interop_tests,
-};
