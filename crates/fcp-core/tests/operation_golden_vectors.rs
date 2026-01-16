@@ -9,10 +9,10 @@
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    is_intent_orphaned, required_idempotency_for_safety_tier, validate_receipt_intent_binding,
     IdempotencyClass, IdempotencyEntry, IntentStatus, NodeId, NodeSignature, ObjectHeader,
     ObjectId, OperationIntent, OperationReceipt, OperationValidationError, Provenance,
-    TailscaleNodeId, ZoneId,
+    TailscaleNodeId, ZoneId, is_intent_orphaned, required_idempotency_for_safety_tier,
+    validate_receipt_intent_binding,
 };
 use semver::Version;
 use uuid::Uuid;
@@ -121,7 +121,10 @@ mod cbor_golden_vectors {
         // Verify all fields match
         assert_eq!(receipt.request_object_id, restored.request_object_id);
         assert_eq!(receipt.idempotency_key, restored.idempotency_key);
-        assert_eq!(receipt.outcome_object_ids.len(), restored.outcome_object_ids.len());
+        assert_eq!(
+            receipt.outcome_object_ids.len(),
+            restored.outcome_object_ids.len()
+        );
         assert_eq!(
             receipt.resource_object_ids.len(),
             restored.resource_object_ids.len()
@@ -688,7 +691,10 @@ mod fault_injection_tests {
         // No receipt exists
 
         let is_orphaned = is_intent_orphaned(&intent, false, 5000, orphan_threshold_secs);
-        assert!(is_orphaned, "Intent without receipt past threshold is orphaned");
+        assert!(
+            is_orphaned,
+            "Intent without receipt past threshold is orphaned"
+        );
     }
 
     #[test]
@@ -1098,7 +1104,10 @@ mod edge_cases {
 
         let restored: OperationIntent =
             ciborium::from_reader(&cbor[..]).expect("should deserialize");
-        assert_eq!(restored.idempotency_key.as_ref().map(String::len), Some(10000));
+        assert_eq!(
+            restored.idempotency_key.as_ref().map(String::len),
+            Some(10000)
+        );
     }
 
     #[test]

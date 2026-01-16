@@ -9,23 +9,23 @@
 //!
 //! # Test Categories
 //!
-//! 1. **AuditEvent Chain**: Hash linking, seq monotonicity, follows() semantics
-//! 2. **AuditHead**: Quorum signature requirements
-//! 3. **ZoneCheckpoint**: Multi-head binding validation
-//! 4. **DecisionReceipt**: Content addressing, evidence, explainability
+//! 1. **`AuditEvent` Chain**: Hash linking, seq monotonicity, `follows()` semantics
+//! 2. **`AuditHead`**: Quorum signature requirements
+//! 3. **`ZoneCheckpoint`**: Multi-head binding validation
+//! 4. **`DecisionReceipt`**: Content addressing, evidence, explainability
 //! 5. **Fork Detection**: Same seq different id detection
-//! 6. **TraceContext**: Propagation and preservation
+//! 6. **`TraceContext`**: Propagation and preservation
 
 use std::fs;
 use std::path::PathBuf;
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    AuditEvent, AuditHead, CorrelationId, Decision, DecisionReceipt, EpochId, NodeId,
-    NodeSignature, ObjectHeader, ObjectId, PrincipalId, Provenance, SignatureSet,
-    TraceContext, ZoneCheckpoint, ZoneId, EVENT_AUDIT_FORK_DETECTED, EVENT_CAPABILITY_INVOKE,
-    EVENT_DECLASSIFICATION_GRANTED, EVENT_ELEVATION_GRANTED, EVENT_REVOCATION_ISSUED,
-    EVENT_SECRET_ACCESS, EVENT_SECURITY_VIOLATION, EVENT_ZONE_TRANSITION,
+    AuditEvent, AuditHead, CorrelationId, Decision, DecisionReceipt, EVENT_AUDIT_FORK_DETECTED,
+    EVENT_CAPABILITY_INVOKE, EVENT_DECLASSIFICATION_GRANTED, EVENT_ELEVATION_GRANTED,
+    EVENT_REVOCATION_ISSUED, EVENT_SECRET_ACCESS, EVENT_SECURITY_VIOLATION, EVENT_ZONE_TRANSITION,
+    EpochId, NodeId, NodeSignature, ObjectHeader, ObjectId, PrincipalId, Provenance, SignatureSet,
+    TraceContext, ZoneCheckpoint, ZoneId,
 };
 use semver::Version;
 use uuid::Uuid;
@@ -72,12 +72,12 @@ impl TestLogEntry {
         self
     }
 
-    fn with_chain_seq(mut self, seq: u64) -> Self {
+    const fn with_chain_seq(mut self, seq: u64) -> Self {
         self.chain_seq = Some(seq);
         self
     }
 
-    fn with_checkpoint_seq(mut self, seq: u64) -> Self {
+    const fn with_checkpoint_seq(mut self, seq: u64) -> Self {
         self.checkpoint_seq = Some(seq);
         self
     }
@@ -141,7 +141,7 @@ fn test_object_id(name: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(name.as_bytes())
 }
 
-fn test_correlation_id(id: u8) -> CorrelationId {
+const fn test_correlation_id(id: u8) -> CorrelationId {
     CorrelationId(Uuid::from_bytes([id; 16]))
 }
 
@@ -150,9 +150,10 @@ fn test_epoch() -> EpochId {
 }
 
 fn create_audit_event(seq: u64, prev: Option<ObjectId>) -> AuditEvent {
+    let seq_u8 = u8::try_from(seq).expect("seq fits in u8 for test vectors");
     AuditEvent {
         header: test_header("AuditEvent"),
-        correlation_id: test_correlation_id(seq as u8),
+        correlation_id: test_correlation_id(seq_u8),
         trace_context: None,
         event_type: EVENT_CAPABILITY_INVOKE.to_string(),
         actor: test_actor(),
@@ -172,9 +173,10 @@ fn create_audit_event(seq: u64, prev: Option<ObjectId>) -> AuditEvent {
 fn create_signature_set(count: usize) -> SignatureSet {
     let mut set = SignatureSet::new();
     for i in 0..count {
+        let byte = u8::try_from(i).expect("signature index fits in u8");
         set.add(NodeSignature::new(
             NodeId::new(format!("node-{i:02}")),
-            [i as u8; 64],
+            [byte; 64],
             1_700_000_000 + i as u64,
         ));
     }
@@ -316,7 +318,10 @@ fn test_audit_event_seq_monotonicity() {
     for i in 1..chain.len() {
         let (curr, _) = &chain[i];
         let (prev, prev_id) = &chain[i - 1];
-        assert!(curr.follows(prev, prev_id), "Chain should be continuous at {i}");
+        assert!(
+            curr.follows(prev, prev_id),
+            "Chain should be continuous at {i}"
+        );
     }
 
     log = log.with_chain_seq(9).verify().pass();
@@ -488,8 +493,7 @@ fn test_audit_head_quorum_signatures() {
     assert_eq!(head.quorum_signatures.len(), 3);
 
     // Verify signature set can be iterated
-    let sigs: Vec<_> = head.quorum_signatures.iter().collect();
-    assert_eq!(sigs.len(), 3);
+    assert_eq!(head.quorum_signatures.iter().count(), 3);
 
     log = log.verify().pass();
     log.log();
@@ -512,7 +516,7 @@ fn test_audit_head_empty_signatures_rejected() {
     // Empty signature set should have zero length
     assert_eq!(head.quorum_signatures.len(), 0);
     // Coverage should reflect no signatures
-    assert_eq!(head.coverage, 0.0);
+    assert!(head.coverage.abs() < f64::EPSILON);
 
     log = log.verify().pass();
     log.log();
@@ -708,7 +712,7 @@ fn test_decision_receipt_evidence_present() {
         request_object_id: test_object_id("request-3"),
         decision: Decision::Deny,
         reason_code: "INSUFFICIENT_INTEGRITY".to_string(),
-        evidence: evidence.clone(),
+        evidence,
         explanation: None,
         signature: test_signature("node-1", 1_700_000_000),
     };
@@ -755,7 +759,9 @@ fn test_decision_receipt_golden_vector() {
             test_object_id("tainted-input"),
             test_object_id("sanitizer-required"),
         ],
-        explanation: Some("Operation denied due to PUBLIC_INPUT taint without sanitizer".to_string()),
+        explanation: Some(
+            "Operation denied due to PUBLIC_INPUT taint without sanitizer".to_string(),
+        ),
         signature: test_signature("node-1", 1_700_000_000),
     };
 
@@ -894,7 +900,7 @@ fn test_audit_event_with_trace_context() {
     };
 
     let mut event = create_audit_event(0, None);
-    event.trace_context = Some(trace.clone());
+    event.trace_context = Some(trace);
 
     assert!(event.trace_context.is_some());
     let tc = event.trace_context.as_ref().unwrap();
@@ -911,7 +917,10 @@ fn test_audit_event_without_trace_context() {
 
     let event = create_audit_event(0, None);
 
-    assert!(event.trace_context.is_none(), "Default event has no trace context");
+    assert!(
+        event.trace_context.is_none(),
+        "Default event has no trace context"
+    );
 
     log = log.verify().pass();
     log.log();

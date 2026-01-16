@@ -1,0 +1,27 @@
+{
+  "zone_id": "z:work",
+  "proposed_seq": 42,
+  "prev_checkpoint_id": "8b30a17e24754c6966232c65f7ff7ba97a13465753c97675ccd00fb09f68d207",
+  "audit_head_id": "f5fb31518b1b2c24992d683a38dfafdf96908f1d08ff9a43d2b59b32e195dd0d",
+  "audit_head_seq": 420,
+  "revocation_head_id": "f27ed9f2bd812113518c9821636c67b2bac1af0c0901e40d0d2a2c178cf95c53",
+  "revocation_head_seq": 210,
+  "zone_definition_head": "5847a44b06144f2d269e25739beea790f5d377f67a147e0450301049dd02fca3",
+  "zone_policy_head": "229fb5b00845a0081c499991bd51114d576c572583f59c928258b51891162736",
+  "active_zone_key_manifest": "d7f51f97842f3732a5bdfedecc9039e360652de190863a61a2d9ebf29f1b0053",
+  "epoch_id": "epoch-test-42",
+  "proposed_at": 1700002520,
+  "coordinator": "coordinator",
+  "coordinator_signature": {
+    "node_id": "coordinator",
+    "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "signed_at": 1700002520
+  },
+  "triggers": [
+    {
+      "type": "time_elapsed",
+      "elapsed_secs": 65,
+      "threshold_secs": 60
+    }
+  ]
+}

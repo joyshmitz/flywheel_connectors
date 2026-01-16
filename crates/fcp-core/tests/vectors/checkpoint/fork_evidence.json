@@ -1,0 +1,18 @@
+{
+  "zone_id": "z:work",
+  "conflicting_seq": 100,
+  "checkpoint_a": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "checkpoint_b": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "detected_at": 1700000000,
+  "detected_by": "detector-node",
+  "signers_a": [
+    "alice",
+    "bob",
+    "charlie"
+  ],
+  "signers_b": [
+    "bob",
+    "david",
+    "eve"
+  ]
+}

@@ -75,7 +75,7 @@ impl TestLogEntry {
         self
     }
 
-    fn with_lease_seq(mut self, seq: u64) -> Self {
+    const fn with_lease_seq(mut self, seq: u64) -> Self {
         self.lease_seq = Some(seq);
         self
     }
@@ -100,7 +100,7 @@ impl TestLogEntry {
         self
     }
 
-    fn timing(mut self, us: u64) -> Self {
+    const fn timing(mut self, us: u64) -> Self {
         self.timing_us = us;
         self
     }
@@ -110,6 +110,7 @@ impl TestLogEntry {
         self
     }
 
+    #[allow(dead_code)]
     fn fail(mut self) -> Self {
         self.result = "fail".to_string();
         self
@@ -208,11 +209,15 @@ fn vectors_dir() -> PathBuf {
         .join("operation")
 }
 
+fn elapsed_micros_u64(start: &std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Golden Vector Structures
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Golden vector for OperationIntent canonical CBOR.
+/// Golden vector for `OperationIntent` canonical CBOR.
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct IntentGoldenVector {
     description: String,
@@ -225,7 +230,7 @@ struct IntentGoldenVector {
     signable_bytes_hex: String,
 }
 
-/// Golden vector for OperationReceipt canonical CBOR.
+/// Golden vector for `OperationReceipt` canonical CBOR.
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct ReceiptGoldenVector {
     description: String,
@@ -259,14 +264,16 @@ struct IdempotencyKeyVector {
 #[test]
 fn test_intent_schema_id_correctness() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_intent_schema_id_correctness", "schema_verify").execute();
+    let mut log = TestLogEntry::new("test_intent_schema_id_correctness", "schema_verify").execute();
 
     let intent = create_test_intent(Some("key-1"), Some(42));
     let schema = &intent.header.schema;
 
     log = log.expect("fcp.operation:intent:1.0.0");
-    log = log.actual(&format!("{}:{}:{}", schema.namespace, schema.name, schema.version));
+    log = log.actual(&format!(
+        "{}:{}:{}",
+        schema.namespace, schema.name, schema.version
+    ));
 
     assert_eq!(schema.namespace, "fcp.operation");
     assert_eq!(schema.name, "intent");
@@ -274,7 +281,7 @@ fn test_intent_schema_id_correctness() {
     assert_eq!(schema.version.minor, 0);
     assert_eq!(schema.version.patch, 0);
 
-    log = log.timing(start.elapsed().as_micros() as u64).verify().pass();
+    log = log.timing(elapsed_micros_u64(&start)).verify().pass();
     log.log();
 }
 
@@ -288,13 +295,16 @@ fn test_receipt_schema_id_correctness() {
     let schema = &receipt.header.schema;
 
     log = log.expect("fcp.operation:receipt:1.0.0");
-    log = log.actual(&format!("{}:{}:{}", schema.namespace, schema.name, schema.version));
+    log = log.actual(&format!(
+        "{}:{}:{}",
+        schema.namespace, schema.name, schema.version
+    ));
 
     assert_eq!(schema.namespace, "fcp.operation");
     assert_eq!(schema.name, "receipt");
     assert_eq!(schema.version.major, 1);
 
-    log = log.timing(start.elapsed().as_micros() as u64).verify().pass();
+    log = log.timing(elapsed_micros_u64(&start)).verify().pass();
     log.log();
 }
 
@@ -323,7 +333,7 @@ fn test_intent_required_fields_present() {
     log = log
         .expect("all_required_fields_present")
         .actual("all_required_fields_present")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -351,7 +361,7 @@ fn test_receipt_required_fields_present() {
     log = log
         .expect("all_required_fields_present")
         .actual("all_required_fields_present")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -405,7 +415,7 @@ fn test_intent_signable_bytes_golden_vector() {
 
     log = log
         .expect("deterministic_signable_bytes")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -414,9 +424,11 @@ fn test_intent_signable_bytes_golden_vector() {
 #[test]
 fn test_intent_signable_bytes_without_optional_fields() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_intent_signable_bytes_without_optional_fields", "golden_vector")
-            .execute();
+    let mut log = TestLogEntry::new(
+        "test_intent_signable_bytes_without_optional_fields",
+        "golden_vector",
+    )
+    .execute();
 
     let intent = create_test_intent(None, None);
     let signable = intent.signable_bytes();
@@ -436,7 +448,10 @@ fn test_intent_signable_bytes_without_optional_fields() {
     let vector_path = vectors_dir().join("intent_minimal.json");
     if let Ok(existing) = fs::read_to_string(&vector_path) {
         let existing_vector: IntentGoldenVector = serde_json::from_str(&existing).unwrap();
-        assert_eq!(vector.signable_bytes_hex, existing_vector.signable_bytes_hex);
+        assert_eq!(
+            vector.signable_bytes_hex,
+            existing_vector.signable_bytes_hex
+        );
         log = log.actual("matches_golden_vector");
     } else {
         fs::create_dir_all(vectors_dir()).ok();
@@ -446,7 +461,7 @@ fn test_intent_signable_bytes_without_optional_fields() {
 
     log = log
         .expect("deterministic_signable_bytes")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -478,7 +493,10 @@ fn test_receipt_signable_bytes_golden_vector() {
     let vector_path = vectors_dir().join("receipt_with_outcomes.json");
     if let Ok(existing) = fs::read_to_string(&vector_path) {
         let existing_vector: ReceiptGoldenVector = serde_json::from_str(&existing).unwrap();
-        assert_eq!(vector.signable_bytes_hex, existing_vector.signable_bytes_hex);
+        assert_eq!(
+            vector.signable_bytes_hex,
+            existing_vector.signable_bytes_hex
+        );
         log = log.actual("matches_golden_vector");
     } else {
         fs::create_dir_all(vectors_dir()).ok();
@@ -492,7 +510,7 @@ fn test_receipt_signable_bytes_golden_vector() {
 
     log = log
         .expect("deterministic_signable_bytes")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -517,7 +535,7 @@ impl IdempotencyStore {
     }
 
     /// Execute an operation with idempotency semantics.
-    /// Returns (receipt, was_executed) where was_executed is false on retry.
+    /// Returns (receipt, `was_executed`) where `was_executed` is false on retry.
     fn execute_with_idempotency(
         &self,
         idempotency_key: &str,
@@ -549,7 +567,7 @@ impl IdempotencyStore {
             expires_at: now + 86400, // 24 hours
         };
         entries.insert(idempotency_key.to_string(), entry);
-
+        drop(entries);
         (receipt_id, true)
     }
 
@@ -581,7 +599,11 @@ fn test_same_key_returns_same_receipt_without_reexecution() {
     // Retry with same key
     let (receipt2, executed2) = store.execute_with_idempotency(key, zone.clone(), now + 100);
     assert!(!executed2, "Retry should NOT re-execute");
-    assert_eq!(store.get_execution_count(), 1, "Execution count should not change on retry");
+    assert_eq!(
+        store.get_execution_count(),
+        1,
+        "Execution count should not change on retry"
+    );
 
     // Same receipt returned
     assert_eq!(receipt1, receipt2, "Same receipt must be returned on retry");
@@ -595,7 +617,7 @@ fn test_same_key_returns_same_receipt_without_reexecution() {
     log = log
         .expect("same_receipt_no_reexecution")
         .actual("same_receipt_no_reexecution")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -633,7 +655,7 @@ fn test_different_keys_produce_independent_executions() {
     log = log
         .expect("independent_executions")
         .actual("3_independent_executions")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -669,7 +691,7 @@ fn test_idempotency_key_expiry() {
     log = log
         .expect("expiry_semantics_correct")
         .actual("expiry_semantics_correct")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -698,7 +720,10 @@ fn test_idempotency_key_golden_vector() {
         key: entry.key.clone(),
         zone_id: entry.zone_id.to_string(),
         intent_id_hex: hex::encode(entry.intent_id.as_bytes()),
-        receipt_id_hex: entry.receipt_id.as_ref().map(|id| hex::encode(id.as_bytes())),
+        receipt_id_hex: entry
+            .receipt_id
+            .as_ref()
+            .map(|id| hex::encode(id.as_bytes())),
         status: entry.status.to_string(),
         expires_at: entry.expires_at,
         is_expired_at_now: entry.is_expired(now),
@@ -719,7 +744,7 @@ fn test_idempotency_key_golden_vector() {
 
     log = log
         .expect("idempotency_entry_correct")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -732,8 +757,9 @@ fn test_idempotency_key_golden_vector() {
 #[test]
 fn test_lease_seq_binding() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_lease_seq_binding", "lease_fencing").with_lease_seq(42).execute();
+    let mut log = TestLogEntry::new("test_lease_seq_binding", "lease_fencing")
+        .with_lease_seq(42)
+        .execute();
 
     let intent = create_test_intent(Some("key-1"), Some(42));
 
@@ -754,7 +780,7 @@ fn test_lease_seq_binding() {
     log = log
         .expect("lease_bound_correctly")
         .actual("lease_bound_correctly")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -773,7 +799,10 @@ fn test_stale_lease_holder_detection() {
     // Simulate lease seq check
     let is_stale = intent.lease_seq.is_some() && intent.lease_seq.unwrap() < current_lease_seq;
 
-    assert!(is_stale, "Intent with lease_seq 42 should be stale when current is 43");
+    assert!(
+        is_stale,
+        "Intent with lease_seq 42 should be stale when current is 43"
+    );
 
     // An intent with matching lease_seq should not be stale
     let valid_intent = create_test_intent(Some("key-2"), Some(43));
@@ -784,7 +813,7 @@ fn test_stale_lease_holder_detection() {
     log = log
         .expect("stale_detected")
         .actual("stale_detected")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -793,8 +822,7 @@ fn test_stale_lease_holder_detection() {
 #[test]
 fn test_lease_seq_mismatch_error() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_lease_seq_mismatch_error", "lease_fencing").execute();
+    let mut log = TestLogEntry::new("test_lease_seq_mismatch_error", "lease_fencing").execute();
 
     let error = OperationValidationError::LeaseSeqMismatch {
         expected: 43,
@@ -809,7 +837,7 @@ fn test_lease_seq_mismatch_error() {
     log = log
         .expect("error_formatted_correctly")
         .actual("error_formatted_correctly")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -858,7 +886,7 @@ fn test_orphan_detection_threshold() {
     log = log
         .expect("orphan_detection_correct")
         .actual("orphan_detection_correct")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -867,9 +895,11 @@ fn test_orphan_detection_threshold() {
 #[test]
 fn test_crash_between_intent_and_receipt_scenario() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_crash_between_intent_and_receipt_scenario", "fault_injection")
-            .execute();
+    let mut log = TestLogEntry::new(
+        "test_crash_between_intent_and_receipt_scenario",
+        "fault_injection",
+    )
+    .execute();
 
     // Simulate crash scenario:
     // 1. Intent is stored
@@ -884,7 +914,10 @@ fn test_crash_between_intent_and_receipt_scenario() {
 
     // Check if intent is orphaned (no receipt exists)
     let is_orphaned = is_intent_orphaned(&intent, false, recovery_time, orphan_threshold);
-    assert!(is_orphaned, "Intent should be detected as orphaned on recovery");
+    assert!(
+        is_orphaned,
+        "Intent should be detected as orphaned on recovery"
+    );
 
     // The proper recovery action would be:
     // - Mark intent status as Orphaned
@@ -894,7 +927,7 @@ fn test_crash_between_intent_and_receipt_scenario() {
     log = log
         .expect("crash_recovery_detects_orphan")
         .actual("crash_recovery_detects_orphan")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -919,7 +952,7 @@ fn test_intent_orphan_error_formatting() {
     log = log
         .expect("error_contains_context")
         .actual("error_contains_context")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -928,9 +961,11 @@ fn test_intent_orphan_error_formatting() {
 #[test]
 fn test_idempotency_entry_non_terminal_states() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_idempotency_entry_non_terminal_states", "fault_injection")
-            .execute();
+    let mut log = TestLogEntry::new(
+        "test_idempotency_entry_non_terminal_states",
+        "fault_injection",
+    )
+    .execute();
 
     let mut entry = IdempotencyEntry {
         key: "in-flight-key".to_string(),
@@ -959,7 +994,7 @@ fn test_idempotency_entry_non_terminal_states() {
     log = log
         .expect("non_terminal_states_correct")
         .actual("non_terminal_states_correct")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -983,7 +1018,7 @@ fn test_receipt_intent_binding_success() {
     log = log
         .expect("validation_passes")
         .actual("validation_passes")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1000,12 +1035,15 @@ fn test_receipt_intent_binding_request_mismatch() {
     receipt.request_object_id = test_object_id("different-request");
 
     let result = validate_receipt_intent_binding(&receipt, &intent);
-    assert!(matches!(result, Err(OperationValidationError::RequestMismatch { .. })));
+    assert!(matches!(
+        result,
+        Err(OperationValidationError::RequestMismatch { .. })
+    ));
 
     log = log
         .expect("request_mismatch_detected")
         .actual("request_mismatch_detected")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1022,12 +1060,15 @@ fn test_receipt_intent_binding_zone_mismatch() {
     receipt.header.zone_id = ZoneId::owner(); // Different zone
 
     let result = validate_receipt_intent_binding(&receipt, &intent);
-    assert!(matches!(result, Err(OperationValidationError::ZoneMismatch { .. })));
+    assert!(matches!(
+        result,
+        Err(OperationValidationError::ZoneMismatch { .. })
+    ));
 
     log = log
         .expect("zone_mismatch_detected")
         .actual("zone_mismatch_detected")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1043,12 +1084,15 @@ fn test_receipt_intent_binding_key_mismatch() {
     let receipt = create_test_receipt(Some("key-2"), vec![]); // Different key
 
     let result = validate_receipt_intent_binding(&receipt, &intent);
-    assert!(matches!(result, Err(OperationValidationError::IntentNotFound { .. })));
+    assert!(matches!(
+        result,
+        Err(OperationValidationError::IntentNotFound { .. })
+    ));
 
     log = log
         .expect("key_mismatch_detected")
         .actual("key_mismatch_detected")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1061,9 +1105,11 @@ fn test_receipt_intent_binding_key_mismatch() {
 #[test]
 fn test_dangerous_operations_require_strict_idempotency() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_dangerous_operations_require_strict_idempotency", "safety_tier")
-            .execute();
+    let mut log = TestLogEntry::new(
+        "test_dangerous_operations_require_strict_idempotency",
+        "safety_tier",
+    )
+    .execute();
 
     // Dangerous = true MUST require Strict
     let required = required_idempotency_for_safety_tier(true, false);
@@ -1072,7 +1118,7 @@ fn test_dangerous_operations_require_strict_idempotency() {
     log = log
         .expect("Strict")
         .actual("Strict")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1081,9 +1127,11 @@ fn test_dangerous_operations_require_strict_idempotency() {
 #[test]
 fn test_risky_operations_require_strict_idempotency() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_risky_operations_require_strict_idempotency", "safety_tier")
-            .execute();
+    let mut log = TestLogEntry::new(
+        "test_risky_operations_require_strict_idempotency",
+        "safety_tier",
+    )
+    .execute();
 
     // Risky = true SHOULD require Strict
     let required = required_idempotency_for_safety_tier(false, true);
@@ -1092,7 +1140,7 @@ fn test_risky_operations_require_strict_idempotency() {
     log = log
         .expect("Strict")
         .actual("Strict")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1101,8 +1149,8 @@ fn test_risky_operations_require_strict_idempotency() {
 #[test]
 fn test_safe_operations_allow_any_idempotency() {
     let start = std::time::Instant::now();
-    let mut log = TestLogEntry::new("test_safe_operations_allow_any_idempotency", "safety_tier")
-        .execute();
+    let mut log =
+        TestLogEntry::new("test_safe_operations_allow_any_idempotency", "safety_tier").execute();
 
     // Safe operations don't require idempotency
     let required = required_idempotency_for_safety_tier(false, false);
@@ -1111,7 +1159,7 @@ fn test_safe_operations_allow_any_idempotency() {
     log = log
         .expect("None")
         .actual("None")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1143,7 +1191,7 @@ fn test_concurrent_same_key_only_one_executes() {
     // Only first should execute
     assert!(results[0].1, "First request should execute");
     for (i, (_, executed)) in results.iter().enumerate().skip(1) {
-        assert!(!executed, "Request {} should not execute", i);
+        assert!(!executed, "Request {i} should not execute");
     }
 
     // All should return the same receipt
@@ -1158,7 +1206,7 @@ fn test_concurrent_same_key_only_one_executes() {
     log = log
         .expect("single_execution")
         .actual("single_execution")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1167,9 +1215,11 @@ fn test_concurrent_same_key_only_one_executes() {
 #[test]
 fn test_signable_bytes_deterministic_across_multiple_calls() {
     let start = std::time::Instant::now();
-    let mut log =
-        TestLogEntry::new("test_signable_bytes_deterministic_across_multiple_calls", "concurrency")
-            .execute();
+    let mut log = TestLogEntry::new(
+        "test_signable_bytes_deterministic_across_multiple_calls",
+        "concurrency",
+    )
+    .execute();
 
     let intent = create_test_intent(Some("deterministic-key"), Some(100));
 
@@ -1180,15 +1230,14 @@ fn test_signable_bytes_deterministic_across_multiple_calls() {
     for (i, b) in bytes.iter().enumerate().skip(1) {
         assert_eq!(
             bytes[0], *b,
-            "Signable bytes at iteration {} differ from first",
-            i
+            "Signable bytes at iteration {i} differ from first"
         );
     }
 
     log = log
         .expect("all_identical")
         .actual("all_identical")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1228,7 +1277,7 @@ fn test_intent_status_transitions() {
     log = log
         .expect("all_statuses_serialize_correctly")
         .actual("all_statuses_serialize_correctly")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();
@@ -1285,7 +1334,7 @@ fn test_all_validation_errors_are_displayable() {
     log = log
         .expect("all_errors_displayable")
         .actual("all_errors_displayable")
-        .timing(start.elapsed().as_micros() as u64)
+        .timing(elapsed_micros_u64(&start))
         .verify()
         .pass();
     log.log();

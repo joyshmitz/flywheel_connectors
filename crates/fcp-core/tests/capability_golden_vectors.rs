@@ -7,9 +7,9 @@
 
 use chrono::{Duration, Utc};
 use fcp_core::{
-    validate_canonical_id, CapabilityConstraints, CapabilityId, CapabilityToken,
-    CapabilityVerifier, ConnectorId, FcpError, IdValidationError, InstanceId, OperationId,
-    PrincipalId, ZoneId, ZoneIdError,
+    CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    FcpError, IdValidationError, InstanceId, OperationId, PrincipalId, ZoneId, ZoneIdError,
+    validate_canonical_id,
 };
 use fcp_crypto::cose::{CapabilityTokenBuilder, CoseToken, CwtClaims, fcp2_claims};
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -222,10 +222,7 @@ mod token_field_validation {
             .expiration(now + Duration::hours(1));
 
         let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
@@ -233,8 +230,7 @@ mod token_field_validation {
         let result = verifier.verify(&token, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::MissingField { .. })),
-            "missing zone_id should fail verification: {:?}",
-            result
+            "missing zone_id should fail verification: {result:?}"
         );
     }
 
@@ -254,10 +250,7 @@ mod token_field_validation {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         // Verifier expects z:work
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
@@ -266,8 +259,7 @@ mod token_field_validation {
         let result = verifier.verify(&token, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::ZoneViolation { .. })),
-            "zone mismatch should fail: {:?}",
-            result
+            "zone mismatch should fail: {result:?}"
         );
     }
 
@@ -287,10 +279,7 @@ mod token_field_validation {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.write"); // Not granted
@@ -298,8 +287,7 @@ mod token_field_validation {
         let result = verifier.verify(&token, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
-            "ungrated operation should fail: {:?}",
-            result
+            "ungranted operation should fail: {result:?}"
         );
     }
 
@@ -319,10 +307,7 @@ mod token_field_validation {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
 
@@ -344,13 +329,13 @@ mod resource_constraints {
 
     fn create_token_with_constraints(
         sk: &Ed25519SigningKey,
-        constraints: CapabilityConstraints,
+        constraints: &CapabilityConstraints,
     ) -> CapabilityToken {
         let now = Utc::now();
 
         // Serialize constraints
         let mut constraints_bytes = Vec::new();
-        ciborium::into_writer(&constraints, &mut constraints_bytes).unwrap();
+        ciborium::into_writer(constraints, &mut constraints_bytes).unwrap();
         let constraints_val: ciborium::Value =
             ciborium::from_reader(&constraints_bytes[..]).unwrap();
 
@@ -365,10 +350,7 @@ mod resource_constraints {
             .custom(fcp2_claims::CONSTRAINTS, constraints_val);
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        }
+        CapabilityToken { raw: cose_token }
     }
 
     #[test]
@@ -384,7 +366,7 @@ mod resource_constraints {
             idempotency_key: None,
         };
 
-        let token = create_token_with_constraints(&sk, constraints);
+        let token = create_token_with_constraints(&sk, &constraints);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
 
@@ -396,8 +378,7 @@ mod resource_constraints {
         let result = verifier.verify(&token, &op, &["/private/secrets".into()]);
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
-            "disallowed resource should fail: {:?}",
-            result
+            "disallowed resource should fail: {result:?}"
         );
     }
 
@@ -414,7 +395,7 @@ mod resource_constraints {
             idempotency_key: None,
         };
 
-        let token = create_token_with_constraints(&sk, constraints);
+        let token = create_token_with_constraints(&sk, &constraints);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
 
@@ -426,8 +407,7 @@ mod resource_constraints {
         let result = verifier.verify(&token, &op, &["/admin/users".into()]);
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
-            "denied resource should fail: {:?}",
-            result
+            "denied resource should fail: {result:?}"
         );
     }
 
@@ -444,7 +424,7 @@ mod resource_constraints {
             idempotency_key: None,
         };
 
-        let token = create_token_with_constraints(&sk, constraints);
+        let token = create_token_with_constraints(&sk, &constraints);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
 
@@ -464,8 +444,7 @@ mod resource_constraints {
         );
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
-            "mixed resources should fail: {:?}",
-            result
+            "mixed resources should fail: {result:?}"
         );
     }
 }
@@ -814,10 +793,7 @@ mod adversarial_attacks {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         // Verifier enforces z:owner
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::owner(), InstanceId::new());
@@ -826,8 +802,7 @@ mod adversarial_attacks {
         let result = verifier.verify(&token, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::ZoneViolation { .. })),
-            "zone escalation should fail: {:?}",
-            result
+            "zone escalation should fail: {result:?}"
         );
     }
 
@@ -848,10 +823,7 @@ mod adversarial_attacks {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
 
@@ -860,8 +832,7 @@ mod adversarial_attacks {
         let result = verifier.verify(&token, &op_write, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
-            "operation escalation should fail: {:?}",
-            result
+            "operation escalation should fail: {result:?}"
         );
 
         // Attempt to use for delete operation
@@ -869,8 +840,7 @@ mod adversarial_attacks {
         let result = verifier.verify(&token, &op_delete, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
-            "operation escalation should fail: {:?}",
-            result
+            "operation escalation should fail: {result:?}"
         );
     }
 
@@ -893,10 +863,7 @@ mod adversarial_attacks {
             .sign(&old_sk)
             .unwrap();
 
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         // Verifier now uses NEW key
         let verifier = CapabilityVerifier::new(new_pub_bytes, ZoneId::work(), InstanceId::new());
@@ -905,8 +872,7 @@ mod adversarial_attacks {
         let result = verifier.verify(&token, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::InvalidSignature)),
-            "old key should fail after rotation: {:?}",
-            result
+            "old key should fail after rotation: {result:?}"
         );
     }
 
@@ -968,10 +934,7 @@ mod adversarial_attacks {
             .custom(fcp2_claims::CONSTRAINTS, constraints_val);
 
         let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        let token = CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        };
+        let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.read");
@@ -983,8 +946,7 @@ mod adversarial_attacks {
             let result = verifier.verify(&token, &op, &[path.into()]);
             assert!(
                 result.is_err(),
-                "path '{path}' should be blocked: {:?}",
-                result
+                "path '{path}' should be blocked: {result:?}"
             );
         }
 
@@ -1083,7 +1045,7 @@ mod golden_vectors {
 mod grant_verification {
     use super::*;
 
-    /// Helper to create a token with grant_object_ids claim
+    /// Helper to create a token with `grant_object_ids` claim
     fn create_token_with_grants(
         sk: &Ed25519SigningKey,
         grant_ids: &[&[u8]],
@@ -1101,10 +1063,7 @@ mod grant_verification {
             .grant_objects(grant_ids);
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        }
+        CapabilityToken { raw: cose_token }
     }
 
     #[test]
@@ -1301,11 +1260,8 @@ mod checkpoint_freshness {
             .expiration(now + Duration::hours(1))
             .checkpoint(chk_id, chk_seq);
 
-        let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        }
+        let cose_token = CoseToken::sign(sk, &claims).unwrap();
+        CapabilityToken { raw: cose_token }
     }
 
     #[test]
@@ -1366,9 +1322,7 @@ mod checkpoint_freshness {
         // Freshness check: token_seq < local_seq means token is stale
         assert!(
             token_chk_seq < local_seq,
-            "Token sequence {} should be less than local sequence {}",
-            token_chk_seq,
-            local_seq
+            "Token sequence {token_chk_seq} should be less than local sequence {local_seq}"
         );
     }
 
@@ -1393,9 +1347,7 @@ mod checkpoint_freshness {
         // Freshness check: token_seq >= local_seq means token is fresh
         assert!(
             token_chk_seq >= local_seq,
-            "Token sequence {} should be >= local sequence {}",
-            token_chk_seq,
-            local_seq
+            "Token sequence {token_chk_seq} should be >= local sequence {local_seq}"
         );
     }
 
@@ -1429,7 +1381,7 @@ mod checkpoint_freshness {
         let pk = sk.verifying_key();
 
         let chk_id = [0xDEu8; 16];
-        let chk_seq = 999999u64;
+        let chk_seq = 999_999_u64;
 
         let token = create_token_with_checkpoint(&sk, &chk_id, chk_seq);
 
@@ -1512,11 +1464,8 @@ mod checkpoint_freshness {
 mod holder_proof_verification {
     use super::*;
 
-    /// Helper to create a token with holder_node claim
-    fn create_token_with_holder(
-        sk: &Ed25519SigningKey,
-        holder_node: &str,
-    ) -> CapabilityToken {
+    /// Helper to create a token with `holder_node` claim
+    fn create_token_with_holder(sk: &Ed25519SigningKey, holder_node: &str) -> CapabilityToken {
         let now = Utc::now();
         let claims = CwtClaims::new()
             .capability_id("cap.test")
@@ -1528,11 +1477,8 @@ mod holder_proof_verification {
             .expiration(now + Duration::hours(1))
             .holder_node(holder_node);
 
-        let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        }
+        let cose_token = CoseToken::sign(sk, &claims).unwrap();
+        CapabilityToken { raw: cose_token }
     }
 
     #[test]
@@ -1690,11 +1636,8 @@ mod issuer_verification {
             .not_before(now)
             .expiration(now + Duration::hours(1));
 
-        let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        CapabilityToken {
-            raw: cose_token,
-            claims: CwtClaims::new(),
-        }
+        let cose_token = CoseToken::sign(sk, &claims).unwrap();
+        CapabilityToken { raw: cose_token }
     }
 
     #[test]
@@ -1715,7 +1658,7 @@ mod issuer_verification {
         let sk = Ed25519SigningKey::generate();
         let pk = sk.verifying_key();
 
-        let allowed_issuers = vec!["node:primary", "node:secondary", "node:backup"];
+        let allowed_issuers = ["node:primary", "node:secondary", "node:backup"];
         let token_issuer = "node:secondary";
 
         let token = create_token_with_issuer(&sk, token_issuer);
@@ -1726,8 +1669,7 @@ mod issuer_verification {
         // Verify issuer is in allowed set
         assert!(
             allowed_issuers.contains(&issuer),
-            "Issuer '{}' should be in allowed set",
-            issuer
+            "Issuer '{issuer}' should be in allowed set"
         );
     }
 
@@ -1736,7 +1678,7 @@ mod issuer_verification {
         let sk = Ed25519SigningKey::generate();
         let pk = sk.verifying_key();
 
-        let allowed_issuers = vec!["node:primary", "node:secondary"];
+        let allowed_issuers = ["node:primary", "node:secondary"];
         let token_issuer = "node:rogue";
 
         let token = create_token_with_issuer(&sk, token_issuer);
@@ -1747,8 +1689,7 @@ mod issuer_verification {
         // Verify issuer is NOT in allowed set
         assert!(
             !allowed_issuers.contains(&issuer),
-            "Issuer '{}' should NOT be in allowed set",
-            issuer
+            "Issuer '{issuer}' should NOT be in allowed set"
         );
     }
 
@@ -1892,7 +1833,10 @@ mod adversarial_claims_tampering {
         if let Ok(tampered) = CoseToken::from_cbor(&cbor) {
             // Verification should fail due to signature mismatch
             let result = tampered.verify(&pk);
-            assert!(result.is_err(), "tampered grant_object_ids should fail verification");
+            assert!(
+                result.is_err(),
+                "tampered grant_object_ids should fail verification"
+            );
         }
     }
 
@@ -1933,9 +1877,7 @@ mod adversarial_claims_tampering {
 
         assert!(
             token_seq < current_checkpoint_seq,
-            "Rollback attack should be detectable: token seq {} < current {}",
-            token_seq,
-            current_checkpoint_seq
+            "Rollback attack should be detectable: token seq {token_seq} < current {current_checkpoint_seq}"
         );
     }
 
@@ -1944,7 +1886,7 @@ mod adversarial_claims_tampering {
         // Attack: Attacker creates token claiming to be held by another node
         // Defense: Holder must prove possession (not just claim)
         let attacker_sk = Ed25519SigningKey::generate();
-        let attacker_pk = attacker_sk.verifying_key();
+        let attacker_verifying_key = attacker_sk.verifying_key();
 
         // Attacker claims token is for "node:victim"
         let claimed_holder = "node:victim";
@@ -1964,7 +1906,9 @@ mod adversarial_claims_tampering {
         let token = CoseToken::sign(&attacker_sk, &claims).unwrap();
 
         // Token verifies against attacker's key
-        let verified = token.verify(&attacker_pk).expect("should verify with attacker key");
+        let verified = token
+            .verify(&attacker_verifying_key)
+            .expect("should verify with attacker key");
 
         // Holder claim matches victim
         let holder = match verified.get(fcp2_claims::HOLDER_NODE) {
@@ -1977,10 +1921,10 @@ mod adversarial_claims_tampering {
         // Defense: Victim node should verify the token's kid maps to a trusted key
         // The attacker's key would not be in the victim's trust store
         let victim_sk = Ed25519SigningKey::generate();
-        let victim_pk = victim_sk.verifying_key();
+        let victim_verifying_key = victim_sk.verifying_key();
 
         // Victim tries to verify with their own key - FAILS
-        let result = token.verify(&victim_pk);
+        let result = token.verify(&victim_verifying_key);
         assert!(
             result.is_err(),
             "Spoofed token should fail verification with victim's key"
@@ -2010,14 +1954,14 @@ mod adversarial_claims_tampering {
 
         // Verifier has a key lookup for trusted issuers
         let trusted_issuer_sk = Ed25519SigningKey::generate();
-        let trusted_issuer_pk = trusted_issuer_sk.verifying_key();
+        let trusted_issuer_verifying_key = trusted_issuer_sk.verifying_key();
         let trusted_kid = trusted_issuer_sk.key_id();
 
         // Lookup returns None because attacker's kid is not trusted
         let result = fake_token.verify_with_lookup(|k| {
             // Only return key for trusted issuer's kid
             if k.as_bytes() == trusted_kid.as_bytes() {
-                Some(trusted_issuer_pk)
+                Some(trusted_issuer_verifying_key)
             } else {
                 None
             }
@@ -2025,8 +1969,7 @@ mod adversarial_claims_tampering {
 
         assert!(
             result.is_err(),
-            "Impersonation attack should fail: attacker kid {:?} not in trust store",
-            kid
+            "Impersonation attack should fail: attacker kid {kid:?} not in trust store"
         );
     }
 
