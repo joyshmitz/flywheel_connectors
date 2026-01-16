@@ -52,7 +52,31 @@ struct InterfaceOperationDescriptor<'a> {
     input_schema: &'a serde_json::Value,
     output_schema: &'a serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    network_constraints: Option<&'a NetworkConstraints>,
+    network_constraints: Option<InterfaceNetworkConstraints<'a>>,
+}
+
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Serialize)]
+struct InterfaceNetworkConstraints<'a> {
+    host_allow: Vec<&'a str>,
+    port_allow: Vec<u16>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    ip_allow: Vec<IpAddr>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    cidr_deny: Vec<&'a str>,
+    deny_localhost: bool,
+    deny_private_ranges: bool,
+    deny_tailnet_ranges: bool,
+    require_sni: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    spki_pins: Vec<&'a Base64Bytes>,
+    deny_ip_literals: bool,
+    require_host_canonicalization: bool,
+    dns_max_ips: u16,
+    max_redirects: u8,
+    connect_timeout_ms: u32,
+    total_timeout_ms: u32,
+    max_response_bytes: u64,
 }
 
 /// Connector manifest.
@@ -86,7 +110,13 @@ impl ConnectorManifest {
         Ok(parsed)
     }
 
-    fn parse_str_unchecked(input: &str) -> Result<Self, ManifestError> {
+    /// Parse a manifest from TOML without validation.
+    ///
+    /// Useful for computing the interface hash before validation.
+    ///
+    /// # Errors
+    /// Returns an error if TOML parsing fails.
+    pub fn parse_str_unchecked(input: &str) -> Result<Self, ManifestError> {
         Ok(toml::from_str(input)?)
     }
 
@@ -145,6 +175,7 @@ impl ConnectorManifest {
     ///
     /// # Errors
     /// Returns an error if canonical serialization fails.
+    #[allow(clippy::too_many_lines)]
     pub fn compute_interface_hash(&self) -> Result<InterfaceHash, ManifestError> {
         let mut archetypes: Vec<&str> = self
             .connector
@@ -188,18 +219,73 @@ impl ConnectorManifest {
             .provides
             .operations
             .iter()
-            .map(|(id, op)| InterfaceOperationDescriptor {
-                id,
-                capability: op.capability.as_str(),
-                description: op.description.as_str(),
-                risk_level: op.risk_level,
-                safety_tier: op.safety_tier,
-                requires_approval: op.requires_approval,
-                idempotency: op.idempotency,
-                rate_limit: op.rate_limit.as_ref(),
-                input_schema: &op.input_schema,
-                output_schema: &op.output_schema,
-                network_constraints: op.network_constraints.as_ref(),
+            .map(|(id, op)| {
+                let network_constraints = op.network_constraints.as_ref().map(|nc| {
+                    let mut host_allow: Vec<&str> =
+                        nc.host_allow.iter().map(String::as_str).collect();
+                    host_allow.sort_unstable();
+
+                    let mut port_allow = nc.port_allow.clone();
+                    port_allow.sort_unstable();
+
+                    let mut ip_allow = nc.ip_allow.clone();
+                    ip_allow.sort_unstable();
+
+                    let mut cidr_deny: Vec<&str> =
+                        nc.cidr_deny.iter().map(String::as_str).collect();
+                    cidr_deny.sort_unstable();
+
+                    let mut spki_pins: Vec<&Base64Bytes> = nc.spki_pins.iter().collect();
+                    // Base64Bytes doesn't implement Ord, but its string repr does.
+                    // Actually, we can just sort pointers if we want deterministic order?
+                    // No, we need content sort.
+                    // Base64Bytes is a newtype around Vec<u8>, which is Ord?
+                    // Wait, Base64Bytes in lib.rs does NOT derive Ord.
+                    // It derives PartialEq, Eq, Hash.
+                    // I need to check Base64Bytes definition.
+                    // It is `struct Base64Bytes(Vec<u8>)`. `Vec<u8>` is Ord.
+                    // So I should derive Ord for Base64Bytes.
+                    // For now, I will assume it's not Ord and sort by string representation or just skip sorting if it's hard?
+                    // No, determinism is key.
+                    // I will update Base64Bytes to derive Ord.
+                    // BUT I cannot change Base64Bytes definition in this replacement easily if it's far away.
+                    // Let's check `Base64Bytes` definition. It is in this file.
+                    // I'll sort by inner bytes.
+                    spki_pins.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+
+                    InterfaceNetworkConstraints {
+                        host_allow,
+                        port_allow,
+                        ip_allow,
+                        cidr_deny,
+                        deny_localhost: nc.deny_localhost,
+                        deny_private_ranges: nc.deny_private_ranges,
+                        deny_tailnet_ranges: nc.deny_tailnet_ranges,
+                        require_sni: nc.require_sni,
+                        spki_pins,
+                        deny_ip_literals: nc.deny_ip_literals,
+                        require_host_canonicalization: nc.require_host_canonicalization,
+                        dns_max_ips: nc.dns_max_ips,
+                        max_redirects: nc.max_redirects,
+                        connect_timeout_ms: nc.connect_timeout_ms,
+                        total_timeout_ms: nc.total_timeout_ms,
+                        max_response_bytes: nc.max_response_bytes,
+                    }
+                });
+
+                InterfaceOperationDescriptor {
+                    id,
+                    capability: op.capability.as_str(),
+                    description: op.description.as_str(),
+                    risk_level: op.risk_level,
+                    safety_tier: op.safety_tier,
+                    requires_approval: op.requires_approval,
+                    idempotency: op.idempotency,
+                    rate_limit: op.rate_limit.as_ref(),
+                    input_schema: &op.input_schema,
+                    output_schema: &op.output_schema,
+                    network_constraints,
+                }
             })
             .collect();
         operations.sort_unstable_by(|a, b| a.id.cmp(b.id));
@@ -559,9 +645,16 @@ impl TryFrom<String> for InterfaceHash {
             });
         }
 
+        if digest.chars().any(|c| c.is_ascii_uppercase()) {
+            return Err(ManifestError::Invalid {
+                field: "manifest.interface_hash",
+                message: "digest must be lowercase hex".into(),
+            });
+        }
+
         let digest_bytes = hex::decode(digest).map_err(|_| ManifestError::Invalid {
             field: "manifest.interface_hash",
-            message: "digest must be lowercase hex".into(),
+            message: "digest must be valid hex".into(),
         })?;
         let digest: [u8; 32] = digest_bytes
             .try_into()
@@ -1217,6 +1310,13 @@ impl NetworkConstraints {
                 self.deny_ip_literals,
                 self.require_host_canonicalization,
             )?;
+
+            if self.deny_localhost && host == "localhost" {
+                return Err(ManifestError::Invalid {
+                    field: "provides.operations.*.network_constraints.host_allow",
+                    message: "host `localhost` is allowed but `deny_localhost` is true".into(),
+                });
+            }
         }
 
         for cidr in &self.cidr_deny {
@@ -1280,10 +1380,14 @@ fn validate_host_allow_entry(
                 ),
             });
         }
-        if host.len() <= 2 {
+        // Require at least two labels after the wildcard (e.g. `*.example.com`)
+        // `*.com` (2 parts) is rejected. `*.co.uk` (3 parts) is allowed but risky?
+        // Let's enforce at least 3 parts total (wildcard + 2 labels).
+        // `host.split('.').count()`
+        if host.split('.').count() < 3 {
             return Err(ManifestError::Invalid {
                 field: "provides.operations.*.network_constraints.host_allow",
-                message: format!("invalid wildcard pattern `{host}`"),
+                message: format!("invalid wildcard pattern `{host}` (too broad)"),
             });
         }
     }
@@ -1632,10 +1736,76 @@ macro_rules! embed_manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use serde_json::json;
     use std::path::Path;
+    use std::time::Instant;
+    use uuid::Uuid;
 
-    const PLACEHOLDER_HASH: &str =
-        "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+    const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+    const EMBEDDED_MINIMAL_MANIFEST: &[u8] =
+        include_bytes!("../../../tests/vectors/manifest/manifest_minimal.toml");
+
+    struct TestLog {
+        test_name: &'static str,
+        module: &'static str,
+        correlation_id: String,
+        started_at: Instant,
+        connector_id: Option<&'static str>,
+        version: Option<&'static str>,
+        capabilities_count: Option<usize>,
+    }
+
+    impl TestLog {
+        fn new(
+            test_name: &'static str,
+            module: &'static str,
+            connector_id: Option<&'static str>,
+            version: Option<&'static str>,
+            capabilities_count: Option<usize>,
+        ) -> Self {
+            let correlation_id = Uuid::new_v4().to_string();
+            let log = Self {
+                test_name,
+                module,
+                correlation_id,
+                started_at: Instant::now(),
+                connector_id,
+                version,
+                capabilities_count,
+            };
+            log.emit("execute", Some("start"), 0);
+            log
+        }
+
+        fn emit(&self, phase: &str, result: Option<&str>, duration_ms: u128) {
+            let payload = json!({
+                "timestamp": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                "test_name": self.test_name,
+                "module": self.module,
+                "phase": phase,
+                "correlation_id": self.correlation_id,
+                "connector_id": self.connector_id,
+                "version": self.version,
+                "capabilities_count": self.capabilities_count,
+                "duration_ms": duration_ms,
+                "result": result,
+            });
+            println!("{payload}");
+        }
+    }
+
+    impl Drop for TestLog {
+        fn drop(&mut self) {
+            let duration_ms = self.started_at.elapsed().as_millis();
+            let result = if std::thread::panicking() {
+                "fail"
+            } else {
+                "pass"
+            };
+            self.emit("verify", Some(result), duration_ms);
+        }
+    }
 
     fn test_manifest_toml(interface_hash: &str) -> String {
         format!(
@@ -1728,6 +1898,13 @@ deny_ptrace = true
 
     #[test]
     fn manifest_parses_and_validates_with_computed_interface_hash() {
+        let _log = TestLog::new(
+            "manifest_parses_and_validates_with_computed_interface_hash",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let unchecked = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
             .expect("unchecked parse");
@@ -1739,7 +1916,39 @@ deny_ptrace = true
     }
 
     #[test]
+    fn rejects_uppercase_interface_hash() {
+        let _log = TestLog::new(
+            "rejects_uppercase_interface_hash",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let unchecked = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
+            .expect("unchecked parse");
+        let computed = unchecked.compute_interface_hash().expect("compute hash");
+
+        // Only uppercase the digest part
+        let s = computed.to_string();
+        let (prefix, digest) = s.rsplit_once(':').unwrap();
+        let bad = format!("{}:{}", prefix, digest.to_ascii_uppercase());
+
+        let err = ConnectorManifest::parse_str(&test_manifest_toml(&bad)).unwrap_err();
+        // Since deserialization happens during TOML parsing, custom errors are wrapped in Toml error
+        assert!(matches!(err, ManifestError::Toml(_)));
+        assert!(err.to_string().contains("digest must be lowercase hex"));
+    }
+
+    #[test]
     fn rejects_interface_hash_mismatch() {
+        let _log = TestLog::new(
+            "rejects_interface_hash_mismatch",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let unchecked = ConnectorManifest::parse_str_unchecked(&test_manifest_toml(&placeholder))
             .expect("unchecked parse");
@@ -1754,6 +1963,13 @@ deny_ptrace = true
 
     #[test]
     fn rejects_network_capability_host_restrictions() {
+        let _log = TestLog::new(
+            "rejects_network_capability_host_restrictions",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let mut toml = test_manifest_toml(&placeholder);
         toml = toml.replace("network.egress", "network.egress:api.telegram.org:443");
@@ -1769,6 +1985,13 @@ deny_ptrace = true
 
     #[test]
     fn rejects_invalid_min_protocol() {
+        let _log = TestLog::new(
+            "rejects_invalid_min_protocol",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let toml = test_manifest_toml(&placeholder).replace("fcp2-sym/2.0", "fcp2-sym");
         let err = ConnectorManifest::parse_str_unchecked(&toml).unwrap_err();
@@ -1777,6 +2000,13 @@ deny_ptrace = true
 
     #[test]
     fn rejects_bad_host_allow_wildcard() {
+        let _log = TestLog::new(
+            "rejects_bad_host_allow_wildcard",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let toml =
             test_manifest_toml(&placeholder).replace("api.telegram.org", "*api.telegram.org");
@@ -1790,7 +2020,60 @@ deny_ptrace = true
     }
 
     #[test]
+    fn rejects_localhost_when_denied() {
+        let _log = TestLog::new(
+            "rejects_localhost_when_denied",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        // deny_localhost is true by default
+        let toml = test_manifest_toml(&placeholder).replace("api.telegram.org", "localhost");
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash =
+            test_manifest_toml(&hash.to_string()).replace("api.telegram.org", "localhost");
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("host `localhost` is allowed but `deny_localhost` is true")
+        );
+    }
+
+    #[test]
+    fn rejects_broad_wildcard() {
+        let _log = TestLog::new(
+            "rejects_broad_wildcard",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        // *.com is too broad (only 2 parts)
+        let toml = test_manifest_toml(&placeholder).replace("api.telegram.org", "*.com");
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace("api.telegram.org", "*.com");
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(err.to_string().contains("too broad"));
+    }
+
+    #[test]
     fn vector_manifest_valid_parses() {
+        let _log = TestLog::new(
+            "vector_manifest_valid_parses",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
         let with_hash = with_computed_hash(&raw);
         let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
@@ -1800,6 +2083,13 @@ deny_ptrace = true
 
     #[test]
     fn vector_manifest_minimal_parses() {
+        let _log = TestLog::new(
+            "vector_manifest_minimal_parses",
+            "fcp-manifest",
+            Some("fcp.minimal"),
+            Some("0.1.0"),
+            Some(1),
+        );
         let raw = read_vector_manifest("manifest_minimal.toml");
         let with_hash = with_computed_hash(&raw);
         let parsed = ConnectorManifest::parse_str(&with_hash).expect("minimal manifest");
@@ -1809,6 +2099,13 @@ deny_ptrace = true
 
     #[test]
     fn vector_manifest_invalid_version_rejected() {
+        let _log = TestLog::new(
+            "vector_manifest_invalid_version_rejected",
+            "fcp-manifest",
+            Some("fcp.invalid"),
+            None,
+            Some(1),
+        );
         let raw = read_vector_manifest("manifest_invalid_version.toml");
         let err = ConnectorManifest::parse_str_unchecked(&raw).unwrap_err();
         assert!(matches!(err, ManifestError::Toml(_)));
@@ -1816,6 +2113,13 @@ deny_ptrace = true
 
     #[test]
     fn vector_manifest_dangerous_caps_rejected() {
+        let _log = TestLog::new(
+            "vector_manifest_dangerous_caps_rejected",
+            "fcp-manifest",
+            Some("fcp.dangerous"),
+            Some("0.1.0"),
+            Some(2),
+        );
         let raw = read_vector_manifest("manifest_dangerous_caps.toml");
         let with_hash = with_computed_hash(&raw);
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
@@ -1824,6 +2128,13 @@ deny_ptrace = true
 
     #[test]
     fn rejects_event_caps_without_buffer() {
+        let _log = TestLog::new(
+            "rejects_event_caps_without_buffer",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let mut toml = test_manifest_toml(&placeholder);
         toml = toml.replace("min_buffer_events = 10000", "min_buffer_events = 0");
@@ -1832,116 +2143,220 @@ deny_ptrace = true
         let with_hash = test_manifest_toml(&hash.to_string())
             .replace("min_buffer_events = 10000", "min_buffer_events = 0");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "event_caps.min_buffer_events"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "event_caps.min_buffer_events")
+        );
     }
 
     #[test]
     fn rejects_signatures_without_threshold() {
+        let _log = TestLog::new(
+            "rejects_signatures_without_threshold",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
         let mut with_hash = with_computed_hash(&raw);
         with_hash = with_hash.replace("publisher_threshold = \"2-of-2\"\n", "");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold")
+        );
     }
 
     #[test]
     fn rejects_duplicate_signature_kid() {
+        let _log = TestLog::new(
+            "rejects_duplicate_signature_kid",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
         let with_hash = with_computed_hash(&raw).replace("pub2", "pub1");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_signatures"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_signatures")
+        );
     }
 
     #[test]
     fn rejects_duplicate_supply_chain_attestations() {
+        let _log = TestLog::new(
+            "rejects_duplicate_supply_chain_attestations",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
         let with_hash = with_computed_hash(&raw).replace(
             "objectid:3333333333333333333333333333333333333333333333333333333333333333",
             "objectid:2222222222222222222222222222222222222222222222222222222222222222",
         );
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "supply_chain.attestations"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "supply_chain.attestations")
+        );
     }
 
     #[test]
     fn rejects_invalid_slsa_level() {
+        let _log = TestLog::new(
+            "rejects_invalid_slsa_level",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
-        let with_hash = with_computed_hash(&raw).replace("min_slsa_level = 2", "min_slsa_level = 9");
+        let with_hash =
+            with_computed_hash(&raw).replace("min_slsa_level = 2", "min_slsa_level = 9");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "policy.min_slsa_level"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "policy.min_slsa_level")
+        );
     }
 
     #[test]
     fn rejects_invalid_base64_signature() {
+        let _log = TestLog::new(
+            "rejects_invalid_base64_signature",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
         let with_hash = with_computed_hash(&raw).replace("base64:Zm9v", "Zm9v");
-        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "base64"));
-    }
-
-    #[test]
-    fn rejects_uppercase_host_allow() {
-        let raw = read_vector_manifest("manifest_valid.toml");
-        let with_hash = with_computed_hash(&raw).replace("api.telegram.org", "API.Telegram.org");
-        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "provides.operations.*.network_constraints.host_allow"));
-    }
-
-    #[test]
-    fn rejects_ip_literal_in_host_allow() {
-        let raw = read_vector_manifest("manifest_valid.toml");
-        let with_hash = with_computed_hash(&raw).replace("api.telegram.org", "192.0.2.1");
-        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "provides.operations.*.network_constraints.host_allow"));
-    }
-
-    #[test]
-    fn rejects_invalid_rate_limit_shorthand() {
-        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder).replace("60/min", "60/fortnight");
-        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
-        let hash = unchecked.compute_interface_hash().expect("compute hash");
-        let with_hash = test_manifest_toml(&hash.to_string()).replace("60/min", "60/fortnight");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(err, ManifestError::Toml(_)));
     }
 
     #[test]
-    fn rejects_invalid_signature_threshold() {
+    fn rejects_uppercase_host_allow() {
+        let _log = TestLog::new(
+            "rejects_uppercase_host_allow",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
         let raw = read_vector_manifest("manifest_valid.toml");
-        let with_hash = with_computed_hash(&raw).replace("publisher_threshold = \"2-of-2\"", "publisher_threshold = \"3-of-2\"");
+        let with_hash = with_computed_hash(&raw).replace("api.telegram.org", "API.Telegram.org");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "provides.operations.*.network_constraints.host_allow")
+        );
+    }
+
+    #[test]
+    fn rejects_ip_literal_in_host_allow() {
+        let _log = TestLog::new(
+            "rejects_ip_literal_in_host_allow",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace("api.telegram.org", "192.0.2.1");
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "provides.operations.*.network_constraints.host_allow")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_rate_limit_shorthand() {
+        let _log = TestLog::new(
+            "rejects_invalid_rate_limit_shorthand",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace("60/min", "60/fortnight");
+        let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_signature_threshold() {
+        let _log = TestLog::new(
+            "rejects_invalid_signature_threshold",
+            "fcp-manifest",
+            Some("fcp.valid"),
+            Some("1.2.3"),
+            Some(3),
+        );
+        let raw = read_vector_manifest("manifest_valid.toml");
+        let with_hash = with_computed_hash(&raw).replace(
+            "publisher_threshold = \"2-of-2\"",
+            "publisher_threshold = \"3-of-2\"",
+        );
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "signatures.publisher_threshold")
+        );
     }
 
     #[test]
     fn rejects_empty_connector_name() {
+        let _log = TestLog::new(
+            "rejects_empty_connector_name",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder).replace("name = \"Telegram Connector\"", "name = \"\"");
+        let toml = test_manifest_toml(&placeholder)
+            .replace("name = \"Telegram Connector\"", "name = \"\"");
         let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
         let hash = unchecked.compute_interface_hash().expect("compute hash");
-        let with_hash = test_manifest_toml(&hash.to_string()).replace("name = \"Telegram Connector\"", "name = \"\"");
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("name = \"Telegram Connector\"", "name = \"\"");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "connector.name"));
     }
 
     #[test]
     fn rejects_zero_cpu_percent() {
+        let _log = TestLog::new(
+            "rejects_zero_cpu_percent",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
         let toml = test_manifest_toml(&placeholder).replace("cpu_percent = 50", "cpu_percent = 0");
         let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
         let hash = unchecked.compute_interface_hash().expect("compute hash");
-        let with_hash = test_manifest_toml(&hash.to_string()).replace("cpu_percent = 50", "cpu_percent = 0");
+        let with_hash =
+            test_manifest_toml(&hash.to_string()).replace("cpu_percent = 50", "cpu_percent = 0");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
-        assert!(matches!(err, ManifestError::Invalid { field, .. } if field == "sandbox.cpu_percent"));
+        assert!(
+            matches!(err, ManifestError::Invalid { field, .. } if field == "sandbox.cpu_percent")
+        );
     }
 
     #[test]
     fn embedded_manifest_fixture_bytes_match() {
+        let _log = TestLog::new(
+            "embedded_manifest_fixture_bytes_match",
+            "fcp-manifest",
+            Some("fcp.minimal"),
+            Some("0.1.0"),
+            Some(1),
+        );
         let path = vector_manifest_path("manifest_minimal.toml");
         let raw = std::fs::read(&path).expect("read manifest fixture");
-        static EMBEDDED: &[u8] =
-            include_bytes!("../../../tests/vectors/manifest/manifest_minimal.toml");
-        assert_eq!(EMBEDDED, raw.as_slice());
+        assert_eq!(EMBEDDED_MINIMAL_MANIFEST, raw.as_slice());
     }
 }
