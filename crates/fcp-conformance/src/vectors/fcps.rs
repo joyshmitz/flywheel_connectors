@@ -90,7 +90,7 @@ impl FcpsGoldenVector {
     /// Returns an error description if verification fails.
     pub fn verify(&self) -> Result<(), String> {
         use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
-        use fcp_protocol::{FcpsFrame, FcpsFrameHeader, FrameFlags, SymbolRecord, FCPS_VERSION};
+        use fcp_protocol::{FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameFlags, SymbolRecord};
 
         // Parse expected values
         let object_id = ObjectId::from_bytes(
@@ -121,7 +121,8 @@ impl FcpsGoldenVector {
             version: FCPS_VERSION,
             flags,
             symbol_count: u32::try_from(self.symbols.len()).map_err(|_| "symbol count overflow")?,
-            total_payload_len: u32::try_from(total_payload_len).map_err(|_| "payload length overflow")?,
+            total_payload_len: u32::try_from(total_payload_len)
+                .map_err(|_| "payload length overflow")?,
             object_id,
             symbol_size: self.symbol_size,
             zone_key_id,
@@ -146,8 +147,8 @@ impl FcpsGoldenVector {
         // Build symbol records
         let mut symbols = Vec::new();
         for (i, sv) in self.symbols.iter().enumerate() {
-            let data = hex::decode(&sv.data)
-                .map_err(|e| format!("invalid symbol[{i}] data hex: {e}"))?;
+            let data =
+                hex::decode(&sv.data).map_err(|e| format!("invalid symbol[{i}] data hex: {e}"))?;
             if data.len() != self.symbol_size as usize {
                 return Err(format!(
                     "symbol[{i}] data length {} != symbol_size {}",
@@ -227,13 +228,13 @@ fn vector_1_minimal_frame() -> FcpsGoldenVector {
     // Frame seq: 1 (LE) = 01 00 00 00 00 00 00 00
 
     let expected_header = concat!(
-        "46435053",         // Magic "FCPS"
-        "0100",             // Version 1
-        "0404",             // Flags: ENCRYPTED | RAPTORQ
-        "01000000",         // Symbol count: 1
-        "1e000000",         // Total payload len: 30
+        "46435053",                                                         // Magic "FCPS"
+        "0100",                                                             // Version 1
+        "0404",     // Flags: ENCRYPTED | RAPTORQ
+        "01000000", // Symbol count: 1
+        "1e000000", // Total payload len: 30
         "1111111111111111111111111111111111111111111111111111111111111111", // Object ID
-        "0800",             // Symbol size: 8
+        "0800",     // Symbol size: 8
         "2222222222222222", // Zone key ID
         "3333333333333333333333333333333333333333333333333333333333333333", // Zone ID hash
         "e803000000000000", // Epoch ID: 1000
@@ -286,13 +287,13 @@ fn vector_2_two_symbols() -> FcpsGoldenVector {
     // Header with 2 symbols, 16-byte symbol size
     // Total payload len: 2 * (22 + 16) = 76 = 0x4c
     let expected_header = concat!(
-        "46435053",         // Magic "FCPS"
-        "0100",             // Version 1
-        "0404",             // Flags: ENCRYPTED | RAPTORQ
-        "02000000",         // Symbol count: 2
-        "4c000000",         // Total payload len: 76
+        "46435053",                                                         // Magic "FCPS"
+        "0100",                                                             // Version 1
+        "0404",     // Flags: ENCRYPTED | RAPTORQ
+        "02000000", // Symbol count: 2
+        "4c000000", // Total payload len: 76
         "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeefcafebabe", // Object ID
-        "1000",             // Symbol size: 16
+        "1000",     // Symbol size: 16
         "0102030405060708", // Zone key ID
         "abababababababababababababababababababababababababababababababab", // Zone ID hash
         "0a00000000000000", // Epoch ID: 10
@@ -302,18 +303,18 @@ fn vector_2_two_symbols() -> FcpsGoldenVector {
 
     // Symbol 1: ESI=0, K=100
     let expected_symbol_1 = concat!(
-        "00000000",                                 // ESI: 0
-        "6400",                                     // K: 100
-        "00112233445566778899aabbccddeeff",         // Data: 16 bytes
-        "ffeeddccbbaa99887766554433221100"          // Auth tag
+        "00000000",                         // ESI: 0
+        "6400",                             // K: 100
+        "00112233445566778899aabbccddeeff", // Data: 16 bytes
+        "ffeeddccbbaa99887766554433221100"  // Auth tag
     );
 
     // Symbol 2: ESI=1, K=100
     let expected_symbol_2 = concat!(
-        "01000000",                                 // ESI: 1
-        "6400",                                     // K: 100
-        "11111111111111111111111111111111",         // Data: 16 bytes
-        "22222222222222222222222222222222"          // Auth tag
+        "01000000",                         // ESI: 1
+        "6400",                             // K: 100
+        "11111111111111111111111111111111", // Data: 16 bytes
+        "22222222222222222222222222222222"  // Auth tag
     );
 
     let expected_frame = format!("{expected_header}{expected_symbol_1}{expected_symbol_2}");
@@ -362,13 +363,13 @@ fn vector_3_flags_variation() -> FcpsGoldenVector {
     // Header with 1 symbol, 4-byte symbol size
     // Total payload len: 1 * (22 + 4) = 26 = 0x1a
     let expected_header = concat!(
-        "46435053",         // Magic "FCPS"
-        "0100",             // Version 1
-        "2606",             // Flags: 0x0626
-        "01000000",         // Symbol count: 1
-        "1a000000",         // Total payload len: 26
+        "46435053",                                                         // Magic "FCPS"
+        "0100",                                                             // Version 1
+        "2606",                                                             // Flags: 0x0626
+        "01000000",                                                         // Symbol count: 1
+        "1a000000",                                                         // Total payload len: 26
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", // Object ID (all 0xff)
-        "0400",             // Symbol size: 4
+        "0400",                                                             // Symbol size: 4
         "ffffffffffffffff", // Zone key ID (all 0xff)
         "0000000000000000000000000000000000000000000000000000000000000000", // Zone ID hash (all 0)
         "ffffffffffffffff", // Epoch ID: max u64

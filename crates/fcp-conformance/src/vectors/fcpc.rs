@@ -222,7 +222,7 @@ fn vector_3_compressed_flag() -> FcpcGoldenVector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_protocol::{FcpcFrame, FcpcFrameFlags, FCPC_HEADER_LEN, FCPC_TAG_LEN};
+    use fcp_protocol::{FCPC_HEADER_LEN, FCPC_TAG_LEN, FcpcFrame, FcpcFrameFlags};
     use fcp_protocol::{MeshSessionId, SessionDirection};
 
     #[test]
@@ -285,9 +285,15 @@ mod tests {
         let key = [0x11; 32];
         let flags = FcpcFrameFlags::ENCRYPTED;
 
-        let frame =
-            FcpcFrame::seal(session_id, 1, SessionDirection::InitiatorToResponder, flags, b"test", &key)
-                .expect("seal should succeed");
+        let frame = FcpcFrame::seal(
+            session_id,
+            1,
+            SessionDirection::InitiatorToResponder,
+            flags,
+            b"test",
+            &key,
+        )
+        .expect("seal should succeed");
 
         let header_bytes = frame.header.encode();
 
