@@ -179,10 +179,10 @@ const LOCALHOST_CIDRS: &[&str] = &[
 
 /// Default CIDR ranges that are denied when `deny_private_ranges` is true (RFC1918 + RFC4193).
 const PRIVATE_CIDRS: &[&str] = &[
-    "10.0.0.0/8",    // RFC1918 Class A
-    "172.16.0.0/12", // RFC1918 Class B
+    "10.0.0.0/8",     // RFC1918 Class A
+    "172.16.0.0/12",  // RFC1918 Class B
     "192.168.0.0/16", // RFC1918 Class C
-    "fc00::/7",      // IPv6 Unique Local Addresses (ULA)
+    "fc00::/7",       // IPv6 Unique Local Addresses (ULA)
 ];
 
 /// Link-local ranges (always denied alongside private ranges).
@@ -253,10 +253,7 @@ pub fn is_hostname_canonical(hostname: &str) -> bool {
     }
 
     // Check if IDNA encoding is idempotent
-    match idna::domain_to_ascii(hostname) {
-        Ok(encoded) => encoded == hostname,
-        Err(_) => false,
-    }
+    idna::domain_to_ascii(hostname).is_ok_and(|encoded| encoded == hostname)
 }
 
 // ============================================================================
@@ -323,7 +320,7 @@ pub struct EgressGuard {
 impl EgressGuard {
     /// Create a new egress guard.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {}
     }
 
@@ -363,7 +360,10 @@ impl EgressGuard {
 
         // Extract port (default based on scheme)
         let port = url.port_or_known_default().ok_or_else(|| {
-            EgressError::InvalidUrl(format!("cannot determine port for scheme: {}", url.scheme()))
+            EgressError::InvalidUrl(format!(
+                "cannot determine port for scheme: {}",
+                url.scheme()
+            ))
         })?;
 
         // Determine if TLS is required
@@ -460,6 +460,7 @@ impl EgressGuard {
     }
 
     /// Check if a host matches the allow list.
+    #[allow(clippy::unused_self)] // Will use self for caching in future
     fn host_matches_allow_list(
         &self,
         host: &str,
@@ -498,6 +499,10 @@ impl EgressGuard {
     /// Check resolved IP against CIDR constraints.
     ///
     /// This is called after DNS resolution to verify the resolved IPs are allowed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EgressError::Denied` if the IP matches any deny rule.
     pub fn check_ip_constraints(
         &self,
         ip: IpAddr,
@@ -553,6 +558,10 @@ impl EgressGuard {
     /// Validate resolved IPs from DNS resolution.
     ///
     /// Checks all resolved IPs against constraints and enforces `dns_max_ips`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EgressError::Denied` if any IP violates constraints or too many IPs returned.
     pub fn validate_dns_resolution(
         &self,
         ips: &[IpAddr],
@@ -590,6 +599,10 @@ impl EgressGuard {
 /// bytes to connector processes.
 pub trait CredentialInjector: Send + Sync {
     /// Check if a credential is authorized for the given operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if credential lookup or authorization check fails.
     fn is_authorized(
         &self,
         credential_id: &str,
@@ -600,6 +613,10 @@ pub trait CredentialInjector: Send + Sync {
     /// Inject a credential into an HTTP request.
     ///
     /// The injector should modify the headers in-place to add authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the credential cannot be retrieved or injected.
     fn inject_http(
         &self,
         credential_id: &str,
@@ -610,6 +627,10 @@ pub trait CredentialInjector: Send + Sync {
     ///
     /// Returns opaque bytes that should be sent after connection establishment
     /// (e.g., for database authentication).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the credential cannot be retrieved.
     fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError>;
 }
 
@@ -651,9 +672,17 @@ impl CredentialInjector for NoOpCredentialInjector {
 /// TLS verification hooks for the Network Guard.
 pub trait TlsVerifier: Send + Sync {
     /// Verify SNI matches the expected hostname.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EgressError::Denied` with `SniMismatch` if names don't match.
     fn verify_sni(&self, actual_sni: &str, expected_sni: &str) -> Result<(), EgressError>;
 
     /// Verify SPKI pin matches one of the expected pins.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EgressError::Denied` with `SpkiPinMismatch` if no pin matches.
     fn verify_spki(&self, cert_spki: &[u8], expected_pins: &[Vec<u8>]) -> Result<(), EgressError>;
 }
 
