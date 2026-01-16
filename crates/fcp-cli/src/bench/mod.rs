@@ -483,7 +483,7 @@ fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
 
 fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
     use fcp_core::{CapabilityToken, CapabilityVerifier, InstanceId, OperationId, ZoneId};
-    use fcp_crypto::{CapabilityTokenBuilder, CwtClaims, Ed25519SigningKey};
+    use fcp_crypto::{CapabilityTokenBuilder, Ed25519SigningKey};
 
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
@@ -504,10 +504,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         .sign(&signing_key)
         .expect("capability token should sign");
 
-    let token = CapabilityToken {
-        raw: cose_token,
-        claims: CwtClaims::new(),
-    };
+    let token = CapabilityToken { raw: cose_token };
 
     let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), InstanceId::new());
     let op = OperationId::new("op.test").expect("operation id must be canonical");

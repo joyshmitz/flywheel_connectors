@@ -204,3 +204,105 @@ pub struct Targets {
     /// Target p99 latency in milliseconds.
     pub p99_target_ms: f64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    #[test]
+    fn benchmark_report_json_snapshot() {
+        let generated_at = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let env = EnvironmentInfo {
+            os: "linux".to_string(),
+            os_version: "6.6.0".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_count: 16,
+            memory_bytes: Some(32_000_000_000),
+            git_commit: Some("deadbeef".to_string()),
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(false),
+            fcp_version: "0.1.0".to_string(),
+            rustc_version: Some("rustc 1.85.0".to_string()),
+            timestamp: generated_at,
+        };
+
+        let percentiles = Percentiles {
+            p50_ms: 1.0,
+            p90_ms: 2.0,
+            p99_ms: 3.0,
+            min_ms: 0.5,
+            max_ms: 4.0,
+            mean_ms: 1.5,
+            stddev_ms: 0.2,
+        };
+        let mut result = BenchmarkResult::new(
+            "cbor-serialize",
+            "CBOR canonical serialization",
+            100,
+            10,
+            percentiles,
+        )
+        .with_parameters(json!({ "payload_bytes": 1024 }))
+        .with_targets(Targets {
+            p50_target_ms: 2.0,
+            p99_target_ms: 5.0,
+        });
+        result.outliers_detected = 1;
+        let report = BenchmarkReport {
+            schema_version: "1.0.0".to_string(),
+            generated_at,
+            environment: env,
+            results: vec![result],
+        };
+
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        let expected = r#"{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-01-01T00:00:00Z",
+  "environment": {
+    "os": "linux",
+    "os_version": "6.6.0",
+    "arch": "x86_64",
+    "cpu_count": 16,
+    "memory_bytes": 32000000000,
+    "git_commit": "deadbeef",
+    "git_branch": "main",
+    "git_dirty": false,
+    "fcp_version": "0.1.0",
+    "rustc_version": "rustc 1.85.0",
+    "timestamp": "2026-01-01T00:00:00Z"
+  },
+  "results": [
+    {
+      "name": "cbor-serialize",
+      "description": "CBOR canonical serialization",
+      "parameters": {
+        "payload_bytes": 1024
+      },
+      "sample_count": 100,
+      "warmup_count": 10,
+      "percentiles": {
+        "p50_ms": 1.0,
+        "p90_ms": 2.0,
+        "p99_ms": 3.0,
+        "min_ms": 0.5,
+        "max_ms": 4.0,
+        "mean_ms": 1.5,
+        "stddev_ms": 0.2
+      },
+      "passed": true,
+      "targets": {
+        "p50_target_ms": 2.0,
+        "p99_target_ms": 5.0
+      },
+      "note": null,
+      "outliers_detected": 1
+    }
+  ]
+}"#;
+
+        assert_eq!(json, expected);
+    }
+}
