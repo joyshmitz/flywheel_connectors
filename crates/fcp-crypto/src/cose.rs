@@ -307,6 +307,29 @@ impl CwtClaims {
         })
     }
 
+    /// Get holder node ID (NORMATIVE).
+    ///
+    /// When this claim is set, requests using this token MUST include
+    /// a `holder_proof` signature from the specified node.
+    #[must_use]
+    pub fn get_holder_node(&self) -> Option<&str> {
+        self.get(fcp2_claims::HOLDER_NODE).and_then(|v| match v {
+            ciborium::Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Get JWT ID (jti claim).
+    ///
+    /// The unique identifier for this token, used in `holder_proof` binding.
+    #[must_use]
+    pub fn get_jti(&self) -> Option<&[u8]> {
+        self.get(cwt_claims::CTI).and_then(|v| match v {
+            ciborium::Value::Bytes(b) => Some(b.as_slice()),
+            _ => None,
+        })
+    }
+
     /// Encode claims to deterministic CBOR bytes.
     ///
     /// # Errors

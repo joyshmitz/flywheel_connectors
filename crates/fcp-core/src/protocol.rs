@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId, IdempotencyClass,
-    InstanceId, OperationId, Provenance, RiskLevel, SafetyTier, SessionId, ZoneId,
+    ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, CorrelationId,
+    FcpError, IdempotencyClass, InstanceId, ObjectId, OperationId, Provenance, RiskLevel,
+    SafetyTier, SessionId, TailscaleNodeId, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,7 +214,12 @@ pub struct OAuthConfig {
 // Invoke Messages
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Invoke context for locale and pagination.
+/// Invoke context for locale, pagination, and distributed tracing.
+///
+/// Per FCP Specification, this context travels with requests for:
+/// - Internationalization (locale)
+/// - Pagination control
+/// - Distributed tracing (`trace_id`, `request_tags`)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InvokeContext {
     /// Locale for internationalization (e.g., "en-US")
@@ -223,18 +229,109 @@ pub struct InvokeContext {
     /// Pagination parameters
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pagination: Option<serde_json::Value>,
+
+    /// Distributed trace identifier for request correlation across services.
+    ///
+    /// Format: W3C Trace Context trace-id (32 hex chars) or custom format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+
+    /// Request tags for additional metadata and routing hints.
+    ///
+    /// Keys MUST be lowercase ASCII with dots/underscores.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub request_tags: HashMap<String, String>,
 }
 
-/// Request to invoke an operation.
+/// Holder proof for capability token binding (NORMATIVE).
+///
+/// When a capability token has `holder_node` set, the request MUST include
+/// a `holder_proof` signature to prevent replay by non-holder nodes.
+///
+/// Signable bytes: `request_id || operation_id || token.jti`
+/// Signature: Ed25519 by holder node signing key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HolderProof {
+    /// Ed25519 signature (64 bytes)
+    #[serde(with = "crate::util::hex_or_bytes")]
+    pub signature: [u8; 64],
+
+    /// Node ID of the holder (must match token's `holder_node` claim)
+    pub holder_node: TailscaleNodeId,
+}
+
+impl HolderProof {
+    /// Create a new holder proof.
+    #[must_use]
+    pub const fn new(signature: [u8; 64], holder_node: TailscaleNodeId) -> Self {
+        Self {
+            signature,
+            holder_node,
+        }
+    }
+
+    /// Compute the signable bytes for holder proof.
+    ///
+    /// Format: `"FCP2-HOLDER-PROOF-V1" || request_id || operation_id || token_jti`
+    #[must_use]
+    pub fn signable_bytes(
+        request_id: &RequestId,
+        operation_id: &OperationId,
+        token_jti: &[u8],
+    ) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(128);
+        bytes.extend_from_slice(b"FCP2-HOLDER-PROOF-V1");
+        bytes.extend_from_slice(request_id.0.as_bytes());
+        bytes.extend_from_slice(operation_id.as_str().as_bytes());
+        bytes.extend_from_slice(token_jti);
+        bytes
+    }
+}
+
+/// Response metadata for timing and caching.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponseMetadata {
+    /// Server processing time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_time_ms: Option<u64>,
+
+    /// Cache TTL hint in seconds (0 = do not cache).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_secs: Option<u32>,
+
+    /// Whether the response came from cache.
+    #[serde(default)]
+    pub from_cache: bool,
+
+    /// Retry-after hint in seconds (for rate-limited responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u32>,
+}
+
+/// Invoke response status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvokeStatus {
+    /// Request completed successfully.
+    Ok,
+    /// Request failed with an error.
+    Error,
+}
+
+/// Request to invoke an operation (NORMATIVE).
 ///
 /// Per FCP Specification Section 9.7:
 /// - `type`: Always "invoke"
 /// - `id`: Unique request ID for correlation
+/// - `connector_id`: Target connector for this request
 /// - `operation`: Operation to invoke (e.g., "gmail.search")
+/// - `zone_id`: Zone context for the request
 /// - `input`: JSON input parameters
-/// - `capability_token`: FCT authorizing this request
-/// - `context`: Optional locale and pagination
-/// - `idempotency_key`: Optional key for retry deduplication
+/// - `capability_token`: FCT authorizing this request (`COSE_Sign1` bytes)
+/// - `holder_proof`: Ed25519 signature when token has `holder_node` (REQUIRED if `holder_node` set)
+/// - `context`: Optional locale, pagination, and trace context
+/// - `idempotency_key`: Optional key for retry deduplication (REQUIRED for Risky/Dangerous ops)
+/// - `lease_seq`: Optional lease sequence for `singleton_writer` connectors
 /// - `deadline_ms`: Optional timeout deadline
 /// - `correlation_id`: Optional tracing correlation
 /// - `provenance`: Optional provenance for taint tracking
@@ -247,8 +344,20 @@ pub struct InvokeRequest {
     /// Unique request ID for correlation
     pub id: RequestId,
 
+    /// Target connector for this request (NORMATIVE).
+    ///
+    /// Identifies which connector should handle this invocation.
+    pub connector_id: ConnectorId,
+
     /// Operation to invoke
     pub operation: OperationId,
+
+    /// Zone context for the request (NORMATIVE).
+    ///
+    /// The zone determines the security context and which zone key
+    /// is used for cryptographic operations. The `capability_token`'s
+    /// audience must be compatible with this zone.
+    pub zone_id: ZoneId,
 
     /// Input parameters
     pub input: serde_json::Value,
@@ -256,13 +365,35 @@ pub struct InvokeRequest {
     /// Capability token authorizing this request
     pub capability_token: CapabilityToken,
 
-    /// Request context (locale, pagination)
+    /// Holder proof for token binding (NORMATIVE).
+    ///
+    /// REQUIRED when `capability_token` has `holder_node` claim set.
+    /// The signature MUST bind: `request_id || operation_id || token.jti`
+    /// and be signed by the holder node's signing key.
+    ///
+    /// This prevents replay attacks by non-holder nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_proof: Option<HolderProof>,
+
+    /// Request context (locale, pagination, `trace_id`)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<InvokeContext>,
 
-    /// Idempotency key for retries
+    /// Idempotency key for retries (max 128 bytes).
+    ///
+    /// REQUIRED for operations with `IdempotencyPolicy::Strict` or
+    /// `SafetyTier::Risky`/`Dangerous`. Format is opaque string.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+
+    /// Lease sequence for `singleton_writer` connectors (NORMATIVE).
+    ///
+    /// REQUIRED when invoking operations on connectors with `singleton_writer`
+    /// semantics. The connector MUST reject requests with stale `lease_seq`.
+    ///
+    /// This implements fencing token semantics for distributed coordination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_seq: Option<u64>,
 
     /// Deadline in milliseconds from now
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,14 +420,76 @@ pub struct InvokeRequest {
     pub approval_tokens: Vec<ApprovalToken>,
 }
 
-/// Response from an operation invocation.
+/// Maximum length for idempotency keys (NORMATIVE).
+pub const MAX_IDEMPOTENCY_KEY_LEN: usize = 128;
+
+impl InvokeRequest {
+    /// Validate the idempotency key format.
+    ///
+    /// # Errors
+    /// Returns error if key exceeds `MAX_IDEMPOTENCY_KEY_LEN` bytes.
+    pub fn validate_idempotency_key(&self) -> Result<(), InvokeValidationError> {
+        if let Some(ref key) = self.idempotency_key {
+            if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+                return Err(InvokeValidationError::IdempotencyKeyTooLong {
+                    len: key.len(),
+                    max: MAX_IDEMPOTENCY_KEY_LEN,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Validation errors for invoke requests.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum InvokeValidationError {
+    /// Idempotency key exceeds maximum length.
+    #[error("idempotency key too long ({len} bytes > {max} bytes)")]
+    IdempotencyKeyTooLong { len: usize, max: usize },
+
+    /// Holder proof required but missing.
+    #[error("holder_proof required when token has holder_node claim")]
+    HolderProofRequired,
+
+    /// Holder proof signature invalid.
+    #[error("holder_proof signature verification failed")]
+    HolderProofInvalid,
+
+    /// Holder node mismatch between token and proof.
+    #[error("holder_proof node {proof_node} does not match token holder_node {token_node}")]
+    HolderNodeMismatch {
+        proof_node: String,
+        token_node: String,
+    },
+
+    /// Idempotency key required for this operation.
+    #[error("idempotency_key required for {safety_tier:?} operations")]
+    IdempotencyKeyRequired { safety_tier: SafetyTier },
+
+    /// Lease sequence required for `singleton_writer` connector.
+    #[error("lease_seq required for singleton_writer connector")]
+    LeaseSeqRequired,
+
+    /// Lease sequence is stale (fencing token check failed).
+    #[error("lease_seq {provided} is stale (current: {current})")]
+    LeaseSeqStale { provided: u64, current: u64 },
+}
+
+/// Response from an operation invocation (NORMATIVE).
 ///
 /// Per FCP Specification Section 9.7:
 /// - `type`: Always "response"
 /// - `id`: Request ID this is responding to
-/// - `result`: JSON result data
+/// - `status`: Ok or Error
+/// - `result`: JSON result data (on success)
+/// - `error`: `FcpError` details (on failure)
+/// - `receipt_id`: `OperationReceipt` `ObjectId` (for auditable operations)
+/// - `audit_event_id`: `AuditEvent` `ObjectId` (for audit trail)
+/// - `decision_receipt_id`: `DecisionReceipt` `ObjectId` (for denials)
 /// - `resource_uris`: Canonical URIs for resources created/modified
 /// - `next_cursor`: Pagination cursor for next page
+/// - `response_metadata`: Timing, cache hints, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeResponse {
     /// Message type (always "response")
@@ -305,8 +498,36 @@ pub struct InvokeResponse {
     /// Request ID this is responding to
     pub id: RequestId,
 
-    /// Result data
-    pub result: serde_json::Value,
+    /// Response status (Ok or Error)
+    pub status: InvokeStatus,
+
+    /// Result data (present when status is Ok)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+
+    /// Error details (present when status is Error)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<FcpError>,
+
+    /// `OperationReceipt` `ObjectId` for exactly-once tracking.
+    ///
+    /// Present for operations that record receipts (typically
+    /// operations with side effects or `IdempotencyClass::Strict`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<ObjectId>,
+
+    /// `AuditEvent` `ObjectId` for audit trail.
+    ///
+    /// Present when the operation generates an audit event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_event_id: Option<ObjectId>,
+
+    /// `DecisionReceipt` `ObjectId` for policy denials.
+    ///
+    /// Present when the request was denied by policy. Contains
+    /// the reason codes and context for the denial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_receipt_id: Option<ObjectId>,
 
     /// Resource URIs created/modified (e.g., `<fcp://fcp.gmail/message/17c9a...>`)
     #[serde(default)]
@@ -315,6 +536,76 @@ pub struct InvokeResponse {
     /// Cursor for pagination
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+
+    /// Response metadata (timing, cache hints).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_metadata: Option<ResponseMetadata>,
+}
+
+impl InvokeResponse {
+    /// Create a successful response.
+    #[must_use]
+    pub fn ok(id: RequestId, result: serde_json::Value) -> Self {
+        Self {
+            r#type: "response".into(),
+            id,
+            status: InvokeStatus::Ok,
+            result: Some(result),
+            error: None,
+            receipt_id: None,
+            audit_event_id: None,
+            decision_receipt_id: None,
+            resource_uris: Vec::new(),
+            next_cursor: None,
+            response_metadata: None,
+        }
+    }
+
+    /// Create an error response.
+    #[must_use]
+    pub fn error(id: RequestId, error: FcpError) -> Self {
+        Self {
+            r#type: "response".into(),
+            id,
+            status: InvokeStatus::Error,
+            result: None,
+            error: Some(error),
+            receipt_id: None,
+            audit_event_id: None,
+            decision_receipt_id: None,
+            resource_uris: Vec::new(),
+            next_cursor: None,
+            response_metadata: None,
+        }
+    }
+
+    /// Set the receipt ID.
+    #[must_use]
+    pub const fn with_receipt_id(mut self, receipt_id: ObjectId) -> Self {
+        self.receipt_id = Some(receipt_id);
+        self
+    }
+
+    /// Set the audit event ID.
+    #[must_use]
+    pub const fn with_audit_event_id(mut self, audit_event_id: ObjectId) -> Self {
+        self.audit_event_id = Some(audit_event_id);
+        self
+    }
+
+    /// Set the decision receipt ID (for denials).
+    #[must_use]
+    pub const fn with_decision_receipt_id(mut self, decision_receipt_id: ObjectId) -> Self {
+        self.decision_receipt_id = Some(decision_receipt_id);
+        self
+    }
+
+    /// Set response metadata.
+    #[must_use]
+    pub const fn with_metadata(mut self, metadata: ResponseMetadata) -> Self {
+        self.response_metadata = Some(metadata);
+        self
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -739,14 +1030,20 @@ mod tests {
         let req = InvokeRequest {
             r#type: "invoke".into(),
             id: RequestId::new("req_001"),
+            connector_id: ConnectorId::from_static("gmail:fcp2:1.0"),
             operation: "gmail.search".parse().unwrap(),
+            zone_id: ZoneId::work(),
             input: serde_json::json!({"query": "from:alice"}),
             capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
             context: Some(InvokeContext {
                 locale: Some("en-US".into()),
                 pagination: Some(serde_json::json!({"page": 1, "size": 10})),
+                trace_id: Some("0af7651916cd43dd8448eb211c80319c".into()),
+                request_tags: std::iter::once(("priority".into(), "high".into())).collect(),
             }),
             idempotency_key: Some("idem_123".into()),
+            lease_seq: None,
             deadline_ms: Some(30000),
             correlation_id: Some(CorrelationId::new()),
             provenance: Some(crate::Provenance::new(ZoneId::work())),
@@ -758,10 +1055,19 @@ mod tests {
 
         assert_eq!(deserialized.r#type, "invoke");
         assert_eq!(deserialized.id.0, "req_001");
+        assert_eq!(deserialized.connector_id.as_str(), "gmail:fcp2:1.0");
         assert_eq!(deserialized.operation.as_str(), "gmail.search");
         assert!(deserialized.context.is_some());
+        let ctx = deserialized.context.unwrap();
+        assert_eq!(
+            ctx.trace_id,
+            Some("0af7651916cd43dd8448eb211c80319c".into())
+        );
+        assert_eq!(ctx.request_tags.get("priority"), Some(&"high".into()));
         assert_eq!(deserialized.idempotency_key, Some("idem_123".into()));
         assert_eq!(deserialized.deadline_ms, Some(30000));
+        assert!(deserialized.holder_proof.is_none());
+        assert!(deserialized.lease_seq.is_none());
     }
 
     #[test]
@@ -769,9 +1075,20 @@ mod tests {
         let resp = InvokeResponse {
             r#type: "response".into(),
             id: RequestId::new("req_001"),
-            result: serde_json::json!({"messages": []}),
+            status: InvokeStatus::Ok,
+            result: Some(serde_json::json!({"messages": []})),
+            error: None,
+            receipt_id: None,
+            audit_event_id: None,
+            decision_receipt_id: None,
             resource_uris: vec!["fcp://fcp.gmail/message/123".into()],
             next_cursor: Some("cursor_abc".into()),
+            response_metadata: Some(ResponseMetadata {
+                processing_time_ms: Some(42),
+                cache_ttl_secs: Some(300),
+                from_cache: false,
+                retry_after_secs: None,
+            }),
         };
 
         let json = serde_json::to_string(&resp).unwrap();
@@ -779,8 +1096,56 @@ mod tests {
 
         assert_eq!(deserialized.r#type, "response");
         assert_eq!(deserialized.id.0, "req_001");
+        assert_eq!(deserialized.status, InvokeStatus::Ok);
+        assert!(deserialized.result.is_some());
+        assert!(deserialized.error.is_none());
         assert_eq!(deserialized.resource_uris.len(), 1);
         assert_eq!(deserialized.next_cursor, Some("cursor_abc".into()));
+        let meta = deserialized.response_metadata.unwrap();
+        assert_eq!(meta.processing_time_ms, Some(42));
+        assert!(!meta.from_cache);
+    }
+
+    #[test]
+    fn invoke_response_error_case() {
+        let resp = InvokeResponse::error(
+            RequestId::new("req_002"),
+            FcpError::CapabilityDenied {
+                capability: "gmail.send".into(),
+                reason: "Insufficient permissions".into(),
+            },
+        );
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: InvokeResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.status, InvokeStatus::Error);
+        assert!(deserialized.result.is_none());
+        assert!(deserialized.error.is_some());
+        match &deserialized.error {
+            Some(FcpError::CapabilityDenied { capability, .. }) => {
+                assert_eq!(capability, "gmail.send");
+            }
+            _ => panic!("Expected CapabilityDenied error"),
+        }
+    }
+
+    #[test]
+    fn invoke_response_ok_helper() {
+        let resp = InvokeResponse::ok(
+            RequestId::new("req_003"),
+            serde_json::json!({"data": "test"}),
+        )
+        .with_receipt_id(ObjectId::test_id("test_receipt"))
+        .with_metadata(ResponseMetadata {
+            processing_time_ms: Some(10),
+            ..Default::default()
+        });
+
+        assert_eq!(resp.status, InvokeStatus::Ok);
+        assert!(resp.result.is_some());
+        assert!(resp.receipt_id.is_some());
+        assert!(resp.response_metadata.is_some());
     }
 
     // ─────────────────────────────────────────────────────────────────────────

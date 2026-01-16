@@ -187,8 +187,18 @@ impl FcpsFrameHeader {
         let flags_bits = u16::from_le_bytes([bytes[6], bytes[7]]);
         let flags = FrameFlags::from_bits_truncate(flags_bits);
 
-        let symbol_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        let total_payload_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        let symbol_count_bytes: [u8; 4] =
+            bytes[8..12].try_into().map_err(|_| FrameError::TooShort {
+                len: bytes.len(),
+                min: FCPS_HEADER_LEN,
+            })?;
+        let symbol_count = u32::from_le_bytes(symbol_count_bytes);
+        let total_payload_len_bytes: [u8; 4] =
+            bytes[12..16].try_into().map_err(|_| FrameError::TooShort {
+                len: bytes.len(),
+                min: FCPS_HEADER_LEN,
+            })?;
+        let total_payload_len = u32::from_le_bytes(total_payload_len_bytes);
 
         let mut object_id_bytes = [0u8; 32];
         object_id_bytes.copy_from_slice(&bytes[16..48]);
@@ -207,9 +217,28 @@ impl FcpsFrameHeader {
         zone_id_hash_bytes.copy_from_slice(&bytes[58..90]);
         let zone_id_hash = ZoneIdHash::from_bytes(zone_id_hash_bytes);
 
-        let epoch_id = u64::from_le_bytes(bytes[90..98].try_into().unwrap());
-        let sender_instance_id = u64::from_le_bytes(bytes[98..106].try_into().unwrap());
-        let frame_seq = u64::from_le_bytes(bytes[106..114].try_into().unwrap());
+        let epoch_id_bytes: [u8; 8] =
+            bytes[90..98].try_into().map_err(|_| FrameError::TooShort {
+                len: bytes.len(),
+                min: FCPS_HEADER_LEN,
+            })?;
+        let sender_instance_id_bytes: [u8; 8] =
+            bytes[98..106]
+                .try_into()
+                .map_err(|_| FrameError::TooShort {
+                    len: bytes.len(),
+                    min: FCPS_HEADER_LEN,
+                })?;
+        let frame_seq_bytes: [u8; 8] =
+            bytes[106..114]
+                .try_into()
+                .map_err(|_| FrameError::TooShort {
+                    len: bytes.len(),
+                    min: FCPS_HEADER_LEN,
+                })?;
+        let epoch_id = u64::from_le_bytes(epoch_id_bytes);
+        let sender_instance_id = u64::from_le_bytes(sender_instance_id_bytes);
+        let frame_seq = u64::from_le_bytes(frame_seq_bytes);
 
         Ok(Self {
             version,
@@ -271,8 +300,16 @@ impl SymbolRecord {
             });
         }
 
-        let esi = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-        let k = u16::from_le_bytes(bytes[4..6].try_into().unwrap());
+        let esi_bytes: [u8; 4] = bytes[0..4].try_into().map_err(|_| FrameError::TooShort {
+            len: bytes.len(),
+            min: expected_len,
+        })?;
+        let k_bytes: [u8; 2] = bytes[4..6].try_into().map_err(|_| FrameError::TooShort {
+            len: bytes.len(),
+            min: expected_len,
+        })?;
+        let esi = u32::from_le_bytes(esi_bytes);
+        let k = u16::from_le_bytes(k_bytes);
 
         let data_end = 6 + symbol_size as usize;
         let data = bytes[6..data_end].to_vec();
@@ -434,7 +471,8 @@ impl DecodeStatus {
 
         // Include missing_hint count and entries if present
         if let Some(ref hints) = self.missing_hint {
-            buf.extend_from_slice(&(hints.len() as u32).to_le_bytes());
+            let hint_len = u32::try_from(hints.len()).unwrap_or(u32::MAX);
+            buf.extend_from_slice(&hint_len.to_le_bytes());
             for esi in hints {
                 buf.extend_from_slice(&esi.to_le_bytes());
             }
@@ -566,7 +604,8 @@ impl SignedFcpsFrame {
 
         let mut out = Vec::with_capacity(2 + source_id_bytes.len() + 8 + 64 + frame_bytes.len());
 
-        out.extend_from_slice(&(source_id_bytes.len() as u16).to_le_bytes());
+        let source_id_len = u16::try_from(source_id_bytes.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&source_id_len.to_le_bytes());
         out.extend_from_slice(source_id_bytes);
         out.extend_from_slice(&self.timestamp.to_le_bytes());
         out.extend_from_slice(&self.signature.to_bytes());
@@ -604,11 +643,13 @@ impl SignedFcpsFrame {
         let source_id = TailscaleNodeId::new(source_id_str);
 
         let timestamp_start = source_id_end;
-        let timestamp = u64::from_le_bytes(
-            bytes[timestamp_start..timestamp_start + 8]
-                .try_into()
-                .unwrap(),
-        );
+        let timestamp_bytes: [u8; 8] = bytes[timestamp_start..timestamp_start + 8]
+            .try_into()
+            .map_err(|_| FrameError::TooShort {
+                len: bytes.len(),
+                min: timestamp_start + 8,
+            })?;
+        let timestamp = u64::from_le_bytes(timestamp_bytes);
 
         let sig_start = timestamp_start + 8;
         let signature =
@@ -640,7 +681,8 @@ mod tests {
             version: FCPS_VERSION,
             flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
             symbol_count: 2,
-            total_payload_len: 2 * (SYMBOL_RECORD_OVERHEAD + 64) as u32,
+            total_payload_len: u32::try_from(2 * (SYMBOL_RECORD_OVERHEAD + 64))
+                .expect("payload length fits in u32"),
             object_id: ObjectId::from_bytes([0x11; 32]),
             symbol_size: 64,
             zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
@@ -833,7 +875,7 @@ mod tests {
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame {
             header: header.clone(),
-            symbols: symbols.clone(),
+            symbols,
         };
 
         let source_id = TailscaleNodeId::new("node-roundtrip");

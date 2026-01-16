@@ -275,20 +275,20 @@ impl ZoneKeyRing {
             });
         }
 
-        let wrapped_zone = manifest
-            .wrapped_key_for(node_id)
-            .ok_or_else(|| ZoneKeyError::MissingWrappedZoneKey {
+        let wrapped_zone = manifest.wrapped_key_for(node_id).ok_or_else(|| {
+            ZoneKeyError::MissingWrappedZoneKey {
                 node_id: node_id.as_str().to_string(),
-            })?;
+            }
+        })?;
         let zone_key = unwrap_zone_key(node_secret, &manifest.zone_id, wrapped_zone)?;
         self.insert_zone_key(manifest.zone_key_id, zone_key);
         self.active_zone_key_id = Some(manifest.zone_key_id);
 
-        let wrapped_object_id = manifest
-            .wrapped_object_id_key_for(node_id)
-            .ok_or_else(|| ZoneKeyError::MissingWrappedObjectIdKey {
+        let wrapped_object_id = manifest.wrapped_object_id_key_for(node_id).ok_or_else(|| {
+            ZoneKeyError::MissingWrappedObjectIdKey {
                 node_id: node_id.as_str().to_string(),
-            })?;
+            }
+        })?;
         let object_id_key =
             unwrap_object_id_key(node_secret, &manifest.zone_id, wrapped_object_id)?;
         self.insert_object_id_key(manifest.object_id_key_id, object_id_key);
@@ -418,11 +418,11 @@ pub fn unwrap_object_id_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{NodeId, NodeSignature, ObjectHeader, Provenance};
     use fcp_cbor::SchemaId;
     use fcp_crypto::x25519::X25519SecretKey;
-    use semver::Version;
-    use crate::{NodeId, NodeSignature, ObjectHeader, Provenance};
     use rand::RngCore;
+    use semver::Version;
 
     fn random_zone_key() -> ZoneKey {
         let mut bytes = [0u8; ZONE_KEY_LEN];
@@ -527,8 +527,7 @@ mod tests {
         let zone_key = random_zone_key();
         let object_id_key = random_object_id_key();
 
-        let wrapped_zone =
-            wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
         let wrapped_object =
             wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &object_id_key).unwrap();
 
@@ -551,7 +550,10 @@ mod tests {
         ring.apply_manifest(&manifest, &node_id, &sk).unwrap();
 
         assert_eq!(ring.active_zone_key_id, Some(manifest.zone_key_id));
-        assert_eq!(ring.active_object_id_key_id, Some(manifest.object_id_key_id));
+        assert_eq!(
+            ring.active_object_id_key_id,
+            Some(manifest.object_id_key_id)
+        );
         assert_eq!(ring.active_zone_key(), Some(&zone_key));
         assert_eq!(ring.active_object_id_key(), Some(&object_id_key));
     }
@@ -568,8 +570,7 @@ mod tests {
         let zone_key = random_zone_key();
         let object_id_key = random_object_id_key();
 
-        let wrapped_zone =
-            wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
         let wrapped_object =
             wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &object_id_key).unwrap();
 
@@ -681,8 +682,14 @@ mod tests {
         // This enables decryption of symbols encrypted under either epoch without trial decrypt.
         assert_eq!(ring.zone_key(&zone_key_id_1), Some(&zone_key_1));
         assert_eq!(ring.zone_key(&zone_key_id_2), Some(&zone_key_2));
-        assert_eq!(ring.object_id_key(&object_id_key_id_1), Some(&object_id_key_1));
-        assert_eq!(ring.object_id_key(&object_id_key_id_2), Some(&object_id_key_2));
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_1),
+            Some(&object_id_key_1)
+        );
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_2),
+            Some(&object_id_key_2)
+        );
 
         // Verify we can switch active key back to epoch 1 (for decryption overlap window)
         assert!(ring.set_active_zone_key(zone_key_id_1));
@@ -690,8 +697,9 @@ mod tests {
     }
 
     /// Test membership change: a removed node cannot decrypt newly wrapped keys
-    /// because they are not included in the wrapped_keys list.
+    /// because they are not included in the `wrapped_keys` list.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn membership_change_removed_node_cannot_decrypt() {
         let zone_id = ZoneId::work();
 
@@ -755,9 +763,15 @@ mod tests {
         let mut ring_2 = ZoneKeyRing::new(zone_id.clone());
         let mut ring_3 = ZoneKeyRing::new(zone_id.clone());
 
-        ring_1.apply_manifest(&manifest_1, &node_1_id, &sk_1).unwrap();
-        ring_2.apply_manifest(&manifest_1, &node_2_id, &sk_2).unwrap();
-        ring_3.apply_manifest(&manifest_1, &node_3_id, &sk_3).unwrap();
+        ring_1
+            .apply_manifest(&manifest_1, &node_1_id, &sk_1)
+            .unwrap();
+        ring_2
+            .apply_manifest(&manifest_1, &node_2_id, &sk_2)
+            .unwrap();
+        ring_3
+            .apply_manifest(&manifest_1, &node_3_id, &sk_3)
+            .unwrap();
 
         // === Second manifest: node-3 is removed from membership ===
         let issued_at_2 = 1_700_100_000;
@@ -795,8 +809,12 @@ mod tests {
         };
 
         // Nodes 1 and 2 can apply the new manifest
-        ring_1.apply_manifest(&manifest_2, &node_1_id, &sk_1).unwrap();
-        ring_2.apply_manifest(&manifest_2, &node_2_id, &sk_2).unwrap();
+        ring_1
+            .apply_manifest(&manifest_2, &node_1_id, &sk_1)
+            .unwrap();
+        ring_2
+            .apply_manifest(&manifest_2, &node_2_id, &sk_2)
+            .unwrap();
 
         // CRITICAL: Node 3 CANNOT apply the new manifest (no wrapped key for them)
         let err = ring_3
@@ -819,7 +837,7 @@ mod tests {
         assert!(ring_3.zone_key(&zone_key_id_2).is_none());
     }
 
-    /// Test that ObjectIdKey rotation can happen independently or alongside ZoneKey rotation.
+    /// Test that `ObjectIdKey` rotation can happen independently or alongside `ZoneKey` rotation.
     #[test]
     fn rotation_with_object_id_key_change() {
         let zone_id = ZoneId::private();
@@ -898,7 +916,13 @@ mod tests {
         // Both old and new keys accessible (no trial decrypt needed)
         assert_eq!(ring.zone_key(&zone_key_id_1), Some(&zone_key_1));
         assert_eq!(ring.zone_key(&zone_key_id_2), Some(&zone_key_2));
-        assert_eq!(ring.object_id_key(&object_id_key_id_1), Some(&object_id_key_1));
-        assert_eq!(ring.object_id_key(&object_id_key_id_2), Some(&object_id_key_2));
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_1),
+            Some(&object_id_key_1)
+        );
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_2),
+            Some(&object_id_key_2)
+        );
     }
 }

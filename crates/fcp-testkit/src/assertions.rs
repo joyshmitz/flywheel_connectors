@@ -121,22 +121,24 @@ pub fn assert_unhealthy(snapshot: &HealthSnapshot) {
 ///
 /// # Panics
 ///
-/// Panics if result is null.
+/// Panics if result is null or None.
 pub fn assert_has_result(response: &InvokeResponse) {
-    assert!(!response.result.is_null(), "Expected result but got null");
+    if let Some(val) = &response.result {
+        assert!(!val.is_null(), "Expected result but got JSON null");
+    } else {
+        panic!("Expected result but got None");
+    }
 }
 
 /// Assert that an invoke response has a null result.
 ///
 /// # Panics
 ///
-/// Panics if result is not null.
+/// Panics if result is not null/None.
 pub fn assert_no_result(response: &InvokeResponse) {
-    assert!(
-        response.result.is_null(),
-        "Expected null result but got: {:?}",
-        response.result
-    );
+    if let Some(val) = &response.result {
+        assert!(val.is_null(), "Expected null result but got: {:?}", val);
+    }
 }
 
 /// Assert that an invoke response result contains a specific field.
@@ -145,11 +147,12 @@ pub fn assert_no_result(response: &InvokeResponse) {
 ///
 /// Panics if the field is missing.
 pub fn assert_result_has_field(response: &InvokeResponse, field: &str) {
+    let result = response.result.as_ref().expect("Response has no result");
     assert!(
-        response.result.get(field).is_some(),
+        result.get(field).is_some(),
         "Expected field '{}' in result but got: {:?}",
         field,
-        response.result
+        result
     );
 }
 
@@ -163,10 +166,8 @@ pub fn assert_result_field_eq(
     field: &str,
     expected: &serde_json::Value,
 ) {
-    let actual = response
-        .result
-        .get(field)
-        .unwrap_or(&serde_json::Value::Null);
+    let result = response.result.as_ref().expect("Response has no result");
+    let actual = result.get(field).unwrap_or(&serde_json::Value::Null);
     assert_eq!(
         actual, expected,
         "Expected field '{}' to equal {:?} but got {:?}",

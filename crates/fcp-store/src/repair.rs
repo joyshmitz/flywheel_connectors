@@ -105,17 +105,41 @@ impl RateLimiter {
     }
 
     fn try_acquire(&self) -> bool {
-        // Refill tokens if a minute has passed
-        let now = std::time::Instant::now();
-        {
-            let mut last = self.last_refill.write();
-            if now.duration_since(*last) >= Duration::from_secs(60) {
-                *self.tokens.write() = self.max_tokens;
-                *last = now;
-            }
+        if self.max_tokens == 0 {
+            return false;
         }
 
+        // We need to lock both to update atomically
+        let mut last = self.last_refill.write();
         let mut tokens = self.tokens.write();
+
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(*last);
+        let nanos_per_token = 60_000_000_000 / u64::from(self.max_tokens);
+
+        // Add tokens based on elapsed time
+        if nanos_per_token > 0 {
+            let new_tokens = (elapsed.as_nanos() as u64) / nanos_per_token;
+            if new_tokens > 0 {
+                // Determine new token count, capped at max
+                let current = *tokens;
+                let updated = current.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
+
+                if updated >= self.max_tokens {
+                    *tokens = self.max_tokens;
+                    *last = now; // Reset time if bucket is full
+                } else {
+                    *tokens = updated;
+                    // Advance time by the amount of tokens added to preserve phase
+                    *last += Duration::from_nanos(new_tokens * nanos_per_token);
+                }
+            }
+        } else {
+            // Rate implies > 1 token/ns (unlikely), just fill
+            *tokens = self.max_tokens;
+            *last = now;
+        }
+
         if *tokens > 0 {
             *tokens -= 1;
             true

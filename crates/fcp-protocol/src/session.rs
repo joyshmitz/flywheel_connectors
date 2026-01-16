@@ -1299,6 +1299,42 @@ mod tests {
     }
 
     #[test]
+    fn datagram_decode_accepts_empty_frame() {
+        let session_id = MeshSessionId([0x9A_u8; 16]);
+        let context = LogContext::new("datagram", "decode_bounds").with_session(&session_id);
+        run_logged_test("datagram_decode_accepts_empty_frame", 2, &context, || {
+            let mut bytes = Vec::with_capacity(FCPS_DATAGRAM_HEADER_LEN);
+            bytes.extend_from_slice(session_id.as_bytes());
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; SESSION_MAC_SIZE]);
+
+            let decoded =
+                FcpsDatagram::decode(&bytes, DEFAULT_MAX_DATAGRAM_BYTES).expect("decode ok");
+            assert_eq!(decoded.session_id, session_id);
+            assert!(decoded.frame_bytes.is_empty());
+        });
+    }
+
+    #[test]
+    fn datagram_decode_accepts_max_boundary() {
+        let session_id = MeshSessionId([0x9B_u8; 16]);
+        let context = LogContext::new("datagram", "decode_bounds").with_session(&session_id);
+        run_logged_test("datagram_decode_accepts_max_boundary", 1, &context, || {
+            let max = DEFAULT_MAX_DATAGRAM_BYTES as usize;
+            let payload_len = max.saturating_sub(FCPS_DATAGRAM_HEADER_LEN);
+            let mut bytes = Vec::with_capacity(max);
+            bytes.extend_from_slice(session_id.as_bytes());
+            bytes.extend_from_slice(&1u64.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; SESSION_MAC_SIZE]);
+            bytes.extend(std::iter::repeat_n(0xAAu8, payload_len));
+
+            let decoded =
+                FcpsDatagram::decode(&bytes, DEFAULT_MAX_DATAGRAM_BYTES).expect("decode ok");
+            assert_eq!(decoded.frame_bytes.len(), payload_len);
+        });
+    }
+
+    #[test]
     fn session_mac_rejects_tampered_frame() {
         let session_id = MeshSessionId([0x55_u8; 16]);
         let context = LogContext::new("established", "mac_verify")
@@ -1328,6 +1364,236 @@ mod tests {
                     9,
                     &tampered,
                     &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn session_mac_rejects_wrong_session_id() {
+        let session_id = MeshSessionId([0x59_u8; 16]);
+        let other_session_id = MeshSessionId([0x5A_u8; 16]);
+        let context = LogContext::new("established", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite2)
+            .with_reason("FCP-3004");
+        run_logged_test("session_mac_rejects_wrong_session_id", 1, &context, || {
+            let key = [0x55_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite2,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                15,
+                frame,
+            )
+            .expect("mac");
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite2,
+                    &key,
+                    &other_session_id,
+                    SessionDirection::InitiatorToResponder,
+                    15,
+                    frame,
+                    &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn session_mac_rejects_wrong_key() {
+        let session_id = MeshSessionId([0x56_u8; 16]);
+        let context = LogContext::new("established", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite2)
+            .with_reason("FCP-3004");
+        run_logged_test("session_mac_rejects_wrong_key", 1, &context, || {
+            let key = [0x11_u8; 32];
+            let wrong_key = [0x22_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite2,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                11,
+                frame,
+            )
+            .expect("mac");
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite2,
+                    &wrong_key,
+                    &session_id,
+                    SessionDirection::InitiatorToResponder,
+                    11,
+                    frame,
+                    &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn session_mac_rejects_wrong_direction() {
+        let session_id = MeshSessionId([0x57_u8; 16]);
+        let context = LogContext::new("established", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite1)
+            .with_reason("FCP-3004");
+        run_logged_test("session_mac_rejects_wrong_direction", 1, &context, || {
+            let key = [0x33_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite1,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                12,
+                frame,
+            )
+            .expect("mac");
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite1,
+                    &key,
+                    &session_id,
+                    SessionDirection::ResponderToInitiator,
+                    12,
+                    frame,
+                    &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn session_mac_rejects_wrong_sequence() {
+        let session_id = MeshSessionId([0x58_u8; 16]);
+        let context = LogContext::new("established", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite1)
+            .with_reason("FCP-3004");
+        run_logged_test("session_mac_rejects_wrong_sequence", 1, &context, || {
+            let key = [0x44_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite1,
+                &key,
+                &session_id,
+                SessionDirection::ResponderToInitiator,
+                13,
+                frame,
+            )
+            .expect("mac");
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite1,
+                    &key,
+                    &session_id,
+                    SessionDirection::ResponderToInitiator,
+                    14,
+                    frame,
+                    &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn session_mac_rejects_wrong_suite() {
+        let session_id = MeshSessionId([0x5B_u8; 16]);
+        let context = LogContext::new("established", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite1)
+            .with_reason("FCP-3004");
+        run_logged_test("session_mac_rejects_wrong_suite", 1, &context, || {
+            let key = [0x66_u8; 32];
+            let frame = b"frame-bytes";
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite1,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                16,
+                frame,
+            )
+            .expect("mac");
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite2,
+                    &key,
+                    &session_id,
+                    SessionDirection::InitiatorToResponder,
+                    16,
+                    frame,
+                    &mac,
+                ),
+                Err(SessionError::InvalidSignature)
+            ));
+        });
+    }
+
+    #[test]
+    fn datagram_mac_verification_round_trip() {
+        let session_id = MeshSessionId([0x77_u8; 16]);
+        let context = LogContext::new("datagram", "mac_verify")
+            .with_session(&session_id)
+            .with_suite(SessionCryptoSuite::Suite2)
+            .with_reason("FCP-3004");
+        run_logged_test("datagram_mac_verification_round_trip", 2, &context, || {
+            let key = [0x55_u8; 32];
+            let frame_bytes = vec![0xAB, 0xCD, 0xEF];
+            let seq = 21;
+            let mac = compute_session_mac(
+                SessionCryptoSuite::Suite2,
+                &key,
+                &session_id,
+                SessionDirection::InitiatorToResponder,
+                seq,
+                &frame_bytes,
+            )
+            .expect("mac");
+
+            let datagram = FcpsDatagram {
+                session_id,
+                seq,
+                mac,
+                frame_bytes,
+            };
+            let encoded = datagram.encode();
+            let decoded =
+                FcpsDatagram::decode(&encoded, DEFAULT_MAX_DATAGRAM_BYTES).expect("decode ok");
+            verify_session_mac(
+                SessionCryptoSuite::Suite2,
+                &key,
+                &decoded.session_id,
+                SessionDirection::InitiatorToResponder,
+                decoded.seq,
+                &decoded.frame_bytes,
+                &decoded.mac,
+            )
+            .expect("mac verified");
+
+            let mut tampered = decoded.mac;
+            tampered[0] ^= 0xFF;
+            assert!(matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite2,
+                    &key,
+                    &decoded.session_id,
+                    SessionDirection::InitiatorToResponder,
+                    decoded.seq,
+                    &decoded.frame_bytes,
+                    &tampered,
                 ),
                 Err(SessionError::InvalidSignature)
             ));

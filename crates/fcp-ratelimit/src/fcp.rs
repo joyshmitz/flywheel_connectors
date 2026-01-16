@@ -372,6 +372,39 @@ mod tests {
         assert_eq!(cfg.burst_size, Some(110));
     }
 
+    #[test]
+    fn config_from_core_rejects_zero_limits() {
+        let core = fcp_core::RateLimit {
+            max: 0,
+            per_ms: 60_000,
+            burst: None,
+            scope: None,
+        };
+        let err = config_from_core(&core).unwrap_err();
+        assert!(err.to_string().contains("max must be > 0"));
+
+        let core = fcp_core::RateLimit {
+            max: 10,
+            per_ms: 0,
+            burst: None,
+            scope: None,
+        };
+        let err = config_from_core(&core).unwrap_err();
+        assert!(err.to_string().contains("per_ms must be > 0"));
+    }
+
+    #[test]
+    fn config_from_core_rejects_burst_overflow() {
+        let core = fcp_core::RateLimit {
+            max: u32::MAX,
+            per_ms: 60_000,
+            burst: Some(1),
+            scope: None,
+        };
+        let err = config_from_core(&core).unwrap_err();
+        assert!(err.to_string().contains("burst overflow"));
+    }
+
     #[tokio::test]
     async fn enforce_emits_soft_backpressure_without_rejecting() {
         // Create a limiter with small capacity so we can push utilization > 95% without full
@@ -425,6 +458,79 @@ mod tests {
         assert_eq!(resp.code, "FCP-3002");
         assert!(resp.details.is_some());
         assert!(resp.details.unwrap().get("throttle_violation").is_some());
+    }
+
+    #[test]
+    fn backpressure_threshold_boundaries() {
+        let thresholds = BackpressureThresholds::standard();
+
+        let state_warning = RateLimitState {
+            limit: 10_000,
+            remaining: 2_000,
+            reset_after: Duration::from_secs(10),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state_warning, thresholds);
+        assert_eq!(signal.utilization_bps, 8_000);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::Warning);
+
+        let state_soft = RateLimitState {
+            limit: 10_000,
+            remaining: 500,
+            reset_after: Duration::from_secs(10),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state_soft, thresholds);
+        assert_eq!(signal.utilization_bps, 9_500);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::SoftLimit);
+        assert!(signal.retry_after_ms.is_some());
+
+        let state_hard = RateLimitState {
+            limit: 10_000,
+            remaining: 0,
+            reset_after: Duration::from_secs(10),
+            is_limited: false,
+        };
+        let signal = backpressure_from_state(&state_hard, thresholds);
+        assert_eq!(signal.utilization_bps, 10_000);
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::HardLimit);
+        assert!(signal.retry_after_ms.is_some());
+    }
+
+    #[test]
+    fn as_rate_limited_error_prefers_backpressure_retry_after() {
+        let state = RateLimitState {
+            limit: 100,
+            remaining: 0,
+            reset_after: Duration::from_millis(700),
+            is_limited: true,
+        };
+        let backpressure = backpressure_from_state(&state, BackpressureThresholds::standard());
+
+        let violation = fcp_core::ThrottleViolation::new(fcp_core::ThrottleViolationInput {
+            timestamp_ms: 1_000,
+            zone_id: "z:work".parse().unwrap(),
+            connector_id: None,
+            operation_id: None,
+            limit_type: fcp_core::LimitType::Rpm,
+            limit_value: 100,
+            current_value: 101,
+            retry_after_ms: 10,
+        });
+
+        let out = EnforcementOutcome {
+            allowed: false,
+            state,
+            backpressure,
+            violation: Some(violation),
+        };
+
+        let err = out.as_rate_limited_error().unwrap();
+        if let fcp_core::FcpError::RateLimited { retry_after_ms, .. } = err {
+            assert_eq!(retry_after_ms, 700);
+        } else {
+            panic!("expected rate limited error");
+        }
     }
 
     #[test]
