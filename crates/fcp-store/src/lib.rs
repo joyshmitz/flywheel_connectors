@@ -34,6 +34,7 @@ mod coverage;
 mod error;
 mod gc;
 mod object_store;
+mod offline;
 mod quarantine;
 mod repair;
 mod symbol_store;
@@ -53,4 +54,8 @@ pub use repair::{
 pub use symbol_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
     StoredSymbol, SymbolMeta, SymbolStore,
+};
+
+pub use offline::{
+    AccessPatternTracker, OfflineAccess, OfflineCapability, OfflineStatus, OfflineSummary,
 };
