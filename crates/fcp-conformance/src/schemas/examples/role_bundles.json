@@ -1,0 +1,84 @@
+{
+  "$schema": "../FZPF_v0.1.schema.json",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "policy_id": "role-bundles-example",
+    "default_deny": true
+  },
+  "zones": [
+    {
+      "id": "z:work",
+      "name": "Work Zone",
+      "integrity_level": 60,
+      "confidentiality_level": 70
+    },
+    {
+      "id": "z:private",
+      "name": "Private Zone",
+      "integrity_level": 80,
+      "confidentiality_level": 90
+    }
+  ],
+  "roles": [
+    {
+      "role_id": "reader",
+      "name": "Reader",
+      "description": "Read-only access to basic data",
+      "caps": [
+        {
+          "capability_id": "data:read",
+          "resource_allow": ["*"]
+        }
+      ]
+    },
+    {
+      "role_id": "writer",
+      "name": "Writer",
+      "description": "Read and write access to data",
+      "caps": [
+        {
+          "capability_id": "data:write",
+          "resource_allow": ["*"]
+        }
+      ],
+      "includes": ["reader"]
+    },
+    {
+      "role_id": "admin",
+      "name": "Administrator",
+      "description": "Full administrative access",
+      "caps": [
+        {
+          "capability_id": "admin:manage",
+          "resource_allow": ["*"]
+        }
+      ],
+      "includes": ["writer"]
+    }
+  ],
+  "role_assignments": [
+    {
+      "role_id": "reader",
+      "principal": "agent:alice",
+      "zone_id": "z:work"
+    },
+    {
+      "role_id": "writer",
+      "principal": "agent:bob",
+      "zone_id": "z:work",
+      "attenuations": [
+        {
+          "capability_id": "data:write",
+          "resource_deny": ["*.secret", "*.private"]
+        }
+      ]
+    },
+    {
+      "role_id": "admin",
+      "principal": "owner:root",
+      "zone_id": "z:private",
+      "expires_at": "2027-01-01T00:00:00Z"
+    }
+  ]
+}

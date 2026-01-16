@@ -1,0 +1,92 @@
+{
+  "$schema": "../FZPF_v0.1.schema.json",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "policy_id": "transport-restrictions-example",
+    "default_deny": true
+  },
+  "defaults": {
+    "transport": {
+      "allow_lan": true,
+      "allow_derp": false,
+      "allow_funnel": false
+    }
+  },
+  "zones": [
+    {
+      "id": "z:private",
+      "name": "Private Zone",
+      "description": "High-security zone - LAN only, no DERP/Funnel",
+      "integrity_level": 80,
+      "confidentiality_level": 90,
+      "transport_policy": {
+        "allow_lan": true,
+        "allow_derp": false,
+        "allow_funnel": false
+      }
+    },
+    {
+      "id": "z:work",
+      "name": "Work Zone",
+      "description": "Work zone - LAN and DERP allowed for flexibility",
+      "integrity_level": 60,
+      "confidentiality_level": 70,
+      "transport_policy": {
+        "allow_lan": true,
+        "allow_derp": true,
+        "allow_funnel": false
+      }
+    },
+    {
+      "id": "z:public",
+      "name": "Public Zone",
+      "description": "Public zone - all transports allowed",
+      "integrity_level": 20,
+      "confidentiality_level": 10,
+      "transport_policy": {
+        "allow_lan": true,
+        "allow_derp": true,
+        "allow_funnel": true
+      }
+    }
+  ],
+  "zone_policies": [
+    {
+      "zone_id": "z:private",
+      "transport_policy": {
+        "allow_lan": true,
+        "allow_derp": false,
+        "allow_funnel": false
+      }
+    }
+  ],
+  "flows": [
+    {
+      "name": "private-to-work-egress",
+      "from": "z:private",
+      "to": "z:work",
+      "kind": "egress",
+      "allow": true,
+      "requires_declassification": true,
+      "audit": true
+    },
+    {
+      "name": "work-to-public-egress",
+      "from": "z:work",
+      "to": "z:public",
+      "kind": "egress",
+      "allow": true,
+      "requires_declassification": true,
+      "audit": true
+    },
+    {
+      "name": "public-to-private-deny",
+      "from": "z:public",
+      "to": "z:private",
+      "kind": "ingress",
+      "allow": false,
+      "audit": true
+    }
+  ]
+}

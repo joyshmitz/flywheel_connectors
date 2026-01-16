@@ -1,0 +1,736 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flywheel.dev/schemas/fzpf-0.1.schema.json",
+  "title": "Flywheel Zone Policy Format (FZPF) v0.1 for FCP2",
+  "description": "Schema for FCP2 zone policy authoring and validation. Defines zone definitions, policies, roles, flows, and approval constraints.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["policy", "zones"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor support"
+    },
+    "$comment": {
+      "type": "string",
+      "description": "Optional comment field for documentation (standard JSON Schema convention)"
+    },
+    "policy": { "$ref": "#/$defs/policy_header" },
+    "defaults": { "$ref": "#/$defs/defaults" },
+    "zones": {
+      "type": "array",
+      "description": "Zone definitions",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/zone_definition" }
+    },
+    "zone_policies": {
+      "type": "array",
+      "description": "Zone policy objects (linked to zone definitions via zone_id)",
+      "default": [],
+      "items": { "$ref": "#/$defs/zone_policy" }
+    },
+    "roles": {
+      "type": "array",
+      "description": "Role definitions for capability bundling",
+      "default": [],
+      "items": { "$ref": "#/$defs/role_definition" }
+    },
+    "role_assignments": {
+      "type": "array",
+      "description": "Role-to-principal assignments",
+      "default": [],
+      "items": { "$ref": "#/$defs/role_assignment" }
+    },
+    "flows": {
+      "type": "array",
+      "description": "Cross-zone data flow rules",
+      "default": [],
+      "items": { "$ref": "#/$defs/flow_rule" }
+    },
+    "taint_rules": {
+      "type": "array",
+      "description": "Taint-based policy rules",
+      "default": [],
+      "items": { "$ref": "#/$defs/taint_rule" }
+    },
+    "approval_constraints": {
+      "type": "array",
+      "description": "Constraints for approval tokens (elevation/declassification/execution)",
+      "default": [],
+      "items": { "$ref": "#/$defs/approval_constraint" }
+    }
+  },
+  "$defs": {
+    "nonempty_string": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "glob_pattern": {
+      "type": "string",
+      "description": "Glob pattern (NORMATIVE: * and ? only, no regex/JSONPath, ASCII, anchored)",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9*?._:-]+$"
+    },
+    "resource_uri_pattern": {
+      "type": "string",
+      "description": "Resource URI pattern for capability grants (allows URL characters: /, @, %, etc.)",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[a-zA-Z0-9*?._:/@%#&=+~-]+$"
+    },
+    "zone_id": {
+      "type": "string",
+      "description": "Zone identifier (NORMATIVE: must match ^z:[a-z][a-z0-9_-]*$)",
+      "pattern": "^z:[a-z][a-z0-9_-]*$",
+      "minLength": 3,
+      "maxLength": 64
+    },
+    "integrity_level": {
+      "type": "integer",
+      "description": "Integrity level (0-100). Higher = more trusted inputs. Standard: owner=100, private=80, work=60, community=40, public=20",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "confidentiality_level": {
+      "type": "integer",
+      "description": "Confidentiality level (0-100). Higher = more secret data. Standard: owner=100, private=90, work=70, community=40, public=10",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "port_number": {
+      "type": "integer",
+      "description": "UDP/TCP port number",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "safety_tier": {
+      "type": "string",
+      "description": "Operation safety classification",
+      "enum": ["safe", "risky", "dangerous", "critical", "forbidden"]
+    },
+    "freshness_policy": {
+      "type": "string",
+      "description": "Revocation/checkpoint freshness enforcement level",
+      "enum": ["strict", "warn", "best_effort"]
+    },
+    "json_pointer": {
+      "type": "string",
+      "description": "RFC 6901 JSON Pointer (NORMATIVE: JSONPath and regex are forbidden)",
+      "pattern": "^(/[^/~]*(~[01][^/~]*)*)*$",
+      "maxLength": 256
+    },
+    "constraint_op": {
+      "type": "string",
+      "description": "Constraint operation for approval scopes",
+      "enum": ["eq", "neq", "in", "not_in", "prefix", "suffix", "contains"]
+    },
+    "policy_header": {
+      "type": "object",
+      "description": "Policy file header with format and versioning",
+      "additionalProperties": false,
+      "required": ["format", "schema_version", "default_deny"],
+      "properties": {
+        "format": {
+          "const": "fzpf",
+          "description": "Policy format identifier"
+        },
+        "schema_version": {
+          "const": "0.1",
+          "description": "Schema version"
+        },
+        "policy_id": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Unique policy identifier"
+        },
+        "last_updated": {
+          "type": "string",
+          "description": "ISO 8601 timestamp of last update",
+          "format": "date-time"
+        },
+        "default_deny": {
+          "type": "boolean",
+          "description": "If true, operations not explicitly allowed are denied"
+        },
+        "freshness_policy": {
+          "$ref": "#/$defs/freshness_policy",
+          "description": "Default revocation/checkpoint freshness enforcement",
+          "default": "strict"
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Default policy settings",
+      "additionalProperties": false,
+      "properties": {
+        "taint": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "require_elevation_min_safety": {
+              "$ref": "#/$defs/safety_tier",
+              "description": "Minimum safety tier requiring elevation for tainted inputs"
+            },
+            "require_approval_min_safety": {
+              "$ref": "#/$defs/safety_tier",
+              "description": "Minimum safety tier requiring interactive approval"
+            }
+          }
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "revocation_max_age_secs": {
+              "type": "integer",
+              "description": "Maximum acceptable age of revocation frontier",
+              "minimum": 0,
+              "default": 300
+            },
+            "checkpoint_max_age_secs": {
+              "type": "integer",
+              "description": "Maximum acceptable age of zone checkpoint",
+              "minimum": 0,
+              "default": 300
+            }
+          }
+        },
+        "transport": {
+          "$ref": "#/$defs/transport_policy",
+          "description": "Default transport policy for all zones"
+        }
+      }
+    },
+    "transport_policy": {
+      "type": "object",
+      "description": "Zone transport policy (NORMATIVE)",
+      "additionalProperties": false,
+      "properties": {
+        "allow_lan": {
+          "type": "boolean",
+          "description": "Allow direct LAN/peer-to-peer transport",
+          "default": true
+        },
+        "allow_derp": {
+          "type": "boolean",
+          "description": "Allow DERP relay transport",
+          "default": false
+        },
+        "allow_funnel": {
+          "type": "boolean",
+          "description": "Allow Tailscale Funnel (public ingress)",
+          "default": false
+        }
+      }
+    },
+    "zone_rekey_policy": {
+      "type": "object",
+      "description": "Zone key rotation policy for past secrecy",
+      "additionalProperties": false,
+      "properties": {
+        "epoch_ratchet_enabled": {
+          "type": "boolean",
+          "description": "Enable epoch-based key ratcheting for past secrecy",
+          "default": false
+        },
+        "overlap_secs": {
+          "type": "integer",
+          "description": "Overlap window for clock skew tolerance during rotation",
+          "minimum": 0,
+          "default": 60
+        },
+        "retain_epochs": {
+          "type": "integer",
+          "description": "Number of past epochs to retain for delayed/offline peers",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 3
+        },
+        "rewrap_on_membership_change": {
+          "type": "boolean",
+          "description": "Automatically rewrap zone keys when members change",
+          "default": true
+        },
+        "rotate_object_id_key_on_membership_change": {
+          "type": "boolean",
+          "description": "Rotate ObjectIdKey on membership change (privacy hardening)",
+          "default": false
+        }
+      }
+    },
+    "zone_definition": {
+      "type": "object",
+      "description": "Zone definition object (owner-signed)",
+      "additionalProperties": false,
+      "required": ["id", "integrity_level", "confidentiality_level"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Zone identifier"
+        },
+        "name": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Human-readable zone name"
+        },
+        "description": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Zone description"
+        },
+        "integrity_level": {
+          "$ref": "#/$defs/integrity_level",
+          "description": "Zone integrity level (Biba-style: higher = more trusted)"
+        },
+        "confidentiality_level": {
+          "$ref": "#/$defs/confidentiality_level",
+          "description": "Zone confidentiality level (Bell-LaPadula-style: higher = more secret)"
+        },
+        "parent": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Parent zone (NORMATIVE: child levels must not exceed parent)"
+        },
+        "symbol_port": {
+          "$ref": "#/$defs/port_number",
+          "description": "UDP/TCP port for symbol frames in this zone"
+        },
+        "control_port": {
+          "$ref": "#/$defs/port_number",
+          "description": "UDP/TCP port for gossip/control-plane objects in this zone"
+        },
+        "transport_policy": {
+          "$ref": "#/$defs/transport_policy",
+          "description": "Zone-specific transport policy"
+        },
+        "rekey_policy": {
+          "$ref": "#/$defs/zone_rekey_policy",
+          "description": "Zone key rotation policy"
+        },
+        "freshness_policy": {
+          "$ref": "#/$defs/freshness_policy",
+          "description": "Zone-specific freshness enforcement level"
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Extension metadata",
+          "additionalProperties": true
+        }
+      }
+    },
+    "zone_policy": {
+      "type": "object",
+      "description": "Zone policy object (access control rules)",
+      "additionalProperties": false,
+      "required": ["zone_id"],
+      "properties": {
+        "zone_id": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Zone this policy applies to"
+        },
+        "principal_allow": {
+          "type": "array",
+          "description": "Allowed principal patterns (glob syntax)",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "principal_deny": {
+          "type": "array",
+          "description": "Denied principal patterns (overrides allow)",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "connector_allow": {
+          "type": "array",
+          "description": "Allowed connector patterns",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "connector_deny": {
+          "type": "array",
+          "description": "Denied connector patterns",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "capability_allow": {
+          "type": "array",
+          "description": "Allowed capability patterns",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "capability_deny": {
+          "type": "array",
+          "description": "Denied capability patterns",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "capability_ceiling": {
+          "type": "array",
+          "description": "Maximum capabilities available in this zone (ceiling)",
+          "default": [],
+          "items": { "$ref": "#/$defs/nonempty_string" }
+        },
+        "transport_policy": {
+          "$ref": "#/$defs/transport_policy",
+          "description": "Zone transport policy override"
+        },
+        "decision_receipts": {
+          "type": "object",
+          "description": "Decision receipt emission policy",
+          "additionalProperties": false,
+          "properties": {
+            "emit_on_allow": {
+              "type": "boolean",
+              "default": false
+            },
+            "emit_on_deny": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "capability_grant": {
+      "type": "object",
+      "description": "A capability grant with optional attenuation",
+      "additionalProperties": false,
+      "required": ["capability_id"],
+      "properties": {
+        "capability_id": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Capability identifier"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Optional specific operation"
+        },
+        "resource_allow": {
+          "type": "array",
+          "description": "Resource URI patterns to allow",
+          "default": [],
+          "items": { "$ref": "#/$defs/resource_uri_pattern" }
+        },
+        "resource_deny": {
+          "type": "array",
+          "description": "Resource URI patterns to deny",
+          "default": [],
+          "items": { "$ref": "#/$defs/resource_uri_pattern" }
+        }
+      }
+    },
+    "role_definition": {
+      "type": "object",
+      "description": "Role definition for capability bundling (DAG structure)",
+      "additionalProperties": false,
+      "required": ["role_id", "name", "caps"],
+      "properties": {
+        "role_id": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Unique role identifier"
+        },
+        "name": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Human-readable role name"
+        },
+        "description": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Role description"
+        },
+        "caps": {
+          "type": "array",
+          "description": "Capabilities included in this role",
+          "items": { "$ref": "#/$defs/capability_grant" }
+        },
+        "includes": {
+          "type": "array",
+          "description": "Inherited role IDs (NORMATIVE: must form a DAG, no cycles)",
+          "default": [],
+          "items": { "$ref": "#/$defs/nonempty_string" }
+        }
+      }
+    },
+    "role_assignment": {
+      "type": "object",
+      "description": "Assigns a role to a principal",
+      "additionalProperties": false,
+      "required": ["role_id", "principal"],
+      "properties": {
+        "role_id": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Role to assign"
+        },
+        "principal": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Principal receiving the role"
+        },
+        "zone_id": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Optional zone scope for this assignment"
+        },
+        "attenuations": {
+          "type": "array",
+          "description": "Capability attenuations applied to this assignment",
+          "default": [],
+          "items": { "$ref": "#/$defs/capability_grant" }
+        },
+        "expires_at": {
+          "type": "string",
+          "description": "Assignment expiration (ISO 8601)",
+          "format": "date-time"
+        }
+      }
+    },
+    "flow_kind": {
+      "type": "string",
+      "description": "Flow direction type",
+      "enum": ["ingress", "egress", "both"]
+    },
+    "flow_rule": {
+      "type": "object",
+      "description": "Cross-zone data flow rule",
+      "additionalProperties": false,
+      "required": ["from", "to", "kind", "allow"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Rule name for debugging/audit"
+        },
+        "from": {
+          "$ref": "#/$defs/glob_pattern",
+          "description": "Source zone pattern"
+        },
+        "to": {
+          "$ref": "#/$defs/glob_pattern",
+          "description": "Destination zone pattern"
+        },
+        "kind": {
+          "$ref": "#/$defs/flow_kind",
+          "description": "Flow direction"
+        },
+        "allow": {
+          "type": "boolean",
+          "description": "Allow or deny this flow"
+        },
+        "transform": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Optional transform to apply (e.g., redact_secrets)"
+        },
+        "audit": {
+          "type": "boolean",
+          "description": "Emit audit event for this flow",
+          "default": true
+        },
+        "requires_elevation": {
+          "type": "boolean",
+          "description": "Flow requires integrity elevation approval",
+          "default": false
+        },
+        "requires_declassification": {
+          "type": "boolean",
+          "description": "Flow requires declassification approval",
+          "default": false
+        }
+      }
+    },
+    "taint_level": {
+      "type": "string",
+      "description": "Taint classification level",
+      "enum": ["untainted", "tainted", "highly_tainted"]
+    },
+    "taint_action_type": {
+      "type": "string",
+      "description": "Action to take when taint rule matches",
+      "enum": ["deny", "require_elevation", "require_approval", "sanitize"]
+    },
+    "taint_action": {
+      "type": "object",
+      "description": "Action specification for taint rules",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/taint_action_type",
+          "description": "Action type"
+        },
+        "ttl_seconds": {
+          "type": "integer",
+          "description": "TTL for approval if required",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 300
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["interactive", "policy"],
+          "description": "Approval mode"
+        },
+        "reason": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Human-readable reason for this action"
+        },
+        "sanitizer": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Sanitizer connector to apply (for type=sanitize)"
+        }
+      }
+    },
+    "taint_rule": {
+      "type": "object",
+      "description": "Taint-based policy rule",
+      "additionalProperties": false,
+      "required": ["name", "action"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Rule name"
+        },
+        "min_taint": {
+          "$ref": "#/$defs/taint_level",
+          "description": "Minimum taint level to trigger this rule"
+        },
+        "min_safety": {
+          "$ref": "#/$defs/safety_tier",
+          "description": "Minimum safety tier to trigger this rule"
+        },
+        "when_integrity_insufficient": {
+          "type": "boolean",
+          "description": "Trigger when origin integrity < target integrity",
+          "default": false
+        },
+        "origin_zone_patterns": {
+          "type": "array",
+          "description": "Origin zone patterns that trigger this rule",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "target_zone_patterns": {
+          "type": "array",
+          "description": "Target zone patterns that trigger this rule",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "capability_patterns": {
+          "type": "array",
+          "description": "Capability patterns that trigger this rule",
+          "default": [],
+          "items": { "$ref": "#/$defs/glob_pattern" }
+        },
+        "taint_flags": {
+          "type": "array",
+          "description": "Specific taint flags that trigger this rule",
+          "default": [],
+          "items": {
+            "type": "string",
+            "enum": [
+              "public_input",
+              "unverified_link",
+              "user_generated",
+              "external_api",
+              "cross_zone",
+              "prompt_surface",
+              "untrusted_code",
+              "pii_present",
+              "malicious_detected"
+            ]
+          }
+        },
+        "action": {
+          "$ref": "#/$defs/taint_action",
+          "description": "Action to take when rule matches"
+        }
+      }
+    },
+    "input_constraint": {
+      "type": "object",
+      "description": "Input constraint for approval scope (NORMATIVE: JSON Pointer only)",
+      "additionalProperties": false,
+      "required": ["pointer", "op", "value"],
+      "properties": {
+        "pointer": {
+          "$ref": "#/$defs/json_pointer",
+          "description": "RFC 6901 JSON Pointer to the field"
+        },
+        "op": {
+          "$ref": "#/$defs/constraint_op",
+          "description": "Constraint operation"
+        },
+        "value": {
+          "description": "Value to compare against"
+        }
+      }
+    },
+    "approval_scope_type": {
+      "type": "string",
+      "description": "Type of approval scope",
+      "enum": ["elevation", "declassification", "execution"]
+    },
+    "approval_constraint": {
+      "type": "object",
+      "description": "Constraints for approval tokens",
+      "additionalProperties": false,
+      "required": ["name", "scope_type"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Constraint name"
+        },
+        "scope_type": {
+          "$ref": "#/$defs/approval_scope_type",
+          "description": "Type of approval this constraint applies to"
+        },
+        "zone_id": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Zone this constraint applies to"
+        },
+        "connector_pattern": {
+          "$ref": "#/$defs/glob_pattern",
+          "description": "Connector pattern for execution approvals"
+        },
+        "method_pattern": {
+          "$ref": "#/$defs/glob_pattern",
+          "description": "Method pattern for execution approvals (NORMATIVE: anchored glob only)"
+        },
+        "target_integrity": {
+          "$ref": "#/$defs/integrity_level",
+          "description": "Target integrity level for elevation"
+        },
+        "target_confidentiality": {
+          "$ref": "#/$defs/confidentiality_level",
+          "description": "Target confidentiality level for declassification"
+        },
+        "from_zone": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Source zone for declassification"
+        },
+        "to_zone": {
+          "$ref": "#/$defs/zone_id",
+          "description": "Target zone for declassification"
+        },
+        "input_constraints": {
+          "type": "array",
+          "description": "Input constraints for execution approvals (NORMATIVE: max 64)",
+          "default": [],
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/input_constraint" }
+        },
+        "max_ttl_seconds": {
+          "type": "integer",
+          "description": "Maximum TTL for approvals matching this constraint",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 300
+        },
+        "require_request_binding": {
+          "type": "boolean",
+          "description": "Require request_object_id binding for Interactive approvals",
+          "default": true
+        },
+        "require_input_hash": {
+          "type": "boolean",
+          "description": "Require input_hash binding",
+          "default": false
+        }
+      }
+    }
+  }
+}

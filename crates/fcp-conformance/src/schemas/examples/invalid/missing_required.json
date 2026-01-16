@@ -1,0 +1,11 @@
+{
+  "$schema": "../../FZPF_v0.1.schema.json",
+  "_comment": "INVALID: Missing required 'policy' and 'zones' fields",
+  "roles": [
+    {
+      "role_id": "reader",
+      "name": "Reader",
+      "caps": []
+    }
+  ]
+}

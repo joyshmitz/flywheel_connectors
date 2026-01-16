@@ -1,0 +1,16 @@
+{
+  "$schema": "../../FZPF_v0.1.schema.json",
+  "_comment": "INVALID: Zone ID does not match required pattern ^z:[a-z][a-z0-9_-]*$",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "default_deny": true
+  },
+  "zones": [
+    {
+      "id": "work",
+      "integrity_level": 60,
+      "confidentiality_level": 70
+    }
+  ]
+}

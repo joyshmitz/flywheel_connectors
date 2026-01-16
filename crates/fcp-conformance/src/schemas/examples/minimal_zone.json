@@ -1,0 +1,18 @@
+{
+  "$schema": "../FZPF_v0.1.schema.json",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "policy_id": "minimal-zone-example",
+    "default_deny": true
+  },
+  "zones": [
+    {
+      "id": "z:work",
+      "name": "Work Zone",
+      "description": "Standard work zone for general operations",
+      "integrity_level": 60,
+      "confidentiality_level": 70
+    }
+  ]
+}
