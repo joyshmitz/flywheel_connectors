@@ -605,6 +605,201 @@ fn cross_algorithm_decrypt_fails() {
     assert!(result.is_err());
 }
 
+#[test]
+fn symbol_decrypt_wrong_key_fails() {
+    // Decrypting with a different key should fail
+    let zone_key = AeadKey::from_bytes([0x42; 32]);
+    let wrong_key = AeadKey::from_bytes([0xFF; 32]);
+    let ctx = SymbolContext {
+        object_id: ObjectId::from_bytes([0x11; 32]),
+        esi: 0,
+        k: 10,
+        zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
+        zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
+        epoch_id: 1000,
+        sender_instance_id: 0xDEAD_BEEF,
+        frame_seq: 1,
+    };
+
+    let plaintext = b"Secret symbol data";
+
+    // Encrypt with correct key
+    let (ciphertext, auth_tag) = encrypt_symbol(
+        &zone_key,
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        plaintext,
+    )
+    .expect("encryption should succeed");
+
+    // Try to decrypt with wrong key
+    let result = decrypt_symbol(
+        &wrong_key,
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        &ciphertext,
+        &auth_tag,
+    );
+
+    assert!(
+        result.is_err(),
+        "decryption with wrong key should fail AEAD"
+    );
+}
+
+// =============================================================================
+// DoS Resistance and Memory Bounds Tests
+// =============================================================================
+
+#[test]
+fn reject_invalid_symbol_count_zero_with_payload() {
+    // A frame claiming zero symbols but containing payload bytes is invalid
+    let header = FcpsFrameHeader {
+        version: FCPS_VERSION,
+        flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
+        symbol_count: 0,
+        total_payload_len: 100, // Claims 100 bytes but zero symbols
+        object_id: ObjectId::from_bytes([0xAA; 32]),
+        symbol_size: 64,
+        zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
+        zone_id_hash: ZoneIdHash::from_bytes([0xCC; 32]),
+        epoch_id: 1,
+        sender_instance_id: 1,
+        frame_seq: 1,
+    };
+
+    // Build a frame with header + payload that doesn't match symbol_count
+    let mut frame_bytes = header.encode().to_vec();
+    frame_bytes.extend_from_slice(&[0u8; 100]);
+
+    let err = FcpsFrame::decode(&frame_bytes, 2000)
+        .expect_err("should reject zero symbol_count with payload");
+    // Should fail due to length mismatch (0 symbols * symbol_size != 100)
+    assert!(matches!(
+        err,
+        fcp_protocol::FrameError::LengthMismatch { .. }
+    ));
+}
+
+#[test]
+fn reject_symbol_count_overflow() {
+    // A frame claiming u32::MAX symbols would overflow any reasonable allocation
+    let header = FcpsFrameHeader {
+        version: FCPS_VERSION,
+        flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
+        symbol_count: u32::MAX,
+        total_payload_len: 0, // Impossible to match with MAX symbols
+        object_id: ObjectId::from_bytes([0xAA; 32]),
+        symbol_size: 64,
+        zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
+        zone_id_hash: ZoneIdHash::from_bytes([0xCC; 32]),
+        epoch_id: 1,
+        sender_instance_id: 1,
+        frame_seq: 1,
+    };
+
+    let frame_bytes = header.encode();
+    let err =
+        FcpsFrame::decode(&frame_bytes, 2000).expect_err("should reject symbol count overflow");
+    // May fail with SymbolCountOverflow or LengthMismatch depending on validation order
+    assert!(
+        matches!(err, fcp_protocol::FrameError::SymbolCountOverflow)
+            || matches!(err, fcp_protocol::FrameError::LengthMismatch { .. })
+            || matches!(err, fcp_protocol::FrameError::TooShort { .. })
+    );
+}
+
+#[test]
+fn reject_frame_exceeding_mtu() {
+    // Build a frame that is legitimately larger than MTU
+    let header = FcpsFrameHeader {
+        version: FCPS_VERSION,
+        flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
+        symbol_count: 2,
+        total_payload_len: 2 * u32::try_from(SYMBOL_RECORD_OVERHEAD + 1024).unwrap(), // 2 symbols * (22 + 1024)
+        object_id: ObjectId::from_bytes([0xAA; 32]),
+        symbol_size: 1024,
+        zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
+        zone_id_hash: ZoneIdHash::from_bytes([0xCC; 32]),
+        epoch_id: 1,
+        sender_instance_id: 1,
+        frame_seq: 1,
+    };
+
+    // Build a complete frame with symbols
+    let symbols = vec![
+        SymbolRecord {
+            esi: 0,
+            k: 5,
+            data: vec![0xAB; 1024],
+            auth_tag: [0xCD; 16],
+        },
+        SymbolRecord {
+            esi: 1,
+            k: 5,
+            data: vec![0xAB; 1024],
+            auth_tag: [0xCD; 16],
+        },
+    ];
+
+    let frame = FcpsFrame { header, symbols };
+    let frame_bytes = frame.encode();
+
+    // Frame is 114 (header) + 2 * (22 + 1024) = 114 + 2092 = 2206 bytes
+    // Use a small MTU that's less than the frame size
+    let err = FcpsFrame::decode(&frame_bytes, 500).expect_err("should reject frame exceeding MTU");
+    assert!(
+        matches!(err, fcp_protocol::FrameError::ExceedsMtu { .. }),
+        "Expected ExceedsMtu error, got: {err:?}"
+    );
+}
+
+#[test]
+fn memory_bounds_on_malformed_symbol_record() {
+    // A symbol record with claimed data length exceeding available bytes
+    // This tests that we don't over-read or allocate based on untrusted lengths
+    let header = FcpsFrameHeader {
+        version: FCPS_VERSION,
+        flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
+        symbol_count: 1,
+        total_payload_len: 10, // Claims 10 bytes but symbol needs more
+        object_id: ObjectId::from_bytes([0xAA; 32]),
+        symbol_size: 1024, // Symbol would need ~1040 bytes
+        zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
+        zone_id_hash: ZoneIdHash::from_bytes([0xCC; 32]),
+        epoch_id: 1,
+        sender_instance_id: 1,
+        frame_seq: 1,
+    };
+
+    let mut frame_bytes = header.encode().to_vec();
+    frame_bytes.extend_from_slice(&[0u8; 10]); // Only 10 bytes of "payload"
+
+    let err =
+        FcpsFrame::decode(&frame_bytes, 2000).expect_err("should reject malformed symbol record");
+    assert!(
+        matches!(err, fcp_protocol::FrameError::LengthMismatch { .. })
+            || matches!(err, fcp_protocol::FrameError::TooShort { .. })
+    );
+}
+
+#[test]
+fn memory_bounds_truncated_header() {
+    // A truncated header should be rejected without crashing
+    let truncated = [0x46, 0x43, 0x50, 0x53, 0x01, 0x00]; // Just magic + version
+    let err = FcpsFrameHeader::decode(&truncated).expect_err("should reject truncated header");
+    assert!(matches!(err, fcp_protocol::FrameError::TooShort { .. }));
+}
+
+#[test]
+fn memory_bounds_symbol_record_too_short() {
+    // A symbol record buffer shorter than the overhead should be rejected
+    let short_record = [0u8; 5]; // Less than SYMBOL_RECORD_OVERHEAD (6)
+    let err =
+        SymbolRecord::decode(&short_record, 64).expect_err("should reject short symbol record");
+    assert!(matches!(err, fcp_protocol::FrameError::TooShort { .. }));
+}
+
 // =============================================================================
 // Generator functions for creating reference vectors
 // =============================================================================
