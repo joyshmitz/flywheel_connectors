@@ -184,14 +184,14 @@ mod tests {
         // Golden vector: BLAKE3("fcp.kid.v2" || pubkey)
         let pubkey = b"FCP2 test public key";
         let kid = KeyId::derive_from_public_key(pubkey);
-        
+
         // Manual verification of the spec logic
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"fcp.kid.v2");
         hasher.update(pubkey);
         let hash = hasher.finalize();
         let expected = &hash.as_bytes()[..8];
-        
+
         assert_eq!(kid.as_bytes(), expected);
     }
 }

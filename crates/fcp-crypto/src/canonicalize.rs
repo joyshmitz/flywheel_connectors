@@ -82,7 +82,7 @@ pub fn to_deterministic_cbor<T: serde::Serialize>(value: &T) -> CryptoResult<Vec
     let mut v = ciborium::value::Value::serialized(value)
         .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
     canonicalize_value_in_place(&mut v)?;
-    
+
     let mut bytes = Vec::new();
     ciborium::into_writer(&v, &mut bytes)
         .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
@@ -103,7 +103,9 @@ fn canonicalize_value_in_place(v: &mut ciborium::value::Value) -> CryptoResult<(
     Ok(())
 }
 
-fn canonicalize_map(entries: &mut Vec<(ciborium::value::Value, ciborium::value::Value)>) -> CryptoResult<()> {
+fn canonicalize_map(
+    entries: &mut Vec<(ciborium::value::Value, ciborium::value::Value)>,
+) -> CryptoResult<()> {
     use std::cmp::Ordering;
 
     let mut with_keys = Vec::with_capacity(entries.len());
@@ -128,7 +130,7 @@ fn canonicalize_map(entries: &mut Vec<(ciborium::value::Value, ciborium::value::
     // Check for duplicates
     for window in with_keys.windows(2) {
         if window[0].0 == window[1].0 {
-             return Err(CryptoError::SerializationError(format!(
+            return Err(CryptoError::SerializationError(format!(
                 "duplicate map key: {}",
                 hex::encode(&window[0].0)
             )));

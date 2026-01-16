@@ -53,7 +53,7 @@ pub mod fcp2_claims {
     pub const PARENT_TOKEN: i64 = -65542;
     /// Issuing node ID claim.
     pub const ISS_NODE: i64 = -65543;
-    /// Binary audience (ObjectId) claim.
+    /// Binary audience (`ObjectId`) claim.
     pub const AUD_BINARY: i64 = -65544;
     /// Grant Object IDs claim.
     pub const GRANT_OBJECT_IDS: i64 = -65545;
@@ -65,7 +65,7 @@ pub mod fcp2_claims {
     pub const CHK_SEQ: i64 = -65548;
     /// Capability constraints claim.
     pub const CONSTRAINTS: i64 = -65549;
-    /// Granted capabilities (array of CapabilityGrant).
+    /// Granted capabilities (array of `CapabilityGrant`).
     pub const GRANTS: i64 = -65550;
     /// Instance ID claim.
     pub const INSTANCE_ID: i64 = -65551;
@@ -191,14 +191,12 @@ impl CwtClaims {
     /// Set FCP2 issuing node ID.
     #[must_use]
     pub fn issuing_node(mut self, node_id: &str) -> Self {
-        self.claims.insert(
-            fcp2_claims::ISS_NODE,
-            ciborium::Value::Text(node_id.into()),
-        );
+        self.claims
+            .insert(fcp2_claims::ISS_NODE, ciborium::Value::Text(node_id.into()));
         self
     }
 
-    /// Set FCP2 binary audience (ObjectId).
+    /// Set FCP2 binary audience (`ObjectId`).
     #[must_use]
     pub fn audience_binary(mut self, object_id: &[u8]) -> Self {
         self.claims.insert(
@@ -235,14 +233,10 @@ impl CwtClaims {
     /// Set FCP2 checkpoint ID and sequence.
     #[must_use]
     pub fn checkpoint(mut self, id: &[u8], seq: u64) -> Self {
-        self.claims.insert(
-            fcp2_claims::CHK_ID,
-            ciborium::Value::Bytes(id.to_vec()),
-        );
-        self.claims.insert(
-            fcp2_claims::CHK_SEQ,
-            ciborium::Value::Integer(seq.into()),
-        );
+        self.claims
+            .insert(fcp2_claims::CHK_ID, ciborium::Value::Bytes(id.to_vec()));
+        self.claims
+            .insert(fcp2_claims::CHK_SEQ, ciborium::Value::Integer(seq.into()));
         self
     }
 

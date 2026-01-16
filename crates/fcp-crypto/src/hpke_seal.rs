@@ -487,7 +487,10 @@ mod tests {
         assert_eq!(map.len(), 4);
 
         // Verify "zone_id" field is present and is a byte string
-        let (k, v) = map.iter().find(|(k, _)| k.as_text().map(|s| s == "zone_id").unwrap_or(false)).unwrap();
+        let (_, v) = map
+            .iter()
+            .find(|(k, _)| k.as_text().is_some_and(|s| s == "zone_id"))
+            .unwrap();
         assert!(v.is_bytes()); // serde_bytes should make this a byte string
         assert_eq!(v.as_bytes().unwrap(), zone_id);
     }
