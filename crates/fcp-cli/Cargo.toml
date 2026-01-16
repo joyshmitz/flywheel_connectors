@@ -17,17 +17,25 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 clap = { version = "4.5", features = ["derive"] }
+hex.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+textwrap = "0.16"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
-# Benchmarking dependencies
+# Core FCP crates
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-raptorq = { path = "../fcp-raptorq" }
+fcp-manifest = { path = "../fcp-manifest" }
+fcp-registry = { path = "../fcp-registry" }
+fcp-store = { path = "../fcp-store" }
 ed25519-dalek.workspace = true
