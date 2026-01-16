@@ -90,4 +90,7 @@ pub enum GcError {
 
     #[error("object store error: {0}")]
     ObjectStore(#[from] ObjectStoreError),
+
+    #[error("symbol store error: {0}")]
+    SymbolStore(#[from] SymbolStoreError),
 }

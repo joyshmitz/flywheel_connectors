@@ -8,7 +8,9 @@ use fcp_core::{ObjectId, RetentionClass, ZoneId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::GcError;
+use crate::error::SymbolStoreError;
 use crate::object_store::ObjectStore;
+use crate::symbol_store::SymbolStore;
 
 /// Result of a garbage collection run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +128,48 @@ impl GarbageCollector {
         store: &dyn ObjectStore,
         current_time: u64,
     ) -> Result<GcResult, GcError> {
+        let (result, _) = self
+            .collect_internal(zone_id, roots, store, current_time)
+            .await?;
+        Ok(result)
+    }
+
+    /// Run GC and prune matching symbols from the symbol store.
+    ///
+    /// This ensures evicted objects cannot leave orphaned symbols behind.
+    ///
+    /// # Errors
+    /// Returns error if object store or symbol store operations fail.
+    pub async fn collect_and_prune_symbols(
+        &self,
+        zone_id: &ZoneId,
+        roots: &GcRoots,
+        store: &dyn ObjectStore,
+        symbol_store: &dyn SymbolStore,
+        current_time: u64,
+    ) -> Result<GcResult, GcError> {
+        let (result, evicted_ids) = self
+            .collect_internal(zone_id, roots, store, current_time)
+            .await?;
+
+        for object_id in evicted_ids {
+            match symbol_store.delete_object(&object_id).await {
+                Ok(()) => {}
+                Err(SymbolStoreError::ObjectNotFound(_)) => {}
+                Err(err) => return Err(GcError::SymbolStore(err)),
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn collect_internal(
+        &self,
+        zone_id: &ZoneId,
+        roots: &GcRoots,
+        store: &dyn ObjectStore,
+        current_time: u64,
+    ) -> Result<(GcResult, Vec<ObjectId>), GcError> {
         // 1. Compute root set
         let root_set = roots.all_roots();
 
@@ -146,6 +190,7 @@ impl GarbageCollector {
         let mut evicted = 0;
         let mut expired_leases = 0;
         let mut pinned_count = 0;
+        let mut evicted_ids = Vec::new();
 
         let all_objects = store.list_zone(zone_id).await;
 
@@ -162,10 +207,12 @@ impl GarbageCollector {
                             if expires_at <= current_time {
                                 // Lease expired, evict unless pinned
                                 if !roots.pinned.contains(&object_id) {
-                                    store.delete(&object_id).await.ok();
-                                    expired_leases += 1;
-                                    evicted += 1;
-                                    continue;
+                                    if store.delete(&object_id).await.is_ok() {
+                                        expired_leases += 1;
+                                        evicted += 1;
+                                        evicted_ids.push(object_id);
+                                        continue;
+                                    }
                                 }
                             }
                         }
@@ -183,27 +230,34 @@ impl GarbageCollector {
                     }
                     RetentionClass::Lease { expires_at } => {
                         if !self.config.enforce_lease_expiry || expires_at <= current_time {
-                            store.delete(&object_id).await.ok();
-                            evicted += 1;
-                            if expires_at <= current_time {
-                                expired_leases += 1;
+                            if store.delete(&object_id).await.is_ok() {
+                                evicted += 1;
+                                evicted_ids.push(object_id);
+                                if expires_at <= current_time {
+                                    expired_leases += 1;
+                                }
                             }
                         }
                     }
                     RetentionClass::Ephemeral => {
-                        store.delete(&object_id).await.ok();
-                        evicted += 1;
+                        if store.delete(&object_id).await.is_ok() {
+                            evicted += 1;
+                            evicted_ids.push(object_id);
+                        }
                     }
                 }
             }
         }
 
-        Ok(GcResult {
-            live: live.len(),
-            evicted,
-            expired_leases,
-            pinned: pinned_count,
-        })
+        Ok((
+            GcResult {
+                live: live.len(),
+                evicted,
+                expired_leases,
+                pinned: pinned_count,
+            },
+            evicted_ids,
+        ))
     }
 
     /// Check if an object would be collected (for debugging/testing).
@@ -261,12 +315,92 @@ impl GarbageCollector {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+    use std::time::Instant;
+
+    use bytes::Bytes;
+    use chrono::Utc;
     use fcp_cbor::SchemaId;
     use fcp_core::{ObjectHeader, Provenance, StorageMeta, StoredObject};
     use semver::Version;
+    use serde_json::json;
+    use uuid::Uuid;
 
     use super::*;
     use crate::object_store::{MemoryObjectStore, MemoryObjectStoreConfig};
+    use crate::symbol_store::{
+        MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
+        StoredSymbol, SymbolMeta,
+    };
+
+    #[derive(Default)]
+    struct StoreLogData {
+        object_id: Option<ObjectId>,
+        object_size: Option<u64>,
+        symbol_count: Option<u32>,
+        coverage_bps: Option<u32>,
+        nodes_holding: Option<Vec<String>>,
+        details: Option<serde_json::Value>,
+    }
+
+    fn run_store_test<F, Fut>(test_name: &str, phase: &str, operation: &str, assertions: u32, f: F)
+    where
+        F: FnOnce() -> Fut + panic::UnwindSafe,
+        Fut: std::future::Future<Output = StoreLogData>,
+    {
+        let start = Instant::now();
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .expect("runtime");
+            rt.block_on(f())
+        }));
+        let duration_us = start.elapsed().as_micros();
+
+        let (passed, failed, outcome, data) = match &result {
+            Ok(data) => (assertions, 0, "pass", Some(data)),
+            Err(_) => (0, assertions, "fail", None),
+        };
+
+        let log = json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "level": "info",
+            "test_name": test_name,
+            "module": "fcp-store",
+            "phase": phase,
+            "operation": operation,
+            "correlation_id": Uuid::new_v4().to_string(),
+            "result": outcome,
+            "duration_us": duration_us,
+            "object_id": data.and_then(|d| d.object_id).map(|id| id.to_string()),
+            "object_size": data.and_then(|d| d.object_size),
+            "symbol_count": data.and_then(|d| d.symbol_count),
+            "coverage_bps": data.and_then(|d| d.coverage_bps),
+            "nodes_holding": data.and_then(|d| d.nodes_holding.clone()),
+            "details": data.and_then(|d| d.details.clone()),
+            "assertions": {
+                "passed": passed,
+                "failed": failed
+            }
+        });
+        println!("{log}");
+
+        if let Err(payload) = result {
+            panic::resume_unwind(payload);
+        }
+    }
+
+    fn log_gc_event(object_id: ObjectId, retention: &str, reason: &str) {
+        let log = json!({
+            "gc_action": "evict",
+            "object_id": object_id.to_string(),
+            "retention_class": retention,
+            "reason": reason,
+            "gc_root_checked": true
+        });
+        println!("{log}");
+    }
 
     fn test_zone() -> ZoneId {
         "z:test".parse().unwrap()
@@ -293,187 +427,299 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn gc_evicts_unreachable() {
-        let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-        let gc = GarbageCollector::new(GcConfig::default());
+    #[test]
+    fn gc_evicts_unreachable() {
+        run_store_test("gc_evicts_unreachable", "verify", "gc", 5, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
 
-        // Root -> A -> B (reachable)
-        // C (unreachable)
-        store
-            .put(test_object(1, vec![2], RetentionClass::Ephemeral))
-            .await
-            .unwrap(); // Root
-        store
-            .put(test_object(2, vec![3], RetentionClass::Ephemeral))
-            .await
-            .unwrap(); // A
-        store
-            .put(test_object(3, vec![], RetentionClass::Ephemeral))
-            .await
-            .unwrap(); // B
-        store
-            .put(test_object(4, vec![], RetentionClass::Ephemeral))
-            .await
-            .unwrap(); // C (unreachable)
-
-        let mut roots = GcRoots::new();
-        roots.set_checkpoint(ObjectId::from_bytes([1; 32]));
-
-        let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
-
-        assert_eq!(result.live, 3); // Root + A + B
-        assert_eq!(result.evicted, 1); // C
-
-        assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
-        assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
-        assert!(store.exists(&ObjectId::from_bytes([3; 32])).await);
-        assert!(!store.exists(&ObjectId::from_bytes([4; 32])).await); // Evicted
-    }
-
-    #[tokio::test]
-    async fn gc_respects_pinned() {
-        let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-        let gc = GarbageCollector::new(GcConfig::default());
-
-        // Unreachable but pinned
-        store
-            .put(test_object(1, vec![], RetentionClass::Pinned))
-            .await
-            .unwrap();
-
-        let roots = GcRoots::new(); // No roots
-
-        let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
-
-        assert_eq!(result.pinned, 1);
-        assert_eq!(result.evicted, 0);
-        assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
-    }
-
-    #[tokio::test]
-    async fn gc_respects_lease() {
-        let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-        let gc = GarbageCollector::new(GcConfig::default());
-
-        // Unreachable with unexpired lease
-        store
-            .put(test_object(
-                1,
-                vec![],
-                RetentionClass::Lease { expires_at: 2000 },
-            ))
-            .await
-            .unwrap();
-        // Unreachable with expired lease
-        store
-            .put(test_object(
-                2,
-                vec![],
-                RetentionClass::Lease { expires_at: 500 },
-            ))
-            .await
-            .unwrap();
-
-        let roots = GcRoots::new();
-
-        let result = gc
-            .collect(&test_zone(), &roots, &store, 1000)
-            .await
-            .unwrap();
-
-        assert_eq!(result.evicted, 1);
-        assert_eq!(result.expired_leases, 1);
-        assert!(store.exists(&ObjectId::from_bytes([1; 32])).await); // Lease not expired
-        assert!(!store.exists(&ObjectId::from_bytes([2; 32])).await); // Lease expired
-    }
-
-    #[tokio::test]
-    async fn gc_respects_max_evictions() {
-        let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-        let config = GcConfig {
-            max_evictions_per_run: 2,
-            ..Default::default()
-        };
-        let gc = GarbageCollector::new(config);
-
-        // Add 5 unreachable objects
-        for i in 1..=5 {
             store
-                .put(test_object(i, vec![], RetentionClass::Ephemeral))
+                .put(test_object(1, vec![2], RetentionClass::Ephemeral))
                 .await
                 .unwrap();
-        }
+            store
+                .put(test_object(2, vec![3], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(3, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(4, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
 
-        let roots = GcRoots::new();
+            let mut roots = GcRoots::new();
+            roots.set_checkpoint(ObjectId::from_bytes([1; 32]));
 
-        let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+            let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
 
-        assert_eq!(result.evicted, 2); // Limited by max_evictions_per_run
+            assert_eq!(result.live, 3);
+            assert_eq!(result.evicted, 1);
+
+            assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
+            assert!(store.exists(&ObjectId::from_bytes([2; 32])).await);
+            assert!(store.exists(&ObjectId::from_bytes([3; 32])).await);
+            assert!(!store.exists(&ObjectId::from_bytes([4; 32])).await);
+
+            log_gc_event(ObjectId::from_bytes([4; 32]), "Ephemeral", "UNREACHABLE");
+
+            StoreLogData {
+                object_id: Some(ObjectId::from_bytes([4; 32])),
+                details: Some(json!({"live": result.live, "evicted": result.evicted})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn gc_roots_management() {
-        let mut roots = GcRoots::new();
+    #[test]
+    fn gc_respects_pinned() {
+        run_store_test("gc_respects_pinned", "verify", "gc", 3, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
 
-        let id1 = ObjectId::from_bytes([1; 32]);
-        let id2 = ObjectId::from_bytes([2; 32]);
-        let id3 = ObjectId::from_bytes([3; 32]);
+            store
+                .put(test_object(1, vec![], RetentionClass::Pinned))
+                .await
+                .unwrap();
 
-        roots.set_checkpoint(id1);
-        roots.add_pin(id2);
-        roots.add_pin(id3);
+            let roots = GcRoots::new();
 
-        assert!(roots.is_root(&id1));
-        assert!(roots.is_root(&id2));
-        assert!(roots.is_root(&id3));
+            let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
 
-        let all = roots.all_roots();
-        assert_eq!(all.len(), 3);
+            assert_eq!(result.pinned, 1);
+            assert_eq!(result.evicted, 0);
+            assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
 
-        roots.remove_pin(&id2);
-        assert!(!roots.is_root(&id2));
+            StoreLogData {
+                object_id: Some(ObjectId::from_bytes([1; 32])),
+                details: Some(json!({"pinned": result.pinned})),
+                ..StoreLogData::default()
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn would_collect_unreachable() {
-        let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
-        let gc = GarbageCollector::new(GcConfig::default());
+    #[test]
+    fn gc_respects_lease() {
+        run_store_test("gc_respects_lease", "verify", "gc", 4, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
 
-        store
-            .put(test_object(1, vec![], RetentionClass::Ephemeral))
-            .await
-            .unwrap();
-        store
-            .put(test_object(2, vec![], RetentionClass::Ephemeral))
-            .await
-            .unwrap();
+            store
+                .put(test_object(
+                    1,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 2000 },
+                ))
+                .await
+                .unwrap();
+            store
+                .put(test_object(
+                    2,
+                    vec![],
+                    RetentionClass::Lease { expires_at: 500 },
+                ))
+                .await
+                .unwrap();
 
-        let mut roots = GcRoots::new();
-        roots.set_checkpoint(ObjectId::from_bytes([1; 32]));
+            let roots = GcRoots::new();
 
-        // Object 1 is root - would not collect
-        assert!(
-            !gc.would_collect(
-                &ObjectId::from_bytes([1; 32]),
-                &test_zone(),
-                &roots,
-                &store,
-                0
-            )
-            .await
-        );
+            let result = gc
+                .collect(&test_zone(), &roots, &store, 1000)
+                .await
+                .unwrap();
 
-        // Object 2 is unreachable - would collect
-        assert!(
-            gc.would_collect(
-                &ObjectId::from_bytes([2; 32]),
-                &test_zone(),
-                &roots,
-                &store,
-                0
-            )
-            .await
-        );
+            assert_eq!(result.evicted, 1);
+            assert_eq!(result.expired_leases, 1);
+            assert!(store.exists(&ObjectId::from_bytes([1; 32])).await);
+            assert!(!store.exists(&ObjectId::from_bytes([2; 32])).await);
+
+            log_gc_event(ObjectId::from_bytes([2; 32]), "Lease", "LEASE_EXPIRED");
+
+            StoreLogData {
+                object_id: Some(ObjectId::from_bytes([2; 32])),
+                details: Some(json!({"expired_leases": result.expired_leases})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_respects_max_evictions() {
+        run_store_test("gc_respects_max_evictions", "verify", "gc", 1, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let config = GcConfig {
+                max_evictions_per_run: 2,
+                ..Default::default()
+            };
+            let gc = GarbageCollector::new(config);
+
+            for i in 1..=5 {
+                store
+                    .put(test_object(i, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+            }
+
+            let roots = GcRoots::new();
+
+            let result = gc.collect(&test_zone(), &roots, &store, 0).await.unwrap();
+
+            assert_eq!(result.evicted, 2);
+
+            StoreLogData {
+                details: Some(json!({"evicted": result.evicted})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_roots_management() {
+        run_store_test("gc_roots_management", "verify", "gc", 4, || async {
+            let mut roots = GcRoots::new();
+
+            let id1 = ObjectId::from_bytes([1; 32]);
+            let id2 = ObjectId::from_bytes([2; 32]);
+            let id3 = ObjectId::from_bytes([3; 32]);
+
+            roots.set_checkpoint(id1);
+            roots.add_pin(id2);
+            roots.add_pin(id3);
+
+            assert!(roots.is_root(&id1));
+            assert!(roots.is_root(&id2));
+            assert!(roots.is_root(&id3));
+
+            let all = roots.all_roots();
+            assert_eq!(all.len(), 3);
+
+            roots.remove_pin(&id2);
+            assert!(!roots.is_root(&id2));
+
+            StoreLogData {
+                details: Some(json!({"root_count": all.len()})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn gc_prunes_symbol_store() {
+        run_store_test("gc_prunes_symbol_store", "verify", "gc", 5, || async {
+            let object_store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            let zone_id = test_zone();
+            let object_id = ObjectId::from_bytes([5; 32]);
+
+            object_store
+                .put(test_object(5, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+
+            let meta = ObjectSymbolMeta {
+                object_id,
+                zone_id: zone_id.clone(),
+                oti: ObjectTransmissionInfo {
+                    transfer_length: 256,
+                    symbol_size: 64,
+                    source_blocks: 1,
+                    sub_blocks: 1,
+                    alignment: 8,
+                },
+                source_symbols: 4,
+                first_symbol_at: 1_000_000,
+            };
+            symbol_store.put_object_meta(meta).await.unwrap();
+
+            for esi in 0..4 {
+                let symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi,
+                        zone_id: zone_id.clone(),
+                        source_node: Some(1),
+                        stored_at: 1_000_000 + u64::from(esi),
+                    },
+                    data: Bytes::from(vec![0_u8; 64]),
+                };
+                symbol_store.put_symbol(symbol).await.unwrap();
+            }
+
+            let roots = GcRoots::new();
+            let result = gc
+                .collect_and_prune_symbols(&zone_id, &roots, &object_store, &symbol_store, 0)
+                .await
+                .unwrap();
+
+            assert_eq!(result.evicted, 1);
+            assert!(!object_store.exists(&object_id).await);
+            assert!(matches!(
+                symbol_store.get_object_meta(&object_id).await,
+                Err(SymbolStoreError::ObjectNotFound(_))
+            ));
+            assert!(matches!(
+                symbol_store.get_symbol(&object_id, 0).await,
+                Err(SymbolStoreError::ObjectNotFound(_)) | Err(SymbolStoreError::NotFound { .. })
+            ));
+
+            StoreLogData {
+                object_id: Some(object_id),
+                symbol_count: Some(4),
+                details: Some(json!({"symbols_pruned": true, "evicted": result.evicted})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn would_collect_unreachable() {
+        run_store_test("would_collect_unreachable", "verify", "gc", 2, || async {
+            let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+            let gc = GarbageCollector::new(GcConfig::default());
+
+            store
+                .put(test_object(1, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+            store
+                .put(test_object(2, vec![], RetentionClass::Ephemeral))
+                .await
+                .unwrap();
+
+            let mut roots = GcRoots::new();
+            roots.set_checkpoint(ObjectId::from_bytes([1; 32]));
+
+            assert!(
+                !gc.would_collect(
+                    &ObjectId::from_bytes([1; 32]),
+                    &test_zone(),
+                    &roots,
+                    &store,
+                    0
+                )
+                .await
+            );
+
+            assert!(
+                gc.would_collect(
+                    &ObjectId::from_bytes([2; 32]),
+                    &test_zone(),
+                    &roots,
+                    &store,
+                    0
+                )
+                .await
+            );
+
+            StoreLogData {
+                object_id: Some(ObjectId::from_bytes([2; 32])),
+                details: Some(json!({"reachable": false})),
+                ..StoreLogData::default()
+            }
+        });
     }
 }
