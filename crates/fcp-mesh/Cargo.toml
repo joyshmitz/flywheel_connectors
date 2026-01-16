@@ -16,6 +16,7 @@ blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 constant_time_eq = "0.3"
+fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-tailscale = { path = "../fcp-tailscale" }
 hex.workspace = true
@@ -30,4 +31,5 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

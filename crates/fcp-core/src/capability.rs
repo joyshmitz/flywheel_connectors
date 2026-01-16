@@ -359,6 +359,12 @@ pub struct ZoneId(String);
 pub struct ZoneIdHash([u8; 32]);
 
 impl ZoneIdHash {
+    /// Construct a `ZoneIdHash` from raw bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -797,7 +803,7 @@ impl CapabilityToken {
 }
 
 /// A single capability grant within a token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityGrant {
     /// The capability being granted
     pub capability: CapabilityId,

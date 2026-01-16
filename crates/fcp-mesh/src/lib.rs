@@ -2,11 +2,14 @@
 //!
 //! This crate provides:
 //! - [`session`] - Session layer with authenticated handshake, key schedule, and anti-replay
+//! - [`device`] - Device profile types for execution planning and capability reporting
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod device;
 pub mod session;
 
+pub use device::*;
 pub use session::*;
