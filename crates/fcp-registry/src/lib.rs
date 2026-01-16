@@ -1982,10 +1982,8 @@ sig = "{}"
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("threshold unmet");
                 // Manifest parsing validates signature count >= threshold before verification
-                assert!(
-                    matches!(&err, RegistryError::ManifestParse(e)
-                        if e.to_string().contains("insufficient signatures"))
-                );
+                assert!(matches!(&err, RegistryError::ManifestParse(e)
+                        if e.to_string().contains("insufficient signatures")));
 
                 RegistryLogData {
                     reason_code: Some("manifest_parse_insufficient_signatures".to_string()),
@@ -2380,7 +2378,8 @@ deny_ptrace = true
             let unchecked =
                 ConnectorManifest::parse_str_unchecked(&manifest_toml).expect("manifest");
             let interface_hash = unchecked.compute_interface_hash().expect("interface hash");
-            let manifest_toml = manifest_toml.replace(PLACEHOLDER_HASH, &interface_hash.to_string());
+            let manifest_toml =
+                manifest_toml.replace(PLACEHOLDER_HASH, &interface_hash.to_string());
 
             // Sign
             let manifest = ConnectorManifest::parse_str(&manifest_toml).expect("manifest");
@@ -2414,11 +2413,13 @@ sig = "base64:{sig_b64}"
         }
 
         fn get_bundle(&self, connector_id: &str) -> Option<ConnectorBundle> {
-            self.connectors.get(connector_id).map(|entry| ConnectorBundle {
-                manifest_toml: entry.manifest_toml.clone(),
-                binary: entry.binary.clone(),
-                target: entry.target.clone(),
-            })
+            self.connectors
+                .get(connector_id)
+                .map(|entry| ConnectorBundle {
+                    manifest_toml: entry.manifest_toml.clone(),
+                    binary: entry.binary.clone(),
+                    target: entry.target.clone(),
+                })
         }
 
         fn get_trust_policy(&self, connector_id: &str) -> Option<RegistryTrustPolicy> {

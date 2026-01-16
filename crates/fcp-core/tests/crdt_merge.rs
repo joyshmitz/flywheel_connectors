@@ -89,10 +89,20 @@ fn pncounter_merge_and_value() {
 #[test]
 fn lww_map_merge_disjoint_keys() {
     let mut replica_a: LwwMap<String, String> = LwwMap::default();
-    replica_a.insert("key1".into(), "value1".into(), 100, CrdtActorId::new("node-a"));
+    replica_a.insert(
+        "key1".into(),
+        "value1".into(),
+        100,
+        CrdtActorId::new("node-a"),
+    );
 
     let mut replica_b: LwwMap<String, String> = LwwMap::default();
-    replica_b.insert("key2".into(), "value2".into(), 100, CrdtActorId::new("node-b"));
+    replica_b.insert(
+        "key2".into(),
+        "value2".into(),
+        100,
+        CrdtActorId::new("node-b"),
+    );
 
     // Merge B into A
     replica_a.merge(&replica_b);
@@ -105,10 +115,20 @@ fn lww_map_merge_disjoint_keys() {
 #[test]
 fn lww_map_merge_same_key_newer_wins() {
     let mut replica_a: LwwMap<String, String> = LwwMap::default();
-    replica_a.insert("cursor".into(), "offset-100".into(), 100, CrdtActorId::new("node-a"));
+    replica_a.insert(
+        "cursor".into(),
+        "offset-100".into(),
+        100,
+        CrdtActorId::new("node-a"),
+    );
 
     let mut replica_b: LwwMap<String, String> = LwwMap::default();
-    replica_b.insert("cursor".into(), "offset-200".into(), 200, CrdtActorId::new("node-b"));
+    replica_b.insert(
+        "cursor".into(),
+        "offset-200".into(),
+        200,
+        CrdtActorId::new("node-b"),
+    );
 
     // Merge B into A - B's newer timestamp should win
     replica_a.merge(&replica_b);
@@ -117,7 +137,12 @@ fn lww_map_merge_same_key_newer_wins() {
 
     // Merge in other direction: A into B - same result
     let mut replica_a2: LwwMap<String, String> = LwwMap::default();
-    replica_a2.insert("cursor".into(), "offset-100".into(), 100, CrdtActorId::new("node-a"));
+    replica_a2.insert(
+        "cursor".into(),
+        "offset-100".into(),
+        100,
+        CrdtActorId::new("node-a"),
+    );
     replica_b.merge(&replica_a2);
     assert_eq!(replica_b.get(&"cursor".into()).unwrap().value, "offset-200");
 }
@@ -125,15 +150,31 @@ fn lww_map_merge_same_key_newer_wins() {
 #[test]
 fn lww_map_merge_same_key_same_timestamp_actor_tiebreak() {
     let mut replica_a: LwwMap<String, String> = LwwMap::default();
-    replica_a.insert("sync_token".into(), "token-a".into(), 500, CrdtActorId::new("actor-a"));
+    replica_a.insert(
+        "sync_token".into(),
+        "token-a".into(),
+        500,
+        CrdtActorId::new("actor-a"),
+    );
 
     let mut replica_b: LwwMap<String, String> = LwwMap::default();
-    replica_b.insert("sync_token".into(), "token-z".into(), 500, CrdtActorId::new("actor-z"));
+    replica_b.insert(
+        "sync_token".into(),
+        "token-z".into(),
+        500,
+        CrdtActorId::new("actor-z"),
+    );
 
     // Same timestamp - actor "z" > "a" lexicographically, so token-z wins
     replica_a.merge(&replica_b);
-    assert_eq!(replica_a.get(&"sync_token".into()).unwrap().value, "token-z");
-    assert_eq!(replica_a.get(&"sync_token".into()).unwrap().actor.as_str(), "actor-z");
+    assert_eq!(
+        replica_a.get(&"sync_token".into()).unwrap().value,
+        "token-z"
+    );
+    assert_eq!(
+        replica_a.get(&"sync_token".into()).unwrap().actor.as_str(),
+        "actor-z"
+    );
 }
 
 #[test]
@@ -170,8 +211,8 @@ fn lww_map_merge_bidirectional_converges() {
 
     // Both should converge to same state
     assert_eq!(merged_from_a.get(&"poll_cursor".into()).unwrap().value, 200); // B's is newer
-    assert_eq!(merged_from_a.get(&"retry_count".into()).unwrap().value, 3);   // Only in A
-    assert_eq!(merged_from_a.get(&"last_error".into()).unwrap().value, 404);  // Only in B
+    assert_eq!(merged_from_a.get(&"retry_count".into()).unwrap().value, 3); // Only in A
+    assert_eq!(merged_from_a.get(&"last_error".into()).unwrap().value, 404); // Only in B
 
     assert_eq!(merged_from_b.get(&"poll_cursor".into()).unwrap().value, 200);
     assert_eq!(merged_from_b.get(&"retry_count".into()).unwrap().value, 3);
@@ -256,5 +297,8 @@ fn gcounter_saturating_add() {
     counter.increment(CrdtActorId::new("a"), u64::MAX);
     counter.increment(CrdtActorId::new("a"), 1);
     // Should saturate, not wrap
-    assert_eq!(*counter.counts.get(&CrdtActorId::new("a")).unwrap(), u64::MAX);
+    assert_eq!(
+        *counter.counts.get(&CrdtActorId::new("a")).unwrap(),
+        u64::MAX
+    );
 }

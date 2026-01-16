@@ -28,6 +28,7 @@ mod quorum;
 mod ratelimit;
 mod revocation;
 pub mod util;
+mod zone_keys;
 
 pub use audit::*;
 pub use capability::*;
@@ -47,6 +48,7 @@ pub use provenance::*;
 pub use quorum::*;
 pub use ratelimit::*;
 pub use revocation::*;
+pub use zone_keys::*;
 
 // Re-export commonly used external types
 pub use async_trait::async_trait;
