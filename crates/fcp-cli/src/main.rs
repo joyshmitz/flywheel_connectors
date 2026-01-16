@@ -3,12 +3,11 @@
 //! This CLI provides tooling for FCP2 operators and developers:
 //! - `fcp bench` - Performance benchmarking suite
 //! - `fcp doctor` - System health checks (planned)
-//! - `fcp explain` - Operation decision explanations
+//! - `fcp explain` - Operation decision explanations (planned)
 
 #![forbid(unsafe_code)]
 
 mod bench;
-mod explain;
 
 use clap::{Parser, Subcommand};
 
@@ -28,14 +27,6 @@ enum Commands {
     /// Run benchmarks to measure and track FCP2 performance characteristics.
     /// Outputs machine-readable JSON with environment metadata for regression tracking.
     Bench(bench::BenchArgs),
-
-    /// Explain a decision receipt.
-    ///
-    /// Render the mechanical evidence behind an allow/deny decision by loading
-    /// and displaying the DecisionReceipt for a given request object ID.
-    ///
-    /// Example: fcp explain --request <object-id>
-    Explain(explain::ExplainArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -53,6 +44,5 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Bench(args) => bench::run(args),
-        Commands::Explain(args) => explain::run(args),
     }
 }
