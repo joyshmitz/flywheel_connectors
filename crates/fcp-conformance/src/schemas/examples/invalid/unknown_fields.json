@@ -1,0 +1,21 @@
+{
+  "$schema": "../../FZPF_v0.1.schema.json",
+  "_comment": "INVALID: Contains unknown/extra fields (should be rejected)",
+  "policy": {
+    "format": "fzpf",
+    "schema_version": "0.1",
+    "default_deny": true,
+    "extra_field": "not allowed"
+  },
+  "zones": [
+    {
+      "id": "z:work",
+      "integrity_level": 60,
+      "confidentiality_level": 70,
+      "unknown_property": "should fail"
+    }
+  ],
+  "custom_section": {
+    "foo": "bar"
+  }
+}

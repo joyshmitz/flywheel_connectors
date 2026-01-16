@@ -24,3 +24,4 @@ fcp-cbor = { path = "../fcp-cbor" }
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+jsonschema.workspace = true
