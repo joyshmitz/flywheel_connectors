@@ -1,0 +1,12 @@
+{
+  "description": "Completed payment with valid receipt",
+  "key": "payment-12345",
+  "zone_id": "z:work",
+  "intent_id_hex": "cc8ee4c5baf26406ebd0c142e18973cb352d406bd6233b25b2b80c59139c8229",
+  "receipt_id_hex": "456651913f5c7783819fd8f04647eab4a5a9625da514d52807711806643b06b5",
+  "status": "completed",
+  "expires_at": 1704153600,
+  "is_expired_at_now": false,
+  "is_terminal": true,
+  "should_return_cached": true
+}
