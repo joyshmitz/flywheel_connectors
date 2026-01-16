@@ -1,13 +1,17 @@
 //! FCP2 developer/operator CLI entrypoint.
 //!
 //! This CLI provides tooling for FCP2 operators and developers:
+//! - `fcp audit` - Audit chain operations for incident response
 //! - `fcp bench` - Performance benchmarking suite
-//! - `fcp doctor` - System health checks (planned)
-//! - `fcp explain` - Operation decision explanations (planned)
+//! - `fcp explain` - Operation decision explanations
+//! - `fcp install` - Connector installation with verification
 
 #![forbid(unsafe_code)]
 
+mod audit;
 mod bench;
+mod explain;
+mod install;
 
 use clap::{Parser, Subcommand};
 
@@ -22,11 +26,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Audit chain operations for incident response and debugging.
+    ///
+    /// Stream audit events from a zone's audit chain with filtering.
+    Audit(audit::AuditArgs),
+
     /// Performance benchmark suite.
     ///
     /// Run benchmarks to measure and track FCP2 performance characteristics.
     /// Outputs machine-readable JSON with environment metadata for regression tracking.
     Bench(bench::BenchArgs),
+
+    /// Explain an allow/deny decision by rendering the `DecisionReceipt`.
+    ///
+    /// Load and display the mechanical evidence behind an operation decision.
+    Explain(explain::ExplainArgs),
+
+    /// Install a connector with full verification chain.
+    ///
+    /// Verify manifest signatures, binary checksums, and supply chain policy,
+    /// then mirror the connector to the mesh store.
+    Install(install::InstallArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,6 +63,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
+        Commands::Explain(args) => explain::run(&args),
+        Commands::Install(args) => install::run(args),
     }
 }
