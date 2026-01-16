@@ -442,6 +442,88 @@ impl DiscordConnector {
         })
     }
 
+    /// Validate input structure and limits before capability token verification.
+    /// This is an optimization to avoid wasting resources on capability verification
+    /// for requests that will fail validation anyway.
+    fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+        const MAX_CONTENT_LENGTH: usize = 2000;
+        const MAX_EMBEDS: usize = 10;
+        const MAX_EMBED_TOTAL_CHARS: usize = 6000;
+
+        match operation {
+            "discord.send_message" | "discord.edit_message" => {
+                let content = input.get("content").and_then(|v| v.as_str());
+                let embeds = input.get("embeds").and_then(|v| v.as_array());
+
+                // For send_message, require either content or embeds
+                if operation == "discord.send_message" && content.is_none() && embeds.is_none() {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "Either 'content' or 'embeds' must be provided".into(),
+                    });
+                }
+
+                // Validate content length
+                if let Some(content) = content {
+                    if content.len() > MAX_CONTENT_LENGTH {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Message content exceeds {MAX_CONTENT_LENGTH} character limit (got {} characters)",
+                                content.len()
+                            ),
+                        });
+                    }
+                }
+
+                // Validate embed limits
+                if let Some(embeds) = embeds {
+                    if embeds.len() > MAX_EMBEDS {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Too many embeds: {} exceeds limit of {MAX_EMBEDS}",
+                                embeds.len()
+                            ),
+                        });
+                    }
+
+                    // Check total embed character count
+                    let total_chars: usize = embeds
+                        .iter()
+                        .map(|e| {
+                            let title_len = e
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.len())
+                                .unwrap_or(0);
+                            let desc_len = e
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.len())
+                                .unwrap_or(0);
+                            title_len + desc_len
+                        })
+                        .sum();
+
+                    if total_chars > MAX_EMBED_TOTAL_CHARS {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1004,
+                            message: format!(
+                                "Total embed character count {total_chars} exceeds limit of {MAX_EMBED_TOTAL_CHARS}"
+                            ),
+                        });
+                    }
+                }
+            }
+            _ => {
+                // Other operations don't have early validation
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let operation =
@@ -454,6 +536,10 @@ impl DiscordConnector {
                 })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        // Early validation: Check input structure and limits before capability token
+        // This prevents wasting resources on capability verification for invalid requests
+        Self::validate_input_early(operation, &input)?;
 
         // Extract and verify capability token
         let token_value = params

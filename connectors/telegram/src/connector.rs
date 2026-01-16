@@ -751,11 +751,14 @@ impl Default for TelegramConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use chrono::{Duration, Utc};
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+    ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -769,12 +772,14 @@ mod tests {
         fcp_core::CapabilityToken { raw: cose }
     }
 
-    use wiremock::{Mock, MockServer, ResponseTemplate};
     use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn setup_connector_with_token(cap: &str) -> (TelegramConnector, fcp_core::CapabilityToken, MockServer) {
+    async fn setup_connector_with_token(
+        cap: &str,
+    ) -> (TelegramConnector, fcp_core::CapabilityToken, MockServer) {
         let mock_server = MockServer::start().await;
-        
+
         // Mock getMe for handshake
         Mock::given(method("GET"))
             .and(path("/botdummy_token/getMe"))
@@ -801,23 +806,29 @@ mod tests {
             .await;
 
         let mut connector = TelegramConnector::new();
-        
+
         // Configure with dummy token and mock base URL
-        connector.handle_configure(serde_json::json!({
-            "token": "dummy_token",
-            "base_url": mock_server.uri()
-        })).await.unwrap();
+        connector
+            .handle_configure(serde_json::json!({
+                "token": "dummy_token",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
 
-        connector.handle_handshake(serde_json::json!({
-            "protocol_version": "1.0.0",
-            "zone": "z:work",
-            "host_public_key": verifying_key.to_bytes(),
-            "nonce": vec![0u8; 32],
-            "capabilities_requested": [cap]
-        })).await.unwrap();
+        connector
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [cap]
+            }))
+            .await
+            .unwrap();
 
         let token = generate_valid_token(&signing_key, cap);
         (connector, token, mock_server)
@@ -870,7 +881,7 @@ mod tests {
         // If validation passes (<= 4096), it proceeds to call API.
         // If we want to test that validation passed, we can check that it didn't fail with InvalidRequest.
         // If the mock returns 404, that means it TRIED to send, so validation passed.
-        
+
         let exact_text = "x".repeat(4096);
         let input = serde_json::json!({
             "chat_id": "123456789",
@@ -888,10 +899,10 @@ mod tests {
         // It should NOT be InvalidRequest.
         // It will be External error (404 from mock) or Success if we mock it.
         // Let's assert it is NOT InvalidRequest(1004).
-        
+
         match result {
-            Ok(_) => {}, // Success is fine (if we mocked it)
-            Err(FcpError::External { .. }) => {}, // External error means it tried to send -> validation passed
+            Ok(_) => {}                          // Success is fine (if we mocked it)
+            Err(FcpError::External { .. }) => {} // External error means it tried to send -> validation passed
             Err(e) => panic!("Expected success or external error, got: {:?}", e),
         }
     }
