@@ -1,9 +1,12 @@
-//! Telegram Bot API types.
+//! Telegram API types.
 //!
-//! Subset of Telegram types needed for the connector.
+//! Types definitions for Telegram Bot API objects.
+
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
+/// Update object representing an incoming event.
 /// Telegram API response wrapper.
 #[derive(Debug, Deserialize)]
 pub struct TelegramResponse<T> {

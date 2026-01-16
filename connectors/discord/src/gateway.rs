@@ -122,78 +122,97 @@ impl GatewayConnection {
         }
     }
 
-    /// Update session state from a READY event.
-    /// Call this when receiving a READY event to enable session resumption.
-    pub fn update_session(&mut self, session_id: String, resume_url: String) {
-        self.session_id = Some(session_id);
-        self.resume_url = Some(resume_url);
-    }
-
-    /// Update the sequence number.
-    /// Should be called for each dispatch event received.
-    pub fn update_sequence(&mut self, sequence: u64) {
-        self.sequence = Some(sequence);
-    }
-
-    /// Clear session state (e.g., after InvalidSession with resumable=false).
-    pub fn clear_session(&mut self) {
-        self.session_id = None;
-        self.resume_url = None;
-        self.sequence = None;
-    }
-
-    /// Check if we have a resumable session.
-    pub fn can_resume(&self) -> bool {
-        self.session_id.is_some() && self.sequence.is_some()
-    }
-
     /// Connect to the gateway and start receiving events.
     /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
     pub async fn connect(&mut self) -> DiscordResult<mpsc::Receiver<GatewayEvent>> {
-        // Use resume_url if we have one (from previous READY), otherwise get fresh URL
-        let gateway_url = if let Some(ref url) = self.resume_url {
-            info!(url = %url, "Using resume gateway URL");
-            url.clone()
-        } else {
-            self.get_gateway_url().await?
-        };
-
         let (event_tx, event_rx) = mpsc::channel(256);
 
-        // Connect to gateway
-        let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
-        info!(url = %ws_url, resuming = self.session_id.is_some(), "Connecting to Discord gateway");
-
-        let (ws_stream, _) = connect_async(&ws_url)
-            .await
-            .map_err(|e| DiscordError::Gateway(format!("Failed to connect: {e}")))?;
-
-        // Spawn the gateway handler task
+        // Spawn the gateway supervisor task
         let config = self.config.clone();
-        let session_id = self.session_id.clone();
-        let sequence = self.sequence;
-        let resume_url = self.resume_url.clone();
+        let api_client = self.api_client.clone();
+
+        // Initial state
+        let mut state = GatewayState {
+            session_id: self.session_id.clone(),
+            resume_url: self.resume_url.clone(),
+            sequence: self.sequence,
+        };
 
         tokio::spawn(async move {
-            if let Err(e) = run_gateway_loop(
-                ws_stream, config, event_tx, session_id, sequence, resume_url,
-            )
-            .await
-            {
-                error!(error = %e, "Gateway connection error");
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(60);
+
+            loop {
+                // Determine gateway URL
+                let gateway_url_result = if let Some(ref url) = state.resume_url {
+                    Ok(url.clone())
+                } else if let Some(url) = &config.gateway_url {
+                    Ok(url.clone())
+                } else {
+                    api_client.get_gateway().await
+                };
+
+                let gateway_url = match gateway_url_result {
+                    Ok(url) => url,
+                    Err(e) => {
+                        error!(error = %e, "Failed to get gateway URL");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(max_backoff);
+                        continue;
+                    }
+                };
+
+                // Connect
+                let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
+                info!(url = %ws_url, resuming = state.session_id.is_some(), "Connecting to Discord gateway");
+
+                let connect_result = connect_async(&ws_url).await;
+
+                match connect_result {
+                    Ok((ws_stream, _)) => {
+                        // Reset backoff on successful connection
+                        backoff = Duration::from_secs(1);
+
+                        // Run the loop
+                        match run_gateway_loop(
+                            ws_stream,
+                            config.clone(),
+                            event_tx.clone(),
+                            state.clone(),
+                        )
+                        .await
+                        {
+                            Ok(new_state) => {
+                                // Graceful exit or expected reconnection
+                                state = new_state;
+                                info!("Gateway loop ended, reconnecting immediately");
+                            }
+                            Err(e) => {
+                                error!(error = %e, "Gateway connection error");
+                                tokio::time::sleep(backoff).await;
+                                backoff = (backoff * 2).min(max_backoff);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to connect WS");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(max_backoff);
+                    }
+                }
             }
         });
 
         Ok(event_rx)
     }
+}
 
-    async fn get_gateway_url(&self) -> DiscordResult<String> {
-        if let Some(url) = &self.config.gateway_url {
-            return Ok(url.clone());
-        }
-        self.api_client.get_gateway().await
-    }
+#[derive(Clone, Debug)]
+struct GatewayState {
+    session_id: Option<String>,
+    resume_url: Option<String>,
+    sequence: Option<u64>,
 }
 
 /// Run the gateway event loop.
@@ -201,14 +220,9 @@ async fn run_gateway_loop(
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
     config: DiscordConfig,
     event_tx: mpsc::Sender<GatewayEvent>,
-    session_id: Option<String>,
-    mut sequence: Option<u64>,
-    _resume_url: Option<String>,
-) -> DiscordResult<()> {
+    mut state: GatewayState,
+) -> DiscordResult<GatewayState> {
     let (mut write, mut read) = ws_stream.split();
-    // Track session state for potential reconnection (used for logging and future reconnection support)
-    let mut _tracked_session_id = session_id.clone();
-    let mut _tracked_resume_url: Option<String> = None;
 
     // Wait for Hello
     let hello = match read.next().await {
@@ -239,7 +253,7 @@ async fn run_gateway_loop(
     debug!(interval_ms = hello.heartbeat_interval, "Received Hello");
 
     // Send Resume if we have a session, otherwise Identify
-    if let (Some(sess_id), Some(seq)) = (&session_id, sequence) {
+    if let (Some(sess_id), Some(seq)) = (&state.session_id, state.sequence) {
         // We have a session to resume
         info!(session_id = %sess_id, sequence = seq, "Attempting to resume session");
 
@@ -301,15 +315,16 @@ async fn run_gateway_loop(
             // Handle heartbeat timer
             _ = heartbeat_interval_timer.tick() => {
                 if !heartbeat_acked {
-                    warn!("Heartbeat not acknowledged, connection may be zombied");
+                    warn!("Heartbeat not acknowledged, connection zombied");
+                    return Err(DiscordError::Gateway("Heartbeat timeout (zombied)".into()));
                 }
                 let heartbeat = json!({
                     "op": GatewayOpcode::Heartbeat as i32,
-                    "d": sequence
+                    "d": state.sequence
                 });
                 if let Err(e) = write.send(WsMessage::Text(heartbeat.to_string().into())).await {
                     error!(error = %e, "Failed to send heartbeat");
-                    break;
+                    return Err(DiscordError::Gateway(format!("Failed to send heartbeat: {e}")));
                 }
                 heartbeat_acked = false;
                 debug!("Sent heartbeat");
@@ -329,7 +344,7 @@ async fn run_gateway_loop(
 
                         // Update sequence
                         if let Some(s) = payload.s {
-                            sequence = Some(s);
+                            state.sequence = Some(s);
                         }
 
                         match GatewayOpcode::try_from(payload.op) {
@@ -340,8 +355,8 @@ async fn run_gateway_loop(
                                 let event = match event_name.as_str() {
                                     "READY" => {
                                         let ready: GatewayReady = serde_json::from_value(data)?;
-                                        _tracked_session_id = Some(ready.session_id.clone());
-                                        _tracked_resume_url = Some(ready.resume_gateway_url.clone());
+                                        state.session_id = Some(ready.session_id.clone());
+                                        state.resume_url = Some(ready.resume_gateway_url.clone());
                                         info!(
                                             user = ?ready.user.username,
                                             session_id = %ready.session_id,
@@ -366,7 +381,7 @@ async fn run_gateway_loop(
 
                                 if event_tx.send(event).await.is_err() {
                                     info!("Event receiver dropped, closing gateway");
-                                    break;
+                                    return Ok(state);
                                 }
                             }
                             Ok(GatewayOpcode::HeartbeatAck) => {
@@ -375,28 +390,28 @@ async fn run_gateway_loop(
                             }
                             Ok(GatewayOpcode::Reconnect) => {
                                 info!("Received reconnect request");
-                                break;
+                                return Ok(state);
                             }
                             Ok(GatewayOpcode::InvalidSession) => {
                                 let resumable = payload.d.and_then(|v| v.as_bool()).unwrap_or(false);
                                 warn!(resumable, "Session invalidated");
                                 if !resumable {
                                     // Clear session state - must re-identify
-                                    _tracked_session_id = None;
-                                    _tracked_resume_url = None;
+                                    state.session_id = None;
+                                    state.resume_url = None;
+                                    state.sequence = None;
                                 }
-                                // TODO: Implement automatic reconnection with resume if resumable
-                                break;
+                                return Ok(state);
                             }
                             Ok(GatewayOpcode::Heartbeat) => {
                                 // Immediately send heartbeat
                                 let heartbeat = json!({
                                     "op": GatewayOpcode::Heartbeat as i32,
-                                    "d": sequence
+                                    "d": state.sequence
                                 });
                                 if let Err(e) = write.send(WsMessage::Text(heartbeat.to_string().into())).await {
                                     error!(error = %e, "Failed to send heartbeat response");
-                                    break;
+                                    return Err(DiscordError::Gateway(format!("Failed to send heartbeat: {e}")));
                                 }
                             }
                             _ => {
@@ -406,23 +421,21 @@ async fn run_gateway_loop(
                     }
                     Some(Ok(WsMessage::Close(frame))) => {
                         info!(frame = ?frame, "Gateway connection closed");
-                        break;
+                        return Ok(state);
                     }
                     Some(Ok(_)) => {
                         // Ignore other message types (ping, pong, binary)
                     }
                     Some(Err(e)) => {
                         error!(error = %e, "WebSocket error");
-                        break;
+                        return Err(DiscordError::Gateway(format!("WebSocket error: {e}")));
                     }
                     None => {
                         info!("Gateway connection ended");
-                        break;
+                        return Ok(state);
                     }
                 }
             }
         }
     }
-
-    Ok(())
 }

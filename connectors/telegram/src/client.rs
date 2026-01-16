@@ -37,7 +37,7 @@ impl TelegramClient {
         })
     }
 
-    /// Set a custom base URL (for testing).
+    /// Set a custom base URL.
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
@@ -236,31 +236,10 @@ pub struct SendMessageOptions {
 }
 
 impl SendMessageOptions {
-    /// Use HTML parse mode.
+    /// Set parse mode to HTML.
     #[must_use]
     pub fn html(mut self) -> Self {
-        self.parse_mode = Some("HTML".into());
-        self
-    }
-
-    /// Use Markdown parse mode.
-    #[must_use]
-    pub fn markdown(mut self) -> Self {
-        self.parse_mode = Some("MarkdownV2".into());
-        self
-    }
-
-    /// Reply to a specific message.
-    #[must_use]
-    pub fn reply_to(mut self, message_id: i64) -> Self {
-        self.reply_to_message_id = Some(message_id);
-        self
-    }
-
-    /// Set forum topic thread.
-    #[must_use]
-    pub fn in_thread(mut self, thread_id: i64) -> Self {
-        self.message_thread_id = Some(thread_id);
+        self.parse_mode = Some("HTML".to_string());
         self
     }
 }

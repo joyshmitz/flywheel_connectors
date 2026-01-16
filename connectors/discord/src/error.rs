@@ -32,22 +32,6 @@ pub enum DiscordError {
     #[error("Rate limited, retry after {retry_after} seconds")]
     RateLimited { retry_after: f64 },
 
-    /// Invalid token
-    #[error("Invalid bot token")]
-    InvalidToken,
-
-    /// Not configured
-    #[error("Connector not configured")]
-    NotConfigured,
-
-    /// Not connected
-    #[error("Not connected to Discord Gateway")]
-    NotConnected,
-
-    /// Gateway connection failed
-    #[error("Gateway connection failed: {0}")]
-    GatewayConnectionFailed(String),
-
     /// Generic gateway error
     #[error("Gateway error: {0}")]
     Gateway(String),
@@ -62,7 +46,6 @@ impl DiscordError {
             Self::WebSocket(_) => true,
             Self::Api { code, .. } => *code >= 500 || *code == 429,
             Self::RateLimited { .. } => true,
-            Self::GatewayConnectionFailed(_) => true,
             Self::Gateway(_) => true,
             _ => false,
         }
@@ -126,17 +109,10 @@ impl DiscordError {
                     violation: None,
                 }
             }
-            Self::InvalidToken => FcpError::Unauthorized {
-                code: 2001,
-                message: "Invalid Discord bot token".into(),
+            Self::Gateway(msg) => FcpError::ConnectorUnavailable {
+                code: 5001,
+                message: format!("Discord Gateway error: {msg}"),
             },
-            Self::NotConfigured => FcpError::NotConfigured,
-            Self::NotConnected | Self::GatewayConnectionFailed(_) | Self::Gateway(_) => {
-                FcpError::ConnectorUnavailable {
-                    code: 5001,
-                    message: "Not connected to Discord Gateway".into(),
-                }
-            }
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },

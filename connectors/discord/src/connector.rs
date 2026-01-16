@@ -607,13 +607,7 @@ impl DiscordConnector {
         let message = api
             .create_message(channel_id, content, embeds, reply_to)
             .await
-            .map_err(|e| FcpError::External {
-                service: "discord".into(),
-                message: e.to_string(),
-                status_code: None,
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(|e| e.to_fcp_error())?;
 
         serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
@@ -729,13 +723,7 @@ impl DiscordConnector {
         let message = api
             .edit_message(channel_id, message_id, content, embeds)
             .await
-            .map_err(|e| FcpError::External {
-                service: "discord".into(),
-                message: e.to_string(),
-                status_code: None,
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(|e| e.to_fcp_error())?;
 
         serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
@@ -769,13 +757,7 @@ impl DiscordConnector {
 
         api.delete_message(channel_id, message_id)
             .await
-            .map_err(|e| FcpError::External {
-                service: "discord".into(),
-                message: e.to_string(),
-                status_code: None,
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({ "deleted": true }))
     }
@@ -796,13 +778,7 @@ impl DiscordConnector {
         let channel = api
             .get_channel(channel_id)
             .await
-            .map_err(|e| FcpError::External {
-                service: "discord".into(),
-                message: e.to_string(),
-                status_code: None,
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(|e| e.to_fcp_error())?;
 
         serde_json::to_value(channel).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize channel: {e}"),
@@ -825,13 +801,7 @@ impl DiscordConnector {
         let guild = api
             .get_guild(guild_id)
             .await
-            .map_err(|e| FcpError::External {
-                service: "discord".into(),
-                message: e.to_string(),
-                status_code: None,
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(|e| e.to_fcp_error())?;
 
         serde_json::to_value(guild).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize guild: {e}"),
@@ -856,13 +826,7 @@ impl DiscordConnector {
 
         api.trigger_typing(channel_id)
             .await
-            .map_err(|e| FcpError::External {
-                service: "discord".into(),
-                message: e.to_string(),
-                status_code: None,
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({ "triggered": true }))
     }
@@ -906,13 +870,7 @@ impl DiscordConnector {
     async fn connect_gateway(&mut self) -> FcpResult<()> {
         let gateway = self.gateway.as_mut().ok_or(FcpError::NotConfigured)?;
 
-        let mut event_rx = gateway.connect().await.map_err(|e| FcpError::External {
-            service: "discord".into(),
-            message: format!("Failed to connect to gateway: {e}"),
-            status_code: None,
-            retryable: true,
-            retry_after: None,
-        })?;
+        let mut event_rx = gateway.connect().await.map_err(|e| e.to_fcp_error())?;
 
         let event_tx = self.event_tx.clone();
         let connector_id = self.id.clone();

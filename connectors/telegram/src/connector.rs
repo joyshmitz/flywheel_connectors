@@ -20,6 +20,9 @@ pub struct TelegramConfig {
     /// Bot token (required)
     pub token: Option<String>,
 
+    /// Custom API base URL (optional)
+    pub base_url: Option<String>,
+
     /// Polling timeout in seconds
     #[serde(default = "default_poll_timeout")]
     pub poll_timeout: i32,
@@ -101,9 +104,14 @@ impl TelegramConnector {
         }
 
         let token = config.token.clone().unwrap();
-        let client = TelegramClient::new(&token).map_err(|e| FcpError::Internal {
+        let mut client = TelegramClient::new(&token).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
         })?;
+
+        if let Some(base_url) = &config.base_url {
+            client = client.with_base_url(base_url);
+        }
+
         self.client = Some(client);
         self.config = Some(config);
 
@@ -289,6 +297,41 @@ impl TelegramConnector {
                     rate_limit: None,
                     requires_approval: None,
                 },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.answer_callback_query"),
+                    summary: "Answer a callback query (button press)".into(),
+                    description: Some("Notify Telegram that a callback query has been received. Stops the loading animation.".into()),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "callback_query_id": { "type": "string", "description": "Unique identifier for the query to be answered" },
+                            "text": { "type": "string", "description": "Text of the notification. If not specified, nothing will be shown to the user" }
+                        },
+                        "required": ["callback_query_id"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "success": { "type": "boolean" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("telegram.send"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Respond to a button press (callback query).".into(),
+                        common_mistakes: vec![
+                            "Forgetting to call this after processing a button press".into(),
+                        ],
+                        examples: vec![
+                            r#"{"callback_query_id": "12345", "text": "Done!"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
             ],
             events: vec![EventInfo {
                 topic: "telegram.message".into(),
@@ -334,10 +377,12 @@ impl TelegramConnector {
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
         // Extract and verify capability token
-        let token_value = params.get("capability_token").ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "Missing capability_token".into(),
-        })?;
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing capability_token".into(),
+            })?;
 
         let token: fcp_core::CapabilityToken = serde_json::from_value(token_value.clone())
             .map_err(|e| FcpError::InvalidRequest {
@@ -360,6 +405,7 @@ impl TelegramConnector {
         let result = match operation {
             "telegram.send_message" => self.invoke_send_message(input).await,
             "telegram.get_file" => self.invoke_get_file(input).await,
+            "telegram.answer_callback_query" => self.invoke_answer_callback_query(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -473,6 +519,39 @@ impl TelegramConnector {
             "file_path": file.file_path,
             "download_url": download_url
         }))
+    }
+
+    async fn invoke_answer_callback_query(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let callback_query_id = input
+            .get("callback_query_id")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing callback_query_id".into(),
+            })?;
+
+        let text = input.get("text").and_then(|v| v.as_str());
+
+        let success = client
+            .answer_callback_query(callback_query_id, text)
+            .await
+            .map_err(|e: TelegramError| FcpError::External {
+                service: "telegram".into(),
+                message: e.to_string(),
+                status_code: match &e {
+                    TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
+                    _ => None,
+                },
+                retryable: e.is_retryable(),
+                retry_after: None,
+            })?;
+
+        Ok(json!({ "success": success }))
     }
 
     /// Handle subscribe method.
@@ -672,10 +751,81 @@ impl Default for TelegramConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+    use chrono::{Duration, Utc};
+
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(cap)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[cap])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .sign(signing_key)
+            .unwrap();
+        fcp_core::CapabilityToken { raw: cose }
+    }
+
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+
+    async fn setup_connector_with_token(cap: &str) -> (TelegramConnector, fcp_core::CapabilityToken, MockServer) {
+        let mock_server = MockServer::start().await;
+        
+        // Mock getMe for handshake
+        Mock::given(method("GET"))
+            .and(path("/botdummy_token/getMe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock getUpdates for polling
+        Mock::given(method("POST"))
+            .and(path("/botdummy_token/getUpdates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = TelegramConnector::new();
+        
+        // Configure with dummy token and mock base URL
+        connector.handle_configure(serde_json::json!({
+            "token": "dummy_token",
+            "base_url": mock_server.uri()
+        })).await.unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector.handle_handshake(serde_json::json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": verifying_key.to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": [cap]
+        })).await.unwrap();
+
+        let token = generate_valid_token(&signing_key, cap);
+        (connector, token, mock_server)
+    }
 
     #[tokio::test]
     async fn test_send_message_text_too_long() {
-        let connector = TelegramConnector::new();
+        let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
         // Create a message that exceeds 4096 characters
         let long_text = "x".repeat(4097);
@@ -687,7 +837,8 @@ mod tests {
         let result = connector
             .handle_invoke(serde_json::json!({
                 "operation": "telegram.send_message",
-                "input": input
+                "input": input,
+                "capability_token": token
             }))
             .await;
 
@@ -705,10 +856,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_text_at_limit() {
-        let connector = TelegramConnector::new();
+        let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
         // Create a message exactly at 4096 characters - should pass validation
-        // but fail on NotConfigured
+        // but fail on NotConfigured -> Wait, we configured it with a mock!
+        // But invoke_send_message calls client.send_message.
+        // We haven't mocked sendMessage!
+        // So it will fail with 404 from mock server (because no mock matches).
+        // BUT the test expects NotConfigured? No, the original test expected NotConfigured because it wasn't configured.
+        // Now it IS configured.
+        // We should mock sendMessage to return success or error as needed.
+        // But this test specifically wants to test boundary condition.
+        // If validation passes (<= 4096), it proceeds to call API.
+        // If we want to test that validation passed, we can check that it didn't fail with InvalidRequest.
+        // If the mock returns 404, that means it TRIED to send, so validation passed.
+        
         let exact_text = "x".repeat(4096);
         let input = serde_json::json!({
             "chat_id": "123456789",
@@ -718,19 +880,25 @@ mod tests {
         let result = connector
             .handle_invoke(serde_json::json!({
                 "operation": "telegram.send_message",
-                "input": input
+                "input": input,
+                "capability_token": token
             }))
             .await;
 
-        // Should fail with NotConfigured (passed validation)
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, FcpError::NotConfigured));
+        // It should NOT be InvalidRequest.
+        // It will be External error (404 from mock) or Success if we mock it.
+        // Let's assert it is NOT InvalidRequest(1004).
+        
+        match result {
+            Ok(_) => {}, // Success is fine (if we mocked it)
+            Err(FcpError::External { .. }) => {}, // External error means it tried to send -> validation passed
+            Err(e) => panic!("Expected success or external error, got: {:?}", e),
+        }
     }
 
     #[tokio::test]
     async fn test_send_message_missing_text() {
-        let connector = TelegramConnector::new();
+        let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
         let input = serde_json::json!({
             "chat_id": "123456789"
@@ -739,7 +907,8 @@ mod tests {
         let result = connector
             .handle_invoke(serde_json::json!({
                 "operation": "telegram.send_message",
-                "input": input
+                "input": input,
+                "capability_token": token
             }))
             .await;
 
@@ -749,13 +918,13 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("text"));
             }
-            _ => panic!("Expected InvalidRequest error"),
+            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
         }
     }
 
     #[tokio::test]
     async fn test_send_message_missing_chat_id() {
-        let connector = TelegramConnector::new();
+        let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
         let input = serde_json::json!({
             "text": "Hello"
@@ -764,7 +933,8 @@ mod tests {
         let result = connector
             .handle_invoke(serde_json::json!({
                 "operation": "telegram.send_message",
-                "input": input
+                "input": input,
+                "capability_token": token
             }))
             .await;
 
@@ -774,7 +944,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("chat_id"));
             }
-            _ => panic!("Expected InvalidRequest error"),
+            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
         }
     }
 
