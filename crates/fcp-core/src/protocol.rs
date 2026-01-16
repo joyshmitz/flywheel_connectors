@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::{
-    CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId, IdempotencyClass, InstanceId,
-    OperationId, Provenance, RiskLevel, SafetyTier, SessionId, ZoneId,
+    ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, CorrelationId,
+    IdempotencyClass, InstanceId, OperationId, Provenance, RiskLevel, SafetyTier, SessionId,
+    ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -238,6 +239,7 @@ pub struct InvokeContext {
 /// - `deadline_ms`: Optional timeout deadline
 /// - `correlation_id`: Optional tracing correlation
 /// - `provenance`: Optional provenance for taint tracking
+/// - `approval_tokens`: Approval tokens for elevation/declassification/execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvokeRequest {
     /// Message type (always "invoke")
@@ -274,6 +276,18 @@ pub struct InvokeRequest {
     /// Provenance for taint tracking
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+
+    /// Approval tokens authorizing this request.
+    ///
+    /// These tokens can authorize:
+    /// - Elevation: Allow integrity to flow upward
+    /// - Declassification: Allow confidentiality to flow downward
+    /// - Execution: Scope-limited approval for specific operations
+    ///
+    /// Per FCP Specification Section 7.4, approval tokens are first-class
+    /// mesh objects that must be validated against the request context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_tokens: Vec<ApprovalToken>,
 }
 
 /// Response from an operation invocation.
@@ -737,6 +751,7 @@ mod tests {
             deadline_ms: Some(30000),
             correlation_id: Some(CorrelationId::new()),
             provenance: Some(crate::Provenance::new(ZoneId::work())),
+            approval_tokens: Vec::new(),
         };
 
         let json = serde_json::to_string(&req).unwrap();

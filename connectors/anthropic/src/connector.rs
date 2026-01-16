@@ -599,7 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handshake() {
-        let connector = AnthropicConnector::new();
+        let mut connector = AnthropicConnector::new();
         let result = connector.handle_handshake(json!({})).await.unwrap();
 
         assert_eq!(result["connector_id"], "fcp.anthropic");
