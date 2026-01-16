@@ -2,11 +2,13 @@
 
 #![forbid(unsafe_code)]
 
+mod control_plane;
 mod fcpc;
 mod fcps;
-mod session;
+pub mod session;
 mod symbol_envelope;
 
+pub use control_plane::*;
 pub use fcpc::*;
 pub use fcps::*;
 pub use session::*;

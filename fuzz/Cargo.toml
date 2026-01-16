@@ -41,5 +41,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_fcpc_frame"
+path = "fuzz_targets/fcpc_frame.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

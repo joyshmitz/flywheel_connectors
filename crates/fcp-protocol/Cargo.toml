@@ -39,3 +39,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "fcps_parsing"
 harness = false
+
+[[bench]]
+name = "fcpc_parsing"
+harness = false
