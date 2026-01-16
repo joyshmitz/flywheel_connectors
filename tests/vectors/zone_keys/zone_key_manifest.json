@@ -1,0 +1,69 @@
+{
+  "description": "Golden vectors for ZoneKeyManifest structure and validation",
+  "test_vectors": [
+    {
+      "name": "valid_manifest_single_node",
+      "description": "Valid ZoneKeyManifest with single node membership",
+      "manifest": {
+        "zone_id": "z:work",
+        "zone_key_id": "0102030405060708",
+        "object_id_key_id": "1112131415161718",
+        "algorithm": "chacha20_poly1305",
+        "valid_from": 1700000000,
+        "valid_until": null,
+        "prev_zone_key_id": null,
+        "node_count": 1,
+        "rekey_policy": null
+      },
+      "expected": {
+        "valid": true
+      }
+    },
+    {
+      "name": "valid_manifest_multi_node",
+      "description": "Valid ZoneKeyManifest with multiple nodes",
+      "manifest": {
+        "zone_id": "z:private",
+        "zone_key_id": "2122232425262728",
+        "object_id_key_id": "3132333435363738",
+        "algorithm": "xchacha20_poly1305",
+        "valid_from": 1700000000,
+        "valid_until": 1700100000,
+        "prev_zone_key_id": null,
+        "node_count": 3,
+        "rekey_policy": {
+          "epoch_ratchet": false,
+          "overlap_window_secs": 300,
+          "retain_epochs": 2,
+          "rewrap_on_membership_change": true,
+          "rotate_object_id_key_on_membership_change": false
+        }
+      },
+      "expected": {
+        "valid": true
+      }
+    },
+    {
+      "name": "rotated_manifest",
+      "description": "Manifest after key rotation with prev_zone_key_id",
+      "manifest": {
+        "zone_id": "z:work",
+        "zone_key_id": "4142434445464748",
+        "object_id_key_id": "1112131415161718",
+        "algorithm": "chacha20_poly1305",
+        "valid_from": 1700100000,
+        "valid_until": null,
+        "prev_zone_key_id": "0102030405060708",
+        "node_count": 1,
+        "rekey_policy": {
+          "overlap_window_secs": 600
+        }
+      },
+      "expected": {
+        "valid": true,
+        "is_rotation": true,
+        "object_id_key_unchanged": true
+      }
+    }
+  ]
+}

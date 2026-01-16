@@ -1,0 +1,74 @@
+{
+  "description": "Golden vectors for zone key rotation workflows",
+  "test_vectors": [
+    {
+      "name": "basic_rotation",
+      "description": "Zone key rotation produces new zone_key_id and symmetric key",
+      "before": {
+        "zone_key_id": "0102030405060708",
+        "object_id_key_id": "1112131415161718",
+        "zone_id": "z:work",
+        "nodes": ["node-1", "node-2"]
+      },
+      "after": {
+        "zone_key_id": "2122232425262728",
+        "object_id_key_id": "1112131415161718",
+        "zone_id": "z:work",
+        "nodes": ["node-1", "node-2"],
+        "prev_zone_key_id": "0102030405060708"
+      },
+      "assertions": [
+        "zone_key_id changed",
+        "object_id_key_id unchanged (routine rotation)",
+        "prev_zone_key_id references old key",
+        "all nodes can decrypt new key",
+        "all nodes received new wrapped_keys"
+      ]
+    },
+    {
+      "name": "rotation_with_membership_change",
+      "description": "Rotation when a node is removed",
+      "before": {
+        "zone_key_id": "0102030405060708",
+        "object_id_key_id": "1112131415161718",
+        "zone_id": "z:work",
+        "nodes": ["node-1", "node-2", "node-3"]
+      },
+      "after": {
+        "zone_key_id": "3132333435363738",
+        "object_id_key_id": "1112131415161718",
+        "zone_id": "z:work",
+        "nodes": ["node-1", "node-2"],
+        "prev_zone_key_id": "0102030405060708",
+        "removed_nodes": ["node-3"]
+      },
+      "assertions": [
+        "zone_key_id changed",
+        "removed node not in wrapped_keys",
+        "removed node cannot decrypt new zone key",
+        "remaining nodes can decrypt new key"
+      ]
+    },
+    {
+      "name": "rotation_with_object_id_key_change",
+      "description": "Rotation that also rotates ObjectIdKey (privacy hardening)",
+      "before": {
+        "zone_key_id": "0102030405060708",
+        "object_id_key_id": "1112131415161718",
+        "zone_id": "z:private"
+      },
+      "after": {
+        "zone_key_id": "4142434445464748",
+        "object_id_key_id": "5152535455565758",
+        "zone_id": "z:private",
+        "prev_zone_key_id": "0102030405060708"
+      },
+      "assertions": [
+        "zone_key_id changed",
+        "object_id_key_id also changed",
+        "new wrapped_object_id_keys present"
+      ],
+      "note": "Used when rotate_object_id_key_on_membership_change policy is set"
+    }
+  ]
+}

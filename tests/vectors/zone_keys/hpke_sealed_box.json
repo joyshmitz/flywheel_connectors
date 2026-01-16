@@ -1,0 +1,92 @@
+{
+  "description": "Golden vectors for FCP2 HPKE sealed box operations (Zone key distribution)",
+  "profile": {
+    "kem": "DHKEM(X25519, HKDF-SHA256)",
+    "kdf": "HKDF-SHA256",
+    "aead": "ChaCha20-Poly1305",
+    "info": "FCP2-HPKE"
+  },
+  "test_vectors": [
+    {
+      "name": "zone_key_seal_unseal",
+      "description": "Basic zone key sealing and unsealing",
+      "recipient_secret_key": "5a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778",
+      "zone_id": "7a3a776f726b",
+      "zone_id_decoded": "z:work",
+      "recipient_node_id": "6e6f64652d313233",
+      "recipient_node_id_decoded": "node-123",
+      "issued_at": 1700000000,
+      "plaintext": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "plaintext_description": "32-byte zone key material",
+      "purpose": "FCP2-ZONE-KEY",
+      "expected": {
+        "enc_size": 32,
+        "ciphertext_size": 48,
+        "aad_cbor_prefix": "a4"
+      }
+    },
+    {
+      "name": "objectid_key_seal_unseal",
+      "description": "ObjectIdKey sealing and unsealing",
+      "recipient_secret_key": "1a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738",
+      "zone_id": "7a3a707269766174",
+      "zone_id_decoded": "z:privat",
+      "recipient_node_id": "6e6f64652d616263",
+      "recipient_node_id_decoded": "node-abc",
+      "issued_at": 1700000100,
+      "plaintext": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0",
+      "plaintext_description": "32-byte ObjectIdKey material",
+      "purpose": "FCP2-OBJECTID-KEY",
+      "expected": {
+        "enc_size": 32,
+        "ciphertext_size": 48,
+        "aad_cbor_prefix": "a4"
+      }
+    },
+    {
+      "name": "wrong_recipient_fails",
+      "description": "Decryption with mismatched recipient node ID must fail",
+      "recipient_secret_key": "5a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778",
+      "zone_id": "7a3a776f726b",
+      "seal_recipient_node_id": "6e6f64652d313233",
+      "open_recipient_node_id": "6e6f64652d343536",
+      "issued_at": 1700000000,
+      "plaintext": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "purpose": "FCP2-ZONE-KEY",
+      "expected_error": "AAD mismatch - decryption must fail"
+    },
+    {
+      "name": "wrong_zone_fails",
+      "description": "Decryption with mismatched zone ID must fail",
+      "recipient_secret_key": "5a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778",
+      "seal_zone_id": "7a3a776f726b",
+      "open_zone_id": "7a3a707269766174",
+      "recipient_node_id": "6e6f64652d313233",
+      "issued_at": 1700000000,
+      "plaintext": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "purpose": "FCP2-ZONE-KEY",
+      "expected_error": "AAD mismatch - decryption must fail"
+    },
+    {
+      "name": "wrong_timestamp_fails",
+      "description": "Decryption with mismatched issued_at must fail",
+      "recipient_secret_key": "5a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778",
+      "zone_id": "7a3a776f726b",
+      "recipient_node_id": "6e6f64652d313233",
+      "seal_issued_at": 1700000000,
+      "open_issued_at": 1700000001,
+      "plaintext": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "purpose": "FCP2-ZONE-KEY",
+      "expected_error": "AAD mismatch - decryption must fail"
+    }
+  ],
+  "aad_format": {
+    "description": "AAD is canonical CBOR map with 4 fields",
+    "fields": [
+      {"name": "zone_id", "type": "bytes"},
+      {"name": "recipient_node_id", "type": "bytes"},
+      {"name": "purpose", "type": "bytes"},
+      {"name": "issued_at", "type": "uint64"}
+    ]
+  }
+}
