@@ -987,7 +987,10 @@ mod tests {
                 let object_id = test_object_id();
 
                 // No accesses = 0 score
-                assert_eq!(tracker.priority_score(&object_id), 0.0);
+                #[allow(clippy::float_cmp)] // exact zero is valid for no accesses
+                {
+                    assert_eq!(tracker.priority_score(&object_id), 0.0);
+                }
 
                 tracker.record_access(object_id);
                 let score = tracker.priority_score(&object_id);
@@ -1159,27 +1162,36 @@ mod tests {
 
     #[test]
     fn offline_access_k_zero_edge_case() {
-        run_offline_test("offline_access_k_zero_edge_case", "verify", "edge_case", 4, || {
-            let object_id = test_object_id();
-            // k=0 is an edge case - should return 0 coverage and can_access true (no symbols needed)
-            let access = OfflineAccess::new(object_id, 0, 0, 1024);
+        run_offline_test(
+            "offline_access_k_zero_edge_case",
+            "verify",
+            "edge_case",
+            4,
+            || {
+                let object_id = test_object_id();
+                // k=0 is an edge case - should return 0 coverage and can_access true (no symbols needed)
+                let access = OfflineAccess::new(object_id, 0, 0, 1024);
 
-            // With k=0, can_access should be true (0 >= 0)
-            assert!(access.can_access());
-            // Coverage should be 0 (division by zero protection)
-            assert_eq!(access.coverage_bps(), 0);
-            assert_eq!(access.coverage(), 0.0);
-            // No symbols needed
-            assert_eq!(access.symbols_needed(), 0);
+                // With k=0, can_access should be true (0 >= 0)
+                assert!(access.can_access());
+                // Coverage should be 0 (division by zero protection)
+                assert_eq!(access.coverage_bps(), 0);
+                #[allow(clippy::float_cmp)] // exact zero is valid for k=0 edge case
+                {
+                    assert_eq!(access.coverage(), 0.0);
+                }
+                // No symbols needed
+                assert_eq!(access.symbols_needed(), 0);
 
-            OfflineLogData {
-                object_id: Some(object_id),
-                local_symbols: Some(access.local_symbols),
-                k: Some(access.k),
-                coverage_bps: Some(access.coverage_bps()),
-                details: Some(json!({"edge_case": "k=0"})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(object_id),
+                    local_symbols: Some(access.local_symbols),
+                    k: Some(access.k),
+                    coverage_bps: Some(access.coverage_bps()),
+                    details: Some(json!({"edge_case": "k=0"})),
+                }
+            },
+        );
     }
 
     #[test]
@@ -1260,30 +1272,36 @@ mod tests {
 
     #[test]
     fn offline_capability_get_mut() {
-        run_offline_test("offline_capability_get_mut", "verify", "mutation", 3, || {
-            let mut cap = OfflineCapability::new();
+        run_offline_test(
+            "offline_capability_get_mut",
+            "verify",
+            "mutation",
+            3,
+            || {
+                let mut cap = OfflineCapability::new();
 
-            let access = OfflineAccess::new(test_object_id(), 10, 15, 1024);
-            cap.track(access);
+                let access = OfflineAccess::new(test_object_id(), 10, 15, 1024);
+                cap.track(access);
 
-            assert!(!cap.can_access(&test_object_id()));
+                assert!(!cap.can_access(&test_object_id()));
 
-            // Mutate through get_mut
-            if let Some(access) = cap.get_mut(&test_object_id()) {
-                access.set_local_symbols(10);
-            }
+                // Mutate through get_mut
+                if let Some(access) = cap.get_mut(&test_object_id()) {
+                    access.set_local_symbols(10);
+                }
 
-            assert!(cap.can_access(&test_object_id()));
-            assert_eq!(cap.available_count(), 1);
+                assert!(cap.can_access(&test_object_id()));
+                assert_eq!(cap.available_count(), 1);
 
-            OfflineLogData {
-                object_id: Some(test_object_id()),
-                local_symbols: None,
-                k: None,
-                coverage_bps: None,
-                details: Some(json!({"mutated": true})),
-            }
-        });
+                OfflineLogData {
+                    object_id: Some(test_object_id()),
+                    local_symbols: None,
+                    k: None,
+                    coverage_bps: None,
+                    details: Some(json!({"mutated": true})),
+                }
+            },
+        );
     }
 
     #[test]
@@ -1308,11 +1326,8 @@ mod tests {
                 // Incomplete (0 symbols)
                 cap.track(access3);
 
-                let incomplete: Vec<_> = cap.incomplete_objects().collect();
-                assert_eq!(incomplete.len(), 2);
-
-                let available: Vec<_> = cap.available_objects().collect();
-                assert_eq!(available.len(), 1);
+                assert_eq!(cap.incomplete_objects().count(), 2);
+                assert_eq!(cap.available_objects().count(), 1);
 
                 OfflineLogData {
                     object_id: None,

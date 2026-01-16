@@ -44,51 +44,36 @@ pub const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 300;
 // ============================================================================
 
 /// CPU architecture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CpuArch {
     /// x86-64 (AMD64)
+    #[cfg_attr(
+        any(
+            target_arch = "x86_64",
+            not(any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                target_arch = "wasm32",
+                target_arch = "riscv64"
+            ))
+        ),
+        default
+    )]
     X86_64,
-    /// ARM 64-bit (AArch64)
+    /// ARM 64-bit (`AArch64`)
+    #[cfg_attr(target_arch = "aarch64", default)]
     Aarch64,
     /// WebAssembly 32-bit
+    #[cfg_attr(target_arch = "wasm32", default)]
     Wasm32,
     /// RISC-V 64-bit
+    #[cfg_attr(target_arch = "riscv64", default)]
     Riscv64,
 }
 
-impl Default for CpuArch {
-    fn default() -> Self {
-        #[cfg(target_arch = "x86_64")]
-        {
-            Self::X86_64
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            Self::Aarch64
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Self::Wasm32
-        }
-        #[cfg(target_arch = "riscv64")]
-        {
-            Self::Riscv64
-        }
-        #[cfg(not(any(
-            target_arch = "x86_64",
-            target_arch = "aarch64",
-            target_arch = "wasm32",
-            target_arch = "riscv64"
-        )))]
-        {
-            Self::X86_64
-        }
-    }
-}
-
 /// Power source type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PowerSource {
     /// Connected to mains power
@@ -98,17 +83,12 @@ pub enum PowerSource {
     /// Solar powered
     Solar,
     /// Unknown power source
+    #[default]
     Unknown,
 }
 
-impl Default for PowerSource {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
 /// Network latency class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LatencyClass {
     /// Local (same machine)
@@ -116,19 +96,14 @@ pub enum LatencyClass {
     /// LAN (same network)
     Lan,
     /// Internet (direct connection)
+    #[default]
     Internet,
     /// DERP relay (Tailscale fallback)
     Derp,
 }
 
-impl Default for LatencyClass {
-    fn default() -> Self {
-        Self::Internet
-    }
-}
-
 /// Device availability profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AvailabilityProfile {
     /// Always online
@@ -136,13 +111,8 @@ pub enum AvailabilityProfile {
     /// Available on schedule
     Scheduled,
     /// Best effort (may go offline)
+    #[default]
     BestEffort,
-}
-
-impl Default for AvailabilityProfile {
-    fn default() -> Self {
-        Self::BestEffort
-    }
 }
 
 /// GPU vendor.
@@ -246,7 +216,7 @@ pub struct InstalledConnector {
     pub connector_id: ConnectorId,
     /// Semantic version string
     pub version: String,
-    /// Binary content hash (ObjectId)
+    /// Binary content hash (`ObjectId`)
     pub binary_hash: ObjectId,
     /// Capabilities granted to this connector
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -289,7 +259,7 @@ impl InstalledConnector {
 /// - Significant capability change
 /// - Connector install/remove
 /// - Periodic refresh (every 5 minutes default)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceProfile {
     /// Tailscale node identifier
     pub node_id: NodeId,
@@ -356,13 +326,13 @@ impl DeviceProfile {
 
     /// Check if the profile has GPU capabilities.
     #[must_use]
-    pub fn has_gpu(&self) -> bool {
+    pub const fn has_gpu(&self) -> bool {
         self.gpu.is_some()
     }
 
     /// Check if the profile has TPU capabilities.
     #[must_use]
-    pub fn has_tpu(&self) -> bool {
+    pub const fn has_tpu(&self) -> bool {
         self.tpu.is_some()
     }
 
@@ -386,7 +356,7 @@ impl DeviceProfile {
     #[must_use]
     pub fn is_low_battery(&self) -> bool {
         matches!(self.power_source, PowerSource::Battery)
-            && self.battery_percent.map_or(false, |p| p < 20)
+            && self.battery_percent.is_some_and(|p| p < 20)
     }
 
     /// Compute execution fitness score for this device.
@@ -426,6 +396,7 @@ pub struct DeviceProfileBuilder {
 impl DeviceProfileBuilder {
     /// Create a new builder with the given node ID.
     #[must_use]
+    #[allow(clippy::cast_sign_loss)] // timestamp_millis() is always positive
     pub fn new(node_id: NodeId) -> Self {
         Self {
             node_id,
@@ -451,21 +422,21 @@ impl DeviceProfileBuilder {
 
     /// Set CPU core count.
     #[must_use]
-    pub fn cpu_cores(mut self, cores: u16) -> Self {
+    pub const fn cpu_cores(mut self, cores: u16) -> Self {
         self.cpu_cores = cores;
         self
     }
 
     /// Set CPU architecture.
     #[must_use]
-    pub fn cpu_arch(mut self, arch: CpuArch) -> Self {
+    pub const fn cpu_arch(mut self, arch: CpuArch) -> Self {
         self.cpu_arch = arch;
         self
     }
 
     /// Set memory in megabytes.
     #[must_use]
-    pub fn memory_mb(mut self, mb: u32) -> Self {
+    pub const fn memory_mb(mut self, mb: u32) -> Self {
         self.memory_mb = mb;
         self
     }
@@ -486,70 +457,70 @@ impl DeviceProfileBuilder {
 
     /// Set local storage in megabytes.
     #[must_use]
-    pub fn local_storage_mb(mut self, mb: u64) -> Self {
+    pub const fn local_storage_mb(mut self, mb: u64) -> Self {
         self.local_storage_mb = mb;
         self
     }
 
     /// Set symbol store quota in megabytes.
     #[must_use]
-    pub fn symbol_store_quota_mb(mut self, mb: u32) -> Self {
+    pub const fn symbol_store_quota_mb(mut self, mb: u32) -> Self {
         self.symbol_store_quota_mb = mb;
         self
     }
 
     /// Set power source.
     #[must_use]
-    pub fn power_source(mut self, source: PowerSource) -> Self {
+    pub const fn power_source(mut self, source: PowerSource) -> Self {
         self.power_source = source;
         self
     }
 
     /// Set battery percentage.
     #[must_use]
-    pub fn battery_percent(mut self, percent: u8) -> Self {
+    pub const fn battery_percent(mut self, percent: u8) -> Self {
         self.battery_percent = Some(percent);
         self
     }
 
     /// Set bandwidth estimate in kbps.
     #[must_use]
-    pub fn bandwidth_estimate_kbps(mut self, kbps: u32) -> Self {
+    pub const fn bandwidth_estimate_kbps(mut self, kbps: u32) -> Self {
         self.bandwidth_estimate_kbps = kbps;
         self
     }
 
     /// Set latency class.
     #[must_use]
-    pub fn latency_class(mut self, class: LatencyClass) -> Self {
+    pub const fn latency_class(mut self, class: LatencyClass) -> Self {
         self.latency_class = class;
         self
     }
 
     /// Set metered connection flag.
     #[must_use]
-    pub fn metered(mut self, metered: bool) -> Self {
+    pub const fn metered(mut self, metered: bool) -> Self {
         self.metered = metered;
         self
     }
 
     /// Set availability profile.
     #[must_use]
-    pub fn availability(mut self, availability: AvailabilityProfile) -> Self {
+    pub const fn availability(mut self, availability: AvailabilityProfile) -> Self {
         self.availability = availability;
         self
     }
 
     /// Set next expected downtime.
     #[must_use]
-    pub fn next_expected_downtime(mut self, timestamp: u64) -> Self {
+    pub const fn next_expected_downtime(mut self, timestamp: u64) -> Self {
         self.next_expected_downtime = Some(timestamp);
         self
     }
 
     /// Set timestamp.
     #[must_use]
-    pub fn timestamp(mut self, timestamp: u64) -> Self {
+    pub const fn timestamp(mut self, timestamp: u64) -> Self {
         self.timestamp = timestamp;
         self
     }
@@ -615,28 +586,28 @@ impl FitnessContext {
 
     /// Set symbols present flag.
     #[must_use]
-    pub fn with_symbols_present(mut self, present: bool) -> Self {
+    pub const fn with_symbols_present(mut self, present: bool) -> Self {
         self.symbols_present = present;
         self
     }
 
     /// Set GPU requirement.
     #[must_use]
-    pub fn with_requires_gpu(mut self, required: bool) -> Self {
+    pub const fn with_requires_gpu(mut self, required: bool) -> Self {
         self.requires_gpu = required;
         self
     }
 
     /// Set TPU requirement.
     #[must_use]
-    pub fn with_requires_tpu(mut self, required: bool) -> Self {
+    pub const fn with_requires_tpu(mut self, required: bool) -> Self {
         self.requires_tpu = required;
         self
     }
 
     /// Set minimum memory requirement.
     #[must_use]
-    pub fn with_min_memory_mb(mut self, mb: u32) -> Self {
+    pub const fn with_min_memory_mb(mut self, mb: u32) -> Self {
         self.min_memory_mb = Some(mb);
         self
     }
@@ -653,7 +624,7 @@ impl FitnessContext {
 ///
 /// Higher scores indicate better fitness for execution.
 /// A score of 0 means the device cannot execute the operation.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy)]
 pub struct FitnessScore {
     /// The computed score (0.0 = cannot execute, higher = better)
     pub score: f64,
@@ -763,7 +734,19 @@ impl FitnessScore {
     }
 }
 
+impl PartialEq for FitnessScore {
+    fn eq(&self, other: &Self) -> bool {
+        self.eligible == other.eligible && self.score == other.score
+    }
+}
+
 impl Eq for FitnessScore {}
+
+impl PartialOrd for FitnessScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 impl Ord for FitnessScore {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -840,7 +823,7 @@ mod tests {
 
         let profile = DeviceProfile::builder(test_node_id())
             .cpu_cores(96)
-            .memory_mb(262144)
+            .memory_mb(262_144)
             .tpu(tpu)
             .build();
 
@@ -885,7 +868,7 @@ mod tests {
             .power_source(PowerSource::Mains)
             .latency_class(LatencyClass::Lan)
             .availability(AvailabilityProfile::AlwaysOn)
-            .timestamp(1705000000000)
+            .timestamp(1_705_000_000_000)
             .build();
 
         // JSON roundtrip
@@ -908,7 +891,7 @@ mod tests {
         let score = profile.compute_fitness(&ctx);
 
         assert!(score.eligible);
-        assert_eq!(score.score, FitnessScore::BASE_SCORE);
+        assert!((score.score - FitnessScore::BASE_SCORE).abs() < 1e-9);
     }
 
     #[test]
@@ -1105,7 +1088,7 @@ mod tests {
             .bandwidth_estimate_kbps(100_000)
             .latency_class(LatencyClass::Lan)
             .availability(AvailabilityProfile::AlwaysOn)
-            .timestamp(1705000000000)
+            .timestamp(1_705_000_000_000)
             .build();
 
         // CBOR roundtrip
@@ -1113,32 +1096,32 @@ mod tests {
         ciborium::into_writer(&profile, &mut cbor_bytes).unwrap();
 
         let decoded: DeviceProfile = ciborium::from_reader(&cbor_bytes[..]).unwrap();
-        assert_eq!(profile, decoded, "CBOR roundtrip mismatch for minimal profile");
+        assert_eq!(
+            profile, decoded,
+            "CBOR roundtrip mismatch for minimal profile"
+        );
 
         // Verify specific fields survived
         assert_eq!(decoded.node_id.as_str(), "node-golden");
         assert_eq!(decoded.cpu_cores, 4);
         assert_eq!(decoded.memory_mb, 8192);
-        assert_eq!(decoded.timestamp, 1705000000000);
+        assert_eq!(decoded.timestamp, 1_705_000_000_000);
     }
 
     #[test]
     fn golden_vector_device_profile_full_cbor() {
         // Full profile with all optional fields
-        let gpu = GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576)
-            .with_compute_capability("8.9");
+        let gpu =
+            GpuProfile::new(GpuVendor::Nvidia, "RTX 4090", 24576).with_compute_capability("8.9");
         let tpu = TpuProfile::new(TpuVendor::Google, "v4", 4, 32768);
         let connector_id = ConnectorId::new("fcp", "anthropic", "1.0.0").unwrap();
-        let connector = InstalledConnector::new(
-            connector_id,
-            "1.0.0",
-            ObjectId::from_bytes([0xAAu8; 32]),
-        );
+        let connector =
+            InstalledConnector::new(connector_id, "1.0.0", ObjectId::from_bytes([0xAAu8; 32]));
 
         let profile = DeviceProfile::builder(NodeId::new("node-full-golden"))
             .cpu_cores(64)
             .cpu_arch(CpuArch::Aarch64)
-            .memory_mb(524288)
+            .memory_mb(524_288)
             .gpu(gpu)
             .tpu(tpu)
             .local_storage_mb(10_000_000)
@@ -1149,9 +1132,9 @@ mod tests {
             .latency_class(LatencyClass::Local)
             .metered(false)
             .availability(AvailabilityProfile::Scheduled)
-            .next_expected_downtime(1705100000000)
+            .next_expected_downtime(1_705_100_000_000)
             .add_connector(connector)
-            .timestamp(1705000000000)
+            .timestamp(1_705_000_000_000)
             .build();
 
         // CBOR roundtrip
@@ -1165,11 +1148,12 @@ mod tests {
         assert!(decoded.gpu.is_some());
         assert!(decoded.tpu.is_some());
         assert_eq!(decoded.battery_percent, Some(75));
-        assert_eq!(decoded.next_expected_downtime, Some(1705100000000));
+        assert_eq!(decoded.next_expected_downtime, Some(1_705_100_000_000));
         assert_eq!(decoded.connectors.len(), 1);
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn golden_vector_fitness_calculation() {
         // Deterministic fitness calculation vectors
         struct FitnessVector {
@@ -1313,7 +1297,7 @@ mod tests {
 
     #[test]
     fn test_capability_reporting_memory() {
-        for mem_mb in [512u32, 1024, 4096, 16384, 65536, 262144] {
+        for mem_mb in [512u32, 1024, 4096, 16384, 65536, 262_144] {
             let profile = DeviceProfile::builder(test_node_id())
                 .memory_mb(mem_mb)
                 .build();
@@ -1501,27 +1485,36 @@ mod tests {
         let ctx = FitnessContext::new();
 
         // Create profiles with varying quality
-        let profiles = vec![
-            ("worst", DeviceProfile::builder(NodeId::new("worst"))
-                .latency_class(LatencyClass::Derp)
-                .power_source(PowerSource::Battery)
-                .battery_percent(10)
-                .availability(AvailabilityProfile::BestEffort)
-                .metered(true)
-                .timestamp(1000)
-                .build()),
-            ("medium", DeviceProfile::builder(NodeId::new("medium"))
-                .latency_class(LatencyClass::Lan)
-                .power_source(PowerSource::Mains)
-                .availability(AvailabilityProfile::AlwaysOn)
-                .timestamp(1000)
-                .build()),
-            ("best", DeviceProfile::builder(NodeId::new("best"))
-                .latency_class(LatencyClass::Local)
-                .power_source(PowerSource::Mains)
-                .availability(AvailabilityProfile::AlwaysOn)
-                .timestamp(1000)
-                .build()),
+        let profiles = [
+            (
+                "worst",
+                DeviceProfile::builder(NodeId::new("worst"))
+                    .latency_class(LatencyClass::Derp)
+                    .power_source(PowerSource::Battery)
+                    .battery_percent(10)
+                    .availability(AvailabilityProfile::BestEffort)
+                    .metered(true)
+                    .timestamp(1000)
+                    .build(),
+            ),
+            (
+                "medium",
+                DeviceProfile::builder(NodeId::new("medium"))
+                    .latency_class(LatencyClass::Lan)
+                    .power_source(PowerSource::Mains)
+                    .availability(AvailabilityProfile::AlwaysOn)
+                    .timestamp(1000)
+                    .build(),
+            ),
+            (
+                "best",
+                DeviceProfile::builder(NodeId::new("best"))
+                    .latency_class(LatencyClass::Local)
+                    .power_source(PowerSource::Mains)
+                    .availability(AvailabilityProfile::AlwaysOn)
+                    .timestamp(1000)
+                    .build(),
+            ),
         ];
 
         let mut scores: Vec<_> = profiles
@@ -1553,7 +1546,7 @@ mod tests {
                 .build()
         };
 
-        let profiles = vec![
+        let profiles = [
             ("charlie", make_profile("charlie")),
             ("alice", make_profile("alice")),
             ("bob", make_profile("bob")),
@@ -1561,7 +1554,13 @@ mod tests {
 
         let scores: Vec<_> = profiles
             .iter()
-            .map(|(name, p)| (*name, p.compute_fitness(&ctx), p.node_id.as_str().to_string()))
+            .map(|(name, p)| {
+                (
+                    *name,
+                    p.compute_fitness(&ctx),
+                    p.node_id.as_str().to_string(),
+                )
+            })
             .collect();
 
         // All scores should be equal
@@ -1572,10 +1571,7 @@ mod tests {
 
         // When scores are equal, sort by node_id for determinism
         let mut sorted = scores.clone();
-        sorted.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| a.2.cmp(&b.2))
-        });
+        sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
 
         // Node IDs should be in alphabetical order due to tie-breaking
         assert_eq!(sorted[0].0, "alice");
@@ -1628,8 +1624,11 @@ mod tests {
         let original = DeviceProfile::builder(NodeId::new("roundtrip-test"))
             .cpu_cores(32)
             .cpu_arch(CpuArch::Aarch64)
-            .memory_mb(131072)
-            .gpu(GpuProfile::new(GpuVendor::Apple, "M3 Ultra", 192 * 1024).with_compute_capability("Metal 3"))
+            .memory_mb(131_072)
+            .gpu(
+                GpuProfile::new(GpuVendor::Apple, "M3 Ultra", 192 * 1024)
+                    .with_compute_capability("Metal 3"),
+            )
             .tpu(TpuProfile::new(TpuVendor::Google, "v5e", 8, 65536))
             .local_storage_mb(2_000_000)
             .symbol_store_quota_mb(100_000)
@@ -1638,9 +1637,9 @@ mod tests {
             .latency_class(LatencyClass::Lan)
             .metered(true)
             .availability(AvailabilityProfile::Scheduled)
-            .next_expected_downtime(1800000000000)
+            .next_expected_downtime(1_800_000_000_000)
             .add_connector(connector)
-            .timestamp(1705000000000)
+            .timestamp(1_705_000_000_000)
             .build();
 
         let mut cbor_bytes = Vec::new();
@@ -1658,14 +1657,23 @@ mod tests {
         assert_eq!(original.gpu, decoded.gpu);
         assert_eq!(original.tpu, decoded.tpu);
         assert_eq!(original.local_storage_mb, decoded.local_storage_mb);
-        assert_eq!(original.symbol_store_quota_mb, decoded.symbol_store_quota_mb);
+        assert_eq!(
+            original.symbol_store_quota_mb,
+            decoded.symbol_store_quota_mb
+        );
         assert_eq!(original.power_source, decoded.power_source);
         assert_eq!(original.battery_percent, decoded.battery_percent);
-        assert_eq!(original.bandwidth_estimate_kbps, decoded.bandwidth_estimate_kbps);
+        assert_eq!(
+            original.bandwidth_estimate_kbps,
+            decoded.bandwidth_estimate_kbps
+        );
         assert_eq!(original.latency_class, decoded.latency_class);
         assert_eq!(original.metered, decoded.metered);
         assert_eq!(original.availability, decoded.availability);
-        assert_eq!(original.next_expected_downtime, decoded.next_expected_downtime);
+        assert_eq!(
+            original.next_expected_downtime,
+            decoded.next_expected_downtime
+        );
         assert_eq!(original.connectors, decoded.connectors);
     }
 
@@ -1679,7 +1687,7 @@ mod tests {
             .power_source(PowerSource::Mains)
             .latency_class(LatencyClass::Internet)
             .availability(AvailabilityProfile::BestEffort)
-            .timestamp(1705000000000)
+            .timestamp(1_705_000_000_000)
             .build();
 
         let json = serde_json::to_string_pretty(&original).unwrap();
@@ -1702,9 +1710,21 @@ mod tests {
         let json = serde_json::to_string(&profile).unwrap();
 
         // Check snake_case serialization
-        assert!(json.contains("\"aarch64\""), "CpuArch should serialize as snake_case");
-        assert!(json.contains("\"battery\""), "PowerSource should serialize as snake_case");
-        assert!(json.contains("\"derp\""), "LatencyClass should serialize as snake_case");
-        assert!(json.contains("\"scheduled\""), "AvailabilityProfile should serialize as snake_case");
+        assert!(
+            json.contains("\"aarch64\""),
+            "CpuArch should serialize as snake_case"
+        );
+        assert!(
+            json.contains("\"battery\""),
+            "PowerSource should serialize as snake_case"
+        );
+        assert!(
+            json.contains("\"derp\""),
+            "LatencyClass should serialize as snake_case"
+        );
+        assert!(
+            json.contains("\"scheduled\""),
+            "AvailabilityProfile should serialize as snake_case"
+        );
     }
 }

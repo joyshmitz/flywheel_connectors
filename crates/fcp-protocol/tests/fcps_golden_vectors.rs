@@ -1,4 +1,4 @@
-//! Golden vector tests for FCPS frames and SymbolEnvelope encryption.
+//! Golden vector tests for FCPS frames and `SymbolEnvelope` encryption.
 //!
 //! These tests provide deterministic vectors for interoperability testing
 //! and regression detection of the FCPS wire format.
@@ -36,7 +36,8 @@ fn golden_fcps_header_encode() {
         version: FCPS_VERSION,
         flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
         symbol_count: 2,
-        total_payload_len: 2 * (SYMBOL_RECORD_OVERHEAD + 64) as u32, // 172 bytes
+        total_payload_len: u32::try_from(2 * (SYMBOL_RECORD_OVERHEAD + 64))
+            .expect("payload length fits in u32"), // 172 bytes
         object_id: ObjectId::from_bytes([0x11; 32]),
         symbol_size: 64,
         zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
@@ -186,7 +187,7 @@ fn golden_frame_flags_encoding() {
 #[test]
 fn golden_symbol_record_encode() {
     let record = SymbolRecord {
-        esi: 0x12345678,
+        esi: 0x1234_5678,
         k: 100,
         data: vec![0xAB; 64],
         auth_tag: [0xCD; 16],
@@ -209,7 +210,7 @@ fn golden_symbol_record_encode() {
 fn golden_symbol_record_decode() {
     #[rustfmt::skip]
     let record_bytes: Vec<u8> = [
-        // ESI: 0x12345678 (u32 LE)
+        // ESI: 0x1234_5678 (u32 LE)
         0x78, 0x56, 0x34, 0x12,
         // K: 100 (u16 LE)
         0x64, 0x00,
@@ -221,7 +222,7 @@ fn golden_symbol_record_decode() {
 
     let record = SymbolRecord::decode(&record_bytes, 64).expect("should decode");
 
-    assert_eq!(record.esi, 0x12345678);
+    assert_eq!(record.esi, 0x1234_5678);
     assert_eq!(record.k, 100);
     assert_eq!(record.data, vec![0xAB; 64]);
     assert_eq!(record.auth_tag, [0xCD; 16]);
@@ -375,7 +376,8 @@ fn golden_full_frame_roundtrip() {
         version: FCPS_VERSION,
         flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
         symbol_count: 2,
-        total_payload_len: 2 * (SYMBOL_RECORD_OVERHEAD + 32) as u32, // 108 bytes
+        total_payload_len: u32::try_from(2 * (SYMBOL_RECORD_OVERHEAD + 32))
+            .expect("payload length fits in u32"), // 108 bytes
         object_id: ObjectId::from_bytes([0xAA; 32]),
         symbol_size: 32,
         zone_key_id: ZoneKeyId::from_bytes([0xBB; 8]),
@@ -505,6 +507,7 @@ fn golden_symbol_encryption_xchacha20() {
 // =============================================================================
 
 #[test]
+#[allow(clippy::similar_names)] // chacha20 vs xchacha20 names are intentionally similar
 fn algorithm_selection_produces_different_ciphertexts() {
     // The same plaintext encrypted with different algorithms should produce
     // different ciphertexts (due to different nonces and cipher internals)
@@ -522,7 +525,7 @@ fn algorithm_selection_produces_different_ciphertexts() {
 
     let plaintext = b"Same plaintext for both algorithms";
 
-    let (ct_chacha, tag_chacha) = encrypt_symbol(
+    let (standard_ciphertext, standard_tag) = encrypt_symbol(
         &zone_key,
         ZoneKeyAlgorithm::ChaCha20Poly1305,
         &ctx,
@@ -530,7 +533,7 @@ fn algorithm_selection_produces_different_ciphertexts() {
     )
     .expect("chacha encrypt");
 
-    let (ct_xchacha, tag_xchacha) = encrypt_symbol(
+    let (extended_ciphertext, extended_tag) = encrypt_symbol(
         &zone_key,
         ZoneKeyAlgorithm::XChaCha20Poly1305,
         &ctx,
@@ -539,30 +542,30 @@ fn algorithm_selection_produces_different_ciphertexts() {
     .expect("xchacha encrypt");
 
     // Ciphertexts should differ (different nonces/algorithms)
-    assert_ne!(ct_chacha, ct_xchacha);
-    assert_ne!(tag_chacha, tag_xchacha);
+    assert_ne!(standard_ciphertext, extended_ciphertext);
+    assert_ne!(standard_tag, extended_tag);
 
     // Both should decrypt correctly with their respective algorithms
-    let pt_chacha = decrypt_symbol(
+    let standard_plaintext = decrypt_symbol(
         &zone_key,
         ZoneKeyAlgorithm::ChaCha20Poly1305,
         &ctx,
-        &ct_chacha,
-        &tag_chacha,
+        &standard_ciphertext,
+        &standard_tag,
     )
     .expect("chacha decrypt");
 
-    let pt_xchacha = decrypt_symbol(
+    let extended_plaintext = decrypt_symbol(
         &zone_key,
         ZoneKeyAlgorithm::XChaCha20Poly1305,
         &ctx,
-        &ct_xchacha,
-        &tag_xchacha,
+        &extended_ciphertext,
+        &extended_tag,
     )
     .expect("xchacha decrypt");
 
-    assert_eq!(pt_chacha, plaintext);
-    assert_eq!(pt_xchacha, plaintext);
+    assert_eq!(standard_plaintext, plaintext);
+    assert_eq!(extended_plaintext, plaintext);
 }
 
 #[test]
@@ -624,7 +627,7 @@ fn generate_fcps_reference_vectors() {
         zone_key_id: ZoneKeyId::from_bytes([0x02; 8]),
         zone_id_hash: ZoneIdHash::from_bytes([0x03; 32]),
         epoch_id: 100,
-        sender_instance_id: 0x12345678,
+        sender_instance_id: 0x1234_5678,
         frame_seq: 1,
     };
     eprintln!("Header bytes:\n{}", hex::encode(header.encode()));
@@ -645,9 +648,9 @@ fn generate_fcps_reference_vectors() {
         hex::encode(nonce12.as_bytes())
     );
 
-    let nonce24 = derive_nonce24(0x1234567890ABCDEF, 100, 42);
+    let nonce24 = derive_nonce24(0x1234_5678_90AB_CDEF, 100, 42);
     eprintln!(
-        "\nNonce24 (sender=0x1234567890ABCDEF, frame_seq=100, esi=42):\n{}",
+        "\nNonce24 (sender=0x1234_5678_90AB_CDEF, frame_seq=100, esi=42):\n{}",
         hex::encode(nonce24.as_bytes())
     );
 

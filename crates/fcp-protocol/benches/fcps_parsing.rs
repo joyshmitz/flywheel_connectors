@@ -6,18 +6,19 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
 use fcp_protocol::{
-    FcpsDatagram, FcpsFrame, FcpsFrameHeader, FrameFlags, MeshSessionId, SymbolRecord,
-    FCPS_HEADER_LEN, SYMBOL_RECORD_OVERHEAD,
+    FCPS_HEADER_LEN, FcpsDatagram, FcpsFrame, FcpsFrameHeader, FrameFlags, MeshSessionId,
+    SYMBOL_RECORD_OVERHEAD, SymbolRecord,
 };
 
 /// Build a test header for benchmarking.
 fn test_header(symbol_count: u32, symbol_size: u16) -> FcpsFrameHeader {
     let payload_len = symbol_count as usize * (SYMBOL_RECORD_OVERHEAD + symbol_size as usize);
+    let payload_len_u32 = u32::try_from(payload_len).expect("payload length fits in u32");
     FcpsFrameHeader {
         version: 1,
         flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ,
         symbol_count,
-        total_payload_len: payload_len as u32,
+        total_payload_len: payload_len_u32,
         object_id: ObjectId::from_bytes([0x11; 32]),
         symbol_size,
         zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
