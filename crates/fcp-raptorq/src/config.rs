@@ -80,7 +80,7 @@ impl RaptorQConfig {
     #[must_use]
     pub fn total_symbols(&self, payload_len: usize) -> u32 {
         let k = self.source_symbols(payload_len);
-        k + self.repair_symbols(k)
+        k.saturating_add(self.repair_symbols(k))
     }
 
     /// Check if a payload requires chunking.

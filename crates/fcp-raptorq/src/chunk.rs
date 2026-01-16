@@ -72,17 +72,17 @@ impl ChunkedObjectManifest {
             });
         }
 
+        let actual_len: u64 = chunks.iter().map(|c| c.len() as u64).sum();
+        if actual_len != self.total_len {
+            return Err(ChunkError::LengthMismatch {
+                expected: self.total_len,
+                got: actual_len,
+            });
+        }
+
         let mut payload = Vec::with_capacity(self.total_len as usize);
         for chunk in chunks {
             payload.extend_from_slice(&chunk.bytes);
-        }
-
-        // Verify total length
-        if payload.len() as u64 != self.total_len {
-            return Err(ChunkError::LengthMismatch {
-                expected: self.total_len,
-                got: payload.len() as u64,
-            });
         }
 
         // Verify hash
@@ -109,16 +109,17 @@ impl ChunkedObjectManifest {
             });
         }
 
+        let actual_len: u64 = chunks.iter().map(|c| c.len() as u64).sum();
+        if actual_len != self.total_len {
+            return Err(ChunkError::LengthMismatch {
+                expected: self.total_len,
+                got: actual_len,
+            });
+        }
+
         let mut payload = Vec::with_capacity(self.total_len as usize);
         for chunk in chunks {
             payload.extend_from_slice(&chunk.bytes);
-        }
-
-        if payload.len() as u64 != self.total_len {
-            return Err(ChunkError::LengthMismatch {
-                expected: self.total_len,
-                got: payload.len() as u64,
-            });
         }
 
         Ok(payload)

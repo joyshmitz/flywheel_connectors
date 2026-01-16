@@ -30,6 +30,7 @@ mod chunk;
 mod config;
 mod decode;
 mod encode;
+mod envelope;
 mod error;
 mod golden;
 
@@ -37,4 +38,5 @@ pub use chunk::{ChunkedObjectManifest, RawChunk};
 pub use config::RaptorQConfig;
 pub use decode::{DecodeAdmissionController, DecodePermit, RaptorQDecoder};
 pub use encode::{EncodingDecision, RaptorQEncoder};
+pub use envelope::SymbolEnvelope;
 pub use error::{ChunkError, DecodeError, EncodeError};

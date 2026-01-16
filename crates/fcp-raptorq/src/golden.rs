@@ -31,7 +31,9 @@ mod tests {
 
     /// Create a deterministic payload of given size.
     fn deterministic_payload(size: usize) -> Vec<u8> {
-        (0..size).map(|i| (i % 256) as u8).collect()
+        (0..size)
+            .map(|i| u8::try_from(i % 256).expect("payload byte fits u8"))
+            .collect()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -245,7 +247,7 @@ mod tests {
 
         // Use only repair symbols (ESI >= K)
         let mut decoder = Decoder::new(oti);
-        for (esi, data) in symbols.into_iter() {
+        for (esi, data) in symbols {
             if esi < k {
                 continue; // Skip source symbols
             }
@@ -430,7 +432,10 @@ mod tests {
         // Add symbols one by one
         for (i, (esi, data)) in symbols.into_iter().enumerate() {
             let _ = decoder.add_symbol(esi, data);
-            assert_eq!(decoder.received_count(), (i + 1) as u32);
+            assert_eq!(
+                decoder.received_count(),
+                u32::try_from(i + 1).expect("received_count fits u32")
+            );
         }
     }
 
@@ -486,12 +491,12 @@ mod tests {
         assert!(manifest.verify_hash(&payload));
 
         // Modified payload fails verification
-        let mut modified = payload.clone();
+        let mut modified = payload;
         modified[0] = 255;
         assert!(!manifest.verify_hash(&modified));
 
         // Corrupted chunk fails reconstruction
-        let mut corrupted_chunks = chunks.clone();
+        let mut corrupted_chunks = chunks;
         corrupted_chunks[0].bytes[0] = 255;
         assert!(manifest.reconstruct(&corrupted_chunks).is_err());
     }

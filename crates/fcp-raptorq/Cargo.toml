@@ -21,6 +21,8 @@ thiserror.workspace = true
 # Internal crates
 fcp-core = { path = "../fcp-core" }
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-crypto = { path = "../fcp-crypto" }
+fcp-tailscale = { path = "../fcp-tailscale" }
 
 [dev-dependencies]
 rand.workspace = true

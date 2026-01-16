@@ -155,12 +155,16 @@ impl DecodeAdmissionController {
     /// Create a new admission controller with the given config.
     #[must_use]
     pub fn new(config: &RaptorQConfig) -> Self {
+        // Calculate max symbols needed for max object size, plus safety margin
+        let max_symbols = config.total_symbols(config.max_object_size as usize);
+        let max_symbols_buffered = max_symbols.saturating_add(1000);
+
         Self {
             max_concurrent: 16,
             active: Arc::new(AtomicUsize::new(0)),
             max_memory_per_decode: config.max_object_size as usize,
             timeout: config.decode_timeout,
-            max_symbols_buffered: 10000,
+            max_symbols_buffered,
         }
     }
 

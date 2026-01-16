@@ -339,7 +339,9 @@ mod tests {
         use raptorq::Decoder;
 
         let config = test_config();
-        let payload: Vec<u8> = (0..512_u32).map(|i| (i % 256) as u8).collect();
+        let payload: Vec<u8> = (0..512_u32)
+            .map(|i| u8::try_from(i % 256).expect("payload byte fits u8"))
+            .collect();
 
         let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
         let symbols = encoder.encode_all();
