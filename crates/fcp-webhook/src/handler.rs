@@ -176,6 +176,27 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         }
     }
 
+    /// Check for replay and record the event in one atomic operation.
+    /// Returns `Err(ReplayDetected)` if already seen.
+    pub fn claim_event(&self, event_id: &str) -> WebhookResult<()> {
+        if !self.config.idempotency_enabled {
+            return Ok(());
+        }
+
+        // Clean up old entries
+        self.cleanup_seen_events();
+
+        let mut seen = self.seen_events.write();
+        if seen.contains_key(event_id) {
+            return Err(WebhookError::ReplayDetected {
+                event_id: event_id.to_string(),
+            });
+        }
+
+        seen.insert(event_id.to_string(), Utc::now());
+        Ok(())
+    }
+
     /// Clean up old seen events.
     fn cleanup_seen_events(&self) {
         let now = Utc::now();
@@ -392,5 +413,45 @@ mod tests {
         let removed = dlq.remove("1");
         assert!(removed.is_some());
         assert!(dlq.is_empty());
+    }
+
+    #[test]
+    fn test_idempotency_race_condition() {
+        use std::sync::Arc;
+        use std::thread;
+        use crate::HmacSha256Verifier;
+
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = Arc::new(WebhookHandler::new(verifier, "test"));
+        let event_id = "race_event";
+
+        // Simulate two concurrent requests
+        let h1 = handler.clone();
+        let t1 = thread::spawn(move || {
+            if h1.claim_event(event_id).is_ok() {
+                // Simulate processing time
+                thread::sleep(std::time::Duration::from_millis(50));
+                true
+            } else {
+                false
+            }
+        });
+
+        let h2 = handler.clone();
+        let t2 = thread::spawn(move || {
+            if h2.claim_event(event_id).is_ok() {
+                // Simulate processing time
+                thread::sleep(std::time::Duration::from_millis(50));
+                true
+            } else {
+                false
+            }
+        });
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        // If both return true, idempotency failed
+        assert!(!(r1 && r2), "Race condition detected: both threads processed the same event");
     }
 }

@@ -116,24 +116,23 @@ impl ObjectStore for MemoryObjectStore {
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
         let size = Self::object_size(&object);
 
-        {
-            let used = *self.used_bytes.read();
-            if used + size > self.config.max_bytes {
-                return Err(ObjectStoreError::QuotaExceeded {
-                    used,
-                    max: self.config.max_bytes,
-                });
-            }
+        let mut objects = self.objects.write();
+        let mut used_bytes = self.used_bytes.write();
+
+        if *used_bytes + size > self.config.max_bytes {
+            return Err(ObjectStoreError::QuotaExceeded {
+                used: *used_bytes,
+                max: self.config.max_bytes,
+            });
         }
 
-        let mut objects = self.objects.write();
         if objects.contains_key(&object.object_id) {
             return Err(ObjectStoreError::AlreadyExists(object.object_id));
         }
 
         let id = object.object_id;
         objects.insert(id, object);
-        *self.used_bytes.write() += size;
+        *used_bytes += size;
 
         Ok(())
     }
