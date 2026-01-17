@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Provenance, ZoneId};
 
 /// Content-addressed identifier (NORMATIVE).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)] // Use transparent to delegate to the inner array via hex_or_bytes
 pub struct ObjectId(#[serde(with = "crate::util::hex_or_bytes")] [u8; 32]);
 

@@ -93,7 +93,7 @@ pub struct LwwMap<K, V> {
 impl<K, V> LwwMap<K, V>
 where
     K: Ord + Clone,
-    V: Clone,
+    V: Clone + PartialEq,
 {
     pub fn insert(&mut self, key: K, value: V, timestamp: u64, actor: CrdtActorId) {
         let entry = LwwEntry {
@@ -112,7 +112,7 @@ where
     pub fn merge(&mut self, other: &Self) {
         for (key, entry) in &other.entries {
             match self.entries.get(key) {
-                Some(existing) if existing.wins_over(entry) => {}
+                Some(existing) if existing.wins_over(entry) || existing == entry => {}
                 _ => {
                     self.entries.insert(key.clone(), entry.clone());
                 }
