@@ -1054,11 +1054,11 @@ mod tests {
 
         let pin1 = vec![1, 2, 3, 4];
         let pin2 = vec![5, 6, 7, 8];
-        let pins = vec![pin1.clone(), pin2.clone()];
+        let allowed_pins = vec![pin1.clone(), pin2.clone()];
 
-        assert!(verifier.verify_spki(&pin1, &pins).is_ok());
-        assert!(verifier.verify_spki(&pin2, &pins).is_ok());
-        assert!(verifier.verify_spki(&[9, 10], &pins).is_err());
+        assert!(verifier.verify_spki(&pin1, &allowed_pins).is_ok());
+        assert!(verifier.verify_spki(&pin2, &allowed_pins).is_ok());
+        assert!(verifier.verify_spki(&[9, 10], &allowed_pins).is_err());
 
         // Empty pins should pass
         assert!(verifier.verify_spki(&[1, 2], &[]).is_ok());

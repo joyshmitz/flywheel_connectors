@@ -19,6 +19,12 @@
 //! | permissive   | minimal | none       | no       | shared     |
 
 #![cfg(target_os = "linux")]
+// Allow patterns common in low-level syscall/FFI code
+#![allow(clippy::unused_self)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::ref_as_ptr)]
 
 use std::path::Path;
 
@@ -37,10 +43,12 @@ const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 
 /// Seccomp filter action: return errno.
+#[allow(dead_code)]
 const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 
 // Syscall numbers (x86_64)
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 mod syscall_nr {
     pub const READ: u32 = 0;
     pub const WRITE: u32 = 1;
@@ -212,6 +220,7 @@ pub struct LinuxSandbox {
     /// Whether Landlock is available.
     landlock_available: bool,
     /// Whether user namespaces are available.
+    #[allow(dead_code)]
     userns_available: bool,
 }
 
@@ -908,8 +917,8 @@ fn add_landlock_rule(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::CompiledPolicy;
-    use fcp_manifest::{SandboxProfile, SandboxSection};
+    use crate::sandbox::{CompiledPolicy, PlatformFlags};
+    use fcp_manifest::SandboxProfile;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -925,7 +934,7 @@ mod tests {
             deny_ptrace: true,
             block_direct_network: true,
             state_dir: Some(PathBuf::from("/tmp/test")),
-            platform_flags: Default::default(),
+            platform_flags: PlatformFlags::default(),
         }
     }
 

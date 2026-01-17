@@ -163,15 +163,13 @@ fn reject_invalid_zone_id_format() {
         let doc: Value = serde_json::from_str(&format!(
             r#"{{
                 "policy": {{ "format": "fzpf", "schema_version": "0.1", "default_deny": true }},
-                "zones": [{{ "id": "{}", "integrity_level": 60, "confidentiality_level": 70 }}]
+                "zones": [{{ "id": "{invalid_id}", "integrity_level": 60, "confidentiality_level": 70 }}]
             }}"#,
-            invalid_id
         ))
         .unwrap();
         assert!(
             validator.validate(&doc).is_err(),
-            "Zone ID '{}' should be rejected",
-            invalid_id
+            "Zone ID '{invalid_id}' should be rejected",
         );
     }
 }
@@ -186,15 +184,13 @@ fn reject_invalid_integrity_level() {
         let doc: Value = serde_json::from_str(&format!(
             r#"{{
                 "policy": {{ "format": "fzpf", "schema_version": "0.1", "default_deny": true }},
-                "zones": [{{ "id": "z:work", "integrity_level": {}, "confidentiality_level": 70 }}]
+                "zones": [{{ "id": "z:work", "integrity_level": {level}, "confidentiality_level": 70 }}]
             }}"#,
-            level
         ))
         .unwrap();
         assert!(
             validator.validate(&doc).is_err(),
-            "Integrity level {} should be rejected (must be 0-100)",
-            level
+            "Integrity level {level} should be rejected (must be 0-100)",
         );
     }
 }
@@ -209,15 +205,13 @@ fn reject_invalid_confidentiality_level() {
         let doc: Value = serde_json::from_str(&format!(
             r#"{{
                 "policy": {{ "format": "fzpf", "schema_version": "0.1", "default_deny": true }},
-                "zones": [{{ "id": "z:work", "integrity_level": 60, "confidentiality_level": {} }}]
+                "zones": [{{ "id": "z:work", "integrity_level": 60, "confidentiality_level": {level} }}]
             }}"#,
-            level
         ))
         .unwrap();
         assert!(
             validator.validate(&doc).is_err(),
-            "Confidentiality level {} should be rejected (must be 0-100)",
-            level
+            "Confidentiality level {level} should be rejected (must be 0-100)",
         );
     }
 }
@@ -477,16 +471,14 @@ fn reject_invalid_port_number() {
                     "id": "z:work",
                     "integrity_level": 60,
                     "confidentiality_level": 70,
-                    "symbol_port": {}
+                    "symbol_port": {port}
                 }}]
             }}"#,
-            port
         ))
         .unwrap();
         assert!(
             validator.validate(&doc).is_err(),
-            "Port {} should be rejected (must be 1-65535)",
-            port
+            "Port {port} should be rejected (must be 1-65535)",
         );
     }
 }
@@ -498,8 +490,7 @@ fn reject_too_many_input_constraints() {
     let constraints: Vec<String> = (0..65)
         .map(|i| {
             format!(
-                r#"{{ "pointer": "/field{}", "op": "eq", "value": {} }}"#,
-                i, i
+                r#"{{ "pointer": "/field{i}", "op": "eq", "value": {i} }}"#,
             )
         })
         .collect();
@@ -546,16 +537,14 @@ fn reject_invalid_glob_pattern_with_special_chars() {
                 "zones": [{{ "id": "z:work", "integrity_level": 60, "confidentiality_level": 70 }}],
                 "zone_policies": [{{
                     "zone_id": "z:work",
-                    "principal_allow": ["{}"]
+                    "principal_allow": ["{pattern}"]
                 }}]
             }}"#,
-            pattern
         ))
         .unwrap();
         assert!(
             validator.validate(&doc).is_err(),
-            "Glob pattern '{}' should be rejected (invalid characters)",
-            pattern
+            "Glob pattern '{pattern}' should be rejected (invalid characters)",
         );
     }
 }

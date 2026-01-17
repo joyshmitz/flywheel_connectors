@@ -6,9 +6,9 @@
 //! # Test Categories
 //!
 //! 1. **Golden Vectors**: CBOR test fixtures for cross-implementation verification
-//! 2. **Credential Validation**: CredentialObject field validation
-//! 3. **Capability Gating**: credential_allow enforcement in CapabilityConstraints
-//! 4. **Host Binding**: host_allow pattern matching and IP literal detection
+//! 2. **Credential Validation**: `CredentialObject` field validation
+//! 3. **Capability Gating**: `credential_allow` enforcement in `CapabilityConstraints`
+//! 4. **Host Binding**: `host_allow` pattern matching and IP literal detection
 //! 5. **Zeroize Discipline**: Secret material safety verification
 
 use std::fs;

@@ -61,7 +61,7 @@ impl CredentialId {
     /// Create a test `CredentialId` from bytes (for testing only).
     #[cfg(test)]
     #[must_use]
-    pub fn test_id(bytes: [u8; 16]) -> Self {
+    pub const fn test_id(bytes: [u8; 16]) -> Self {
         Self(Uuid::from_bytes(bytes))
     }
 }

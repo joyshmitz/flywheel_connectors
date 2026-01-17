@@ -678,8 +678,7 @@ mod ssrf_protection {
         if let Err(EgressError::Denied { code, .. }) = result {
             assert!(
                 code == DenyReason::IpLiteralDenied || code == DenyReason::HostNotAllowed,
-                "expected IpLiteralDenied or HostNotAllowed, got {:?}",
-                code
+                "expected IpLiteralDenied or HostNotAllowed, got {code:?}",
             );
         }
     }
@@ -921,7 +920,7 @@ mod credential_injection {
 
         // The debug output should not reveal the full secret
         // This is a reminder that production code should redact secrets
-        let debug_output = format!("{:?}", header);
+        let debug_output = format!("{header:?}");
 
         // In actual implementation, sensitive headers should be redacted
         // This test documents the requirement

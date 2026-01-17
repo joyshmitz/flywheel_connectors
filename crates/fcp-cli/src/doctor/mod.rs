@@ -12,6 +12,8 @@
 //! fcp doctor --zone z:private --json
 //! ```
 
+#![allow(clippy::cast_sign_loss)]
+
 pub mod types;
 
 use anyhow::Result;

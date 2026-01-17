@@ -12,7 +12,7 @@
 //!
 //! - **Linux (Tier 1)**: seccomp-bpf + namespaces, optionally Landlock
 //! - **macOS (Tier 1)**: seatbelt profiles (sandbox-exec)
-//! - **Windows (Tier 2)**: AppContainer + job objects
+//! - **Windows (Tier 2)**: `AppContainer` + job objects
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -125,7 +125,7 @@ pub struct PlatformFlags {
     #[serde(default)]
     pub macos_entitlements: Vec<String>,
 
-    /// Windows: Use low-integrity AppContainer.
+    /// Windows: Use low-integrity `AppContainer`.
     #[serde(default)]
     pub windows_low_integrity: bool,
 }
@@ -367,7 +367,7 @@ mod tests {
     fn test_compile_policy() {
         let section = test_sandbox_section();
         let state_dir = Some(PathBuf::from("/var/lib/fcp/connectors/test"));
-        let policy = CompiledPolicy::from_manifest(&section, state_dir.clone()).unwrap();
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
 
         assert_eq!(policy.profile, SandboxProfile::Strict);
         assert_eq!(policy.memory_limit_bytes, 256 * 1024 * 1024);

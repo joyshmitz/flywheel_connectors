@@ -862,7 +862,7 @@ mod tests {
     fn test_approval_token_object_id_is_content_addressed() {
         // Demonstrates that ObjectId is derived from full content, ensuring malleability protection.
         
-        let token = ApprovalToken {
+        let mut token = ApprovalToken {
             token_id: "test-token-123".to_string(),
             issued_at_ms: 1000,
             expires_at_ms: 2000,
@@ -879,11 +879,10 @@ mod tests {
         let id1 = approval_token_object_id(&token);
 
         // Mutate content but keep token_id
-        let mut token2 = token.clone();
-        if let ApprovalScope::Elevation(ref mut scope) = token2.scope {
+        if let ApprovalScope::Elevation(ref mut scope) = token.scope {
             scope.target_integrity = IntegrityLevel::Untrusted;
         }
-        let id2 = approval_token_object_id(&token2);
+        let id2 = approval_token_object_id(&token);
 
         // IDs MUST be different despite having same token_id
         assert_ne!(id1, id2);

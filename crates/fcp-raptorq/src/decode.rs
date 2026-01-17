@@ -642,14 +642,14 @@ mod tests {
             let b = barrier.clone();
             handles.push(thread::spawn(move || {
                 b.wait();
-                let _permit = c.try_acquire();
+                let permit = c.try_acquire();
                 // Hold permit for a bit
-                if _permit.is_some() {
+                if permit.is_some() {
                     thread::sleep(Duration::from_millis(10));
                 }
                 // Verify we never see active_count > max_concurrent
                 let current = c.active_count();
-                assert!(current <= max_concurrent, "active count {} exceeded max {}", current, max_concurrent);
+                assert!(current <= max_concurrent, "active count {current} exceeded max {max_concurrent}");
             }));
         }
 

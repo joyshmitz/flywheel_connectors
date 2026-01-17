@@ -8,7 +8,7 @@
 //! 2. **OS Sandboxes**: Platform-specific process isolation using:
 //!    - Linux: seccomp-bpf + namespaces (+ Landlock on 5.13+)
 //!    - macOS: seatbelt profiles (sandbox-exec)
-//!    - Windows: AppContainer + job objects
+//!    - Windows: `AppContainer` + job objects
 //!
 //! # Core Invariants (NORMATIVE)
 //!
@@ -57,6 +57,10 @@
 //! ```
 
 // Note: unsafe code allowed via Cargo.toml lints for OS sandbox syscalls
+// Allow FFI-related patterns common in OS sandbox implementations
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::borrow_as_ptr)]
 
 mod egress;
 mod sandbox;

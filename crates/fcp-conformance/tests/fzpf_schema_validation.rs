@@ -45,9 +45,9 @@ fn create_validator() -> Validator {
 /// Helper to validate a JSON file against the FZPF schema
 fn validate_file(validator: &Validator, path: &PathBuf) -> Result<(), Vec<String>> {
     let content = fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read file {:?}: {}", path, e));
+        .unwrap_or_else(|e| panic!("Failed to read file {}: {e}", path.display()));
     let instance: Value = serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse JSON in {:?}: {}", path, e));
+        .unwrap_or_else(|e| panic!("Failed to parse JSON in {}: {e}", path.display()));
 
     let result = validator.validate(&instance);
     if result.is_ok() {
@@ -265,8 +265,7 @@ fn test_schema_has_required_defs() {
     for def_name in required_defs {
         assert!(
             defs.get(def_name).is_some(),
-            "Schema should define '{}' in $defs",
-            def_name
+            "Schema should define '{def_name}' in $defs",
         );
     }
 }
@@ -363,8 +362,7 @@ fn test_error_messages_are_stable() {
     for (i, error_set) in errors.iter().enumerate().skip(1) {
         assert_eq!(
             &errors[0], error_set,
-            "Error messages should be deterministic (run 0 vs run {})",
-            i
+            "Error messages should be deterministic (run 0 vs run {i})",
         );
     }
 }

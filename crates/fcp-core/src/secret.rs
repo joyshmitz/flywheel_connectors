@@ -55,7 +55,7 @@ impl SecretId {
     /// Create a test `SecretId` from bytes (for testing only).
     #[cfg(test)]
     #[must_use]
-    pub fn test_id(bytes: [u8; 16]) -> Self {
+    pub const fn test_id(bytes: [u8; 16]) -> Self {
         Self(Uuid::from_bytes(bytes))
     }
 }

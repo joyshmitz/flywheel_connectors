@@ -3,6 +3,12 @@
 //! These types define the stable JSON schema for health/freshness reports,
 //! enabling automation and operator tooling integration.
 
+// Allow public API items that aren't used yet within this crate
+#![allow(dead_code)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_const_for_fn)]
+#![allow(clippy::trivially_copy_pass_by_ref)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
