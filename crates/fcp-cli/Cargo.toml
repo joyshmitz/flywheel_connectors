@@ -39,3 +39,9 @@ fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-registry = { path = "../fcp-registry" }
 fcp-store = { path = "../fcp-store" }
 ed25519-dalek.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2.0"
+insta = { version = "1.40", features = ["json", "redactions"] }
+predicates = "3.1"
+tempfile = "3.14"

@@ -10,9 +10,9 @@
 
 mod audit;
 mod bench;
+mod doctor;
 mod explain;
 mod install;
-mod doctor;
 
 use clap::{Parser, Subcommand};
 

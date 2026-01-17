@@ -125,20 +125,29 @@ fn print_human_readable(report: &DoctorReport) {
     println!();
     println!("Zone:           {}", report.zone_id);
     println!("Generated:      {}", report.generated_at.to_rfc3339());
-    println!("Overall Status: {color}{symbol} {:?}{reset}", report.overall_status);
+    println!(
+        "Overall Status: {color}{symbol} {:?}{reset}",
+        report.overall_status
+    );
     println!();
 
     println!("Freshness:");
-    println!("  Checkpoint:   {:?} (seq={:?}, age={:?}s)", 
-        report.checkpoint.freshness, 
+    println!(
+        "  Checkpoint:   {:?} (seq={:?}, age={:?}s)",
+        report.checkpoint.freshness,
         report.checkpoint.checkpoint_seq.unwrap_or(0),
-        report.checkpoint.age_secs.unwrap_or(0));
-    println!("  Revocation:   {:?} (seq={:?})", 
+        report.checkpoint.age_secs.unwrap_or(0)
+    );
+    println!(
+        "  Revocation:   {:?} (seq={:?})",
         report.revocation.freshness,
-        report.revocation.head_seq.unwrap_or(0));
-    println!("  Audit:        {:?} (seq={:?})", 
+        report.revocation.head_seq.unwrap_or(0)
+    );
+    println!(
+        "  Audit:        {:?} (seq={:?})",
         report.audit.freshness,
-        report.audit.head_seq.unwrap_or(0));
+        report.audit.head_seq.unwrap_or(0)
+    );
     println!();
 
     if !report.checks.is_empty() {
@@ -154,7 +163,10 @@ fn print_human_readable(report: &DoctorReport) {
                 types::CheckStatus::Warn => "⚠",
                 types::CheckStatus::Fail => "✗",
             };
-            println!("  {status_color}{status_symbol} {}: {}{reset}", check.name, check.message);
+            println!(
+                "  {status_color}{status_symbol} {}: {}{reset}",
+                check.name, check.message
+            );
         }
     }
     println!();
