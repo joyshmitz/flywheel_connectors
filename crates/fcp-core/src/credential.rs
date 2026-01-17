@@ -229,15 +229,13 @@ impl CredentialObject {
 
     /// Check if the given host string is an IP literal (IPv4 or IPv6).
     ///
-    /// Handles port suffixes (e.g., "192.168.1.1:8080", "[::1]:8080").
+    /// Handles port suffixes (e.g., "192.168.1.1:8080", "[`::1`]:8080").
     #[must_use]
     pub fn is_ip_literal(host: &str) -> bool {
         // Strip port if present
         let host_part = if host.starts_with('[') {
             // IPv6 with brackets: [::1]:8080 or [::1]
-            host.find(']')
-                .map(|i| &host[1..i])
-                .unwrap_or(host)
+            host.find(']').map_or(host, |i| &host[1..i])
         } else if let Some(colon_pos) = host.rfind(':') {
             // Could be IPv4:port or IPv6 without brackets
             let before_colon = &host[..colon_pos];
@@ -255,7 +253,7 @@ impl CredentialObject {
         host_part.parse::<std::net::IpAddr>().is_ok()
     }
 
-    /// Check if the host_allow list contains any IP literals.
+    /// Check if the `host_allow` list contains any IP literals.
     ///
     /// This is useful for policies that require canonical hostnames only.
     #[must_use]

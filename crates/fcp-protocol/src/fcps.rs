@@ -417,6 +417,9 @@ pub fn validate_frame_lengths(bytes: &[u8], header: &FcpsFrameHeader) -> Result<
 /// Maximum number of missing ESI hints allowed (bounded for `DoS` resistance).
 pub const MAX_MISSING_HINT_ENTRIES: usize = 100;
 
+/// Default limit for unauthenticated symbol requests (NORMATIVE).
+pub const DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED: u32 = 32;
+
 /// Decode status feedback for flow control (NORMATIVE).
 ///
 /// Enables receivers to tell senders how many symbols have been received and
@@ -509,6 +512,149 @@ impl DecodeStatus {
             }
         }
         Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SymbolAck - Stop Condition (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reason for stopping symbol transmission (NORMATIVE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolAckReason {
+    /// Object reconstructed successfully.
+    Complete,
+    /// Transfer canceled by receiver (e.g., no longer needed).
+    Canceled,
+    /// Receiver exhausted resources (backpressure).
+    ResourceExhausted,
+    /// Decode failed permanently (e.g. hash mismatch).
+    DecodeFailed,
+}
+
+/// Symbol acknowledgment/stop message (NORMATIVE).
+///
+/// Receiver sends this to tell sender to STOP sending symbols.
+/// This is critical for bandwidth efficiency in fountain codes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolAck {
+    /// Object header for context.
+    pub header: ObjectHeader,
+    /// Content-addressed object ID.
+    pub object_id: ObjectId,
+    /// Zone for the object.
+    pub zone_id: ZoneId,
+    /// Zone key ID (for key rotation).
+    pub zone_key_id: ZoneKeyId,
+    /// Epoch ID for replay protection.
+    pub epoch_id: u64,
+    /// Reason for acknowledgment.
+    pub reason: SymbolAckReason,
+    /// Final unique symbol count received (for stats).
+    pub final_symbol_count: u32,
+    /// Optional: reconstructed payload object ID (if verified).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconstructed_object_id: Option<ObjectId>,
+    /// Ed25519 signature by the receiving node.
+    pub signature: Ed25519Signature,
+}
+
+impl SymbolAck {
+    /// Create a new `SymbolAck`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        header: ObjectHeader,
+        object_id: ObjectId,
+        zone_id: ZoneId,
+        zone_key_id: ZoneKeyId,
+        epoch_id: u64,
+        reason: SymbolAckReason,
+        final_symbol_count: u32,
+    ) -> Self {
+        Self {
+            header,
+            object_id,
+            zone_id,
+            zone_key_id,
+            epoch_id,
+            reason,
+            final_symbol_count,
+            reconstructed_object_id: None,
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]), // Placeholder until signed
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SymbolRequest - Pull Mechanism (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request for symbols (pull-based flow control).
+///
+/// Used when a receiver wants to actively pull symbols (e.g. gap filling
+/// or initial fetch) rather than waiting for push.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolRequest {
+    /// Object header for context.
+    pub header: ObjectHeader,
+    /// Content-addressed object ID.
+    pub object_id: ObjectId,
+    /// Zone for the object.
+    pub zone_id: ZoneId,
+    /// Zone key ID (for key rotation).
+    pub zone_key_id: ZoneKeyId,
+    /// Epoch ID for replay protection.
+    pub epoch_id: u64,
+    /// Maximum symbols to send in response.
+    pub max_symbols: u32,
+    /// Priority level (higher = more urgent).
+    pub priority: u8,
+    /// Optional hint about missing ESIs for targeted repair.
+    /// MUST be bounded (max `MAX_MISSING_HINT_ENTRIES` entries).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing_hint: Option<Vec<u32>>,
+    /// Ed25519 signature by the requesting node.
+    pub signature: Ed25519Signature,
+}
+
+impl SymbolRequest {
+    /// Create a new `SymbolRequest`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        header: ObjectHeader,
+        object_id: ObjectId,
+        zone_id: ZoneId,
+        zone_key_id: ZoneKeyId,
+        epoch_id: u64,
+        max_symbols: u32,
+        priority: u8,
+    ) -> Self {
+        Self {
+            header,
+            object_id,
+            zone_id,
+            zone_key_id,
+            epoch_id,
+            max_symbols,
+            priority,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]), // Placeholder until signed
+        }
+    }
+
+    /// Add missing hint.
+    #[must_use]
+    pub fn with_missing_hint(mut self, hint: Vec<u32>) -> Self {
+        self.missing_hint = Some(hint);
+        self
+    }
+
+    /// Check if request has proof-of-need (non-empty missing hint).
+    #[must_use]
+    pub fn has_proof_of_need(&self) -> bool {
+        self.missing_hint.as_ref().is_some_and(|h| !h.is_empty())
     }
 }
 

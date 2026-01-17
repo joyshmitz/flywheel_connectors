@@ -83,9 +83,14 @@ impl ConnectorTarget {
     /// Build the target from the current process environment.
     #[must_use]
     pub fn from_env() -> Self {
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
         Self {
             os: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
+            arch: arch.to_string(),
         }
     }
 
@@ -995,6 +1000,18 @@ mod tests {
     use uuid::Uuid;
 
     const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+
+    #[test]
+    fn test_connector_target_normalization() {
+        let target = ConnectorTarget::from_env();
+        // Since we can't easily mock std::env::consts::ARCH, we just verify it's NOT x86_64/aarch64
+        // if the platform matches those.
+        match std::env::consts::ARCH {
+            "x86_64" => assert_eq!(target.arch, "amd64"),
+            "aarch64" => assert_eq!(target.arch, "arm64"),
+            _ => {}, // Other archs passed through
+        }
+    }
 
     #[derive(Default)]
     struct RegistryLogData {
@@ -2357,7 +2374,13 @@ min_protocol = "fcp2-sym/2.0"
             || async {
                 let target = ConnectorTarget::from_env();
                 assert_eq!(target.os, std::env::consts::OS);
-                assert_eq!(target.arch, std::env::consts::ARCH);
+                // ConnectorTarget normalizes arch names for OCI/Docker compatibility
+                let expected_arch = match std::env::consts::ARCH {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    other => other,
+                };
+                assert_eq!(target.arch, expected_arch);
 
                 RegistryLogData {
                     target: Some(target.as_string()),

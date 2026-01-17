@@ -15,7 +15,7 @@
 //!
 //! # Normative Requirements
 //!
-//! - **Patterns**: Only anchored glob patterns (*, ?) are allowed. Regex and JSONPath are forbidden.
+//! - **Patterns**: Only anchored glob patterns (*, ?) are allowed. Regex and `JSONPath` are forbidden.
 //! - **JSON Pointers**: RFC 6901 only for input constraints.
 //! - **Zone IDs**: Must match `^z:[a-z][a-z0-9_-]*$`
 //! - **Integrity/Confidentiality**: 0-100 range, child zones must not exceed parent levels
