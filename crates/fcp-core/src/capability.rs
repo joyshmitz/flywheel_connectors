@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::object::ObjectId;
-use crate::{CredentialId, FcpError, FcpResult};
+use crate::{CredentialId, CredentialValidationError, FcpError, FcpResult};
 use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
 
 /// Canonical identifier validation error (NORMATIVE).
@@ -845,6 +845,36 @@ pub struct CapabilityConstraints {
     pub credential_allow: Vec<CredentialId>,
 }
 
+impl CapabilityConstraints {
+    /// Check if a credential ID is allowed by this capability's constraints.
+    ///
+    /// Returns `true` if the credential is in `credential_allow` or if
+    /// `credential_allow` is empty (no credential restrictions).
+    #[must_use]
+    pub fn is_credential_allowed(&self, credential_id: &CredentialId) -> bool {
+        self.credential_allow.is_empty() || self.credential_allow.contains(credential_id)
+    }
+
+    /// Validate that a credential ID is allowed by these constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CredentialValidationError::NotInCredentialAllow` if the credential
+    /// is not in `credential_allow` and `credential_allow` is non-empty.
+    pub fn validate_credential(
+        &self,
+        credential_id: &CredentialId,
+    ) -> Result<(), CredentialValidationError> {
+        if self.is_credential_allowed(credential_id) {
+            Ok(())
+        } else {
+            Err(CredentialValidationError::NotInCredentialAllow {
+                credential_id: *credential_id,
+            })
+        }
+    }
+}
+
 /// Rate limit configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimit {
@@ -1478,5 +1508,129 @@ mod tests {
 
         let result = verifier.verify(&token, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CapabilityConstraints Credential Allow Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_allow_empty_allows_all() {
+        let constraints = CapabilityConstraints::default();
+        let cred_id = CredentialId::new();
+
+        assert!(constraints.is_credential_allowed(&cred_id));
+        assert!(constraints.validate_credential(&cred_id).is_ok());
+    }
+
+    #[test]
+    fn credential_allow_permits_listed_credential() {
+        let cred_id1 = CredentialId::new();
+        let cred_id2 = CredentialId::new();
+
+        let constraints = CapabilityConstraints {
+            credential_allow: vec![cred_id1, cred_id2],
+            ..Default::default()
+        };
+
+        assert!(constraints.is_credential_allowed(&cred_id1));
+        assert!(constraints.is_credential_allowed(&cred_id2));
+        assert!(constraints.validate_credential(&cred_id1).is_ok());
+        assert!(constraints.validate_credential(&cred_id2).is_ok());
+    }
+
+    #[test]
+    fn credential_allow_denies_unlisted_credential() {
+        let allowed_cred = CredentialId::new();
+        let denied_cred = CredentialId::new();
+
+        let constraints = CapabilityConstraints {
+            credential_allow: vec![allowed_cred],
+            ..Default::default()
+        };
+
+        assert!(!constraints.is_credential_allowed(&denied_cred));
+
+        let result = constraints.validate_credential(&denied_cred);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        match err {
+            CredentialValidationError::NotInCredentialAllow { credential_id } => {
+                assert_eq!(credential_id, denied_cred);
+            }
+            _ => panic!("Expected NotInCredentialAllow error"),
+        }
+    }
+
+    #[test]
+    fn credential_allow_with_multiple_credentials() {
+        let cred1 = CredentialId::new();
+        let cred2 = CredentialId::new();
+        let cred3 = CredentialId::new();
+        let denied_cred = CredentialId::new();
+
+        let constraints = CapabilityConstraints {
+            credential_allow: vec![cred1, cred2, cred3],
+            ..Default::default()
+        };
+
+        // All listed should be allowed
+        assert!(constraints.is_credential_allowed(&cred1));
+        assert!(constraints.is_credential_allowed(&cred2));
+        assert!(constraints.is_credential_allowed(&cred3));
+
+        // Unlisted should be denied
+        assert!(!constraints.is_credential_allowed(&denied_cred));
+    }
+
+    #[test]
+    fn credential_allow_error_contains_credential_id() {
+        let denied_cred = CredentialId::new();
+        let allowed_cred = CredentialId::new();
+
+        let constraints = CapabilityConstraints {
+            credential_allow: vec![allowed_cred],
+            ..Default::default()
+        };
+
+        let result = constraints.validate_credential(&denied_cred);
+        assert!(result.is_err());
+
+        // Verify the error message contains the credential ID
+        let err = result.unwrap_err();
+        let err_string = err.to_string();
+        assert!(err_string.contains(&denied_cred.to_string()));
+        assert!(err_string.contains("credential_allow"));
+    }
+
+    #[test]
+    fn credential_constraints_serialization_includes_credential_allow() {
+        let cred_id = CredentialId::new();
+        let constraints = CapabilityConstraints {
+            credential_allow: vec![cred_id],
+            resource_allow: vec!["/api/v1/".into()],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&constraints).unwrap();
+        assert!(json.contains("credential_allow"));
+        assert!(json.contains(&cred_id.to_string()));
+
+        let decoded: CapabilityConstraints = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.credential_allow.len(), 1);
+        assert_eq!(decoded.credential_allow[0], cred_id);
+    }
+
+    #[test]
+    fn credential_constraints_empty_credential_allow_omitted_in_json() {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["/api/".into()],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&constraints).unwrap();
+        // Empty vecs should be omitted per #[serde(skip_serializing_if = "Vec::is_empty")]
+        assert!(!json.contains("credential_allow"));
     }
 }

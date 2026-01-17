@@ -226,6 +226,79 @@ impl CredentialObject {
     pub fn is_usable(&self, now_unix: u64, host: &str) -> bool {
         !self.is_expired(now_unix) && self.is_host_allowed(host)
     }
+
+    /// Check if the given host string is an IP literal (IPv4 or IPv6).
+    ///
+    /// Handles port suffixes (e.g., "192.168.1.1:8080", "[::1]:8080").
+    #[must_use]
+    pub fn is_ip_literal(host: &str) -> bool {
+        // Strip port if present
+        let host_part = if host.starts_with('[') {
+            // IPv6 with brackets: [::1]:8080 or [::1]
+            host.find(']')
+                .map(|i| &host[1..i])
+                .unwrap_or(host)
+        } else if let Some(colon_pos) = host.rfind(':') {
+            // Could be IPv4:port or IPv6 without brackets
+            let before_colon = &host[..colon_pos];
+            // If there's another colon before this one, it's IPv6
+            if before_colon.contains(':') {
+                host // Return full string, it's IPv6
+            } else {
+                before_colon // IPv4 with port
+            }
+        } else {
+            host
+        };
+
+        // Try parsing as IP address
+        host_part.parse::<std::net::IpAddr>().is_ok()
+    }
+
+    /// Check if the host_allow list contains any IP literals.
+    ///
+    /// This is useful for policies that require canonical hostnames only.
+    #[must_use]
+    pub fn has_ip_literal_in_host_allow(&self) -> bool {
+        self.host_allow.iter().any(|h| {
+            // Skip wildcard prefix for IP check
+            let host = h.strip_prefix("*.").unwrap_or(h);
+            Self::is_ip_literal(host)
+        })
+    }
+
+    /// Validate that the credential configuration is policy-compliant.
+    ///
+    /// When `reject_ip_literals` is true, returns an error if any entry in
+    /// `host_allow` is an IP literal rather than a hostname.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CredentialValidationError::HostNotAllowed` if an IP literal
+    /// is found when they are not allowed.
+    pub fn validate_host_policy(
+        &self,
+        reject_ip_literals: bool,
+    ) -> Result<(), CredentialValidationError> {
+        if reject_ip_literals && self.has_ip_literal_in_host_allow() {
+            // Find the first offending IP literal for the error message
+            let ip_literal = self
+                .host_allow
+                .iter()
+                .find(|h| {
+                    let host = h.strip_prefix("*.").unwrap_or(h);
+                    Self::is_ip_literal(host)
+                })
+                .cloned()
+                .unwrap_or_default();
+
+            return Err(CredentialValidationError::HostNotAllowed {
+                credential_id: self.credential_id,
+                host: ip_literal,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Error when credential validation fails.
@@ -548,5 +621,193 @@ mod tests {
 
         let err = CredentialValidationError::SecretRevoked { secret_id };
         assert!(err.to_string().contains("revoked"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // IP Literal Detection Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_ip_literal_ipv4() {
+        assert!(CredentialObject::is_ip_literal("192.168.1.1"));
+        assert!(CredentialObject::is_ip_literal("10.0.0.1"));
+        assert!(CredentialObject::is_ip_literal("127.0.0.1"));
+        assert!(CredentialObject::is_ip_literal("0.0.0.0"));
+        assert!(CredentialObject::is_ip_literal("255.255.255.255"));
+    }
+
+    #[test]
+    fn is_ip_literal_ipv4_with_port() {
+        assert!(CredentialObject::is_ip_literal("192.168.1.1:8080"));
+        assert!(CredentialObject::is_ip_literal("10.0.0.1:443"));
+        assert!(CredentialObject::is_ip_literal("127.0.0.1:80"));
+    }
+
+    #[test]
+    fn is_ip_literal_ipv6() {
+        assert!(CredentialObject::is_ip_literal("::1"));
+        assert!(CredentialObject::is_ip_literal("::"));
+        assert!(CredentialObject::is_ip_literal("fe80::1"));
+        assert!(CredentialObject::is_ip_literal("2001:db8::1"));
+        assert!(CredentialObject::is_ip_literal("::ffff:192.168.1.1"));
+    }
+
+    #[test]
+    fn is_ip_literal_ipv6_with_brackets() {
+        assert!(CredentialObject::is_ip_literal("[::1]"));
+        assert!(CredentialObject::is_ip_literal("[::1]:8080"));
+        assert!(CredentialObject::is_ip_literal("[2001:db8::1]:443"));
+        // IPv6 zone IDs like [fe80::1%eth0] don't parse as valid IPs
+        assert!(!CredentialObject::is_ip_literal("[fe80::1%eth0]"));
+    }
+
+    #[test]
+    fn is_ip_literal_not_ip() {
+        assert!(!CredentialObject::is_ip_literal("api.example.com"));
+        assert!(!CredentialObject::is_ip_literal("localhost"));
+        assert!(!CredentialObject::is_ip_literal("api.example.com:443"));
+        assert!(!CredentialObject::is_ip_literal("*.example.com"));
+        assert!(!CredentialObject::is_ip_literal("sub.domain.example.com"));
+    }
+
+    #[test]
+    fn is_ip_literal_edge_cases() {
+        // Invalid but not hostnames
+        assert!(!CredentialObject::is_ip_literal("999.999.999.999")); // Invalid IPv4 - doesn't parse
+        assert!(!CredentialObject::is_ip_literal(""));
+        assert!(!CredentialObject::is_ip_literal(":"));
+        assert!(!CredentialObject::is_ip_literal("[]"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Host Policy Validation Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn has_ip_literal_in_host_allow_detects_ipv4() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["192.168.1.1".into()];
+        assert!(cred.has_ip_literal_in_host_allow());
+
+        cred.host_allow = vec!["api.example.com".into(), "10.0.0.1:8080".into()];
+        assert!(cred.has_ip_literal_in_host_allow());
+    }
+
+    #[test]
+    fn has_ip_literal_in_host_allow_detects_ipv6() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["[::1]:8080".into()];
+        assert!(cred.has_ip_literal_in_host_allow());
+
+        cred.host_allow = vec!["::1".into()];
+        assert!(cred.has_ip_literal_in_host_allow());
+    }
+
+    #[test]
+    fn has_ip_literal_in_host_allow_no_ip() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["api.example.com".into(), "*.other.net".into()];
+        assert!(!cred.has_ip_literal_in_host_allow());
+    }
+
+    #[test]
+    fn has_ip_literal_in_host_allow_empty() {
+        let cred = test_credential();
+        assert!(!cred.has_ip_literal_in_host_allow());
+    }
+
+    #[test]
+    fn validate_host_policy_allows_hostnames() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["api.example.com".into(), "*.other.net".into()];
+
+        assert!(cred.validate_host_policy(true).is_ok());
+        assert!(cred.validate_host_policy(false).is_ok());
+    }
+
+    #[test]
+    fn validate_host_policy_rejects_ip_when_required() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["192.168.1.1".into()];
+
+        // Should reject when reject_ip_literals is true
+        let result = cred.validate_host_policy(true);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            CredentialValidationError::HostNotAllowed { host, .. } => {
+                assert_eq!(host, "192.168.1.1");
+            }
+            _ => panic!("Expected HostNotAllowed error"),
+        }
+
+        // Should allow when reject_ip_literals is false
+        assert!(cred.validate_host_policy(false).is_ok());
+    }
+
+    #[test]
+    fn validate_host_policy_rejects_ipv6_when_required() {
+        let mut cred = test_credential();
+        cred.host_allow = vec!["api.example.com".into(), "[::1]:8080".into()];
+
+        let result = cred.validate_host_policy(true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_host_policy_empty_list_passes() {
+        let cred = test_credential();
+        assert!(cred.validate_host_policy(true).is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialId Canonicity Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_id_is_canonical_uuid() {
+        let id = CredentialId::new();
+        let s = id.to_string();
+
+        // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+        assert_eq!(s.len(), 36);
+        assert_eq!(s.chars().filter(|c| *c == '-').count(), 4);
+
+        // Verify it's lowercase (canonical)
+        assert_eq!(s, s.to_lowercase());
+    }
+
+    #[test]
+    fn credential_id_stable_display() {
+        let bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                     0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
+        let id = CredentialId::test_id(bytes);
+
+        // Display should be deterministic
+        let s1 = id.to_string();
+        let s2 = id.to_string();
+        assert_eq!(s1, s2);
+
+        // Display should be the canonical lowercase UUID
+        assert_eq!(s1, "11223344-5566-7788-99aa-bbccddeeff00");
+    }
+
+    #[test]
+    fn credential_id_parse_rejects_invalid() {
+        assert!(CredentialId::parse("not-a-uuid").is_err());
+        assert!(CredentialId::parse("").is_err());
+        assert!(CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff0").is_err()); // too short
+        assert!(CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff000").is_err()); // too long
+    }
+
+    #[test]
+    fn credential_id_parse_accepts_uppercase() {
+        // UUID parsing should be case-insensitive
+        let upper = CredentialId::parse("11223344-5566-7788-99AA-BBCCDDEEFF00");
+        let lower = CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00");
+
+        assert!(upper.is_ok());
+        assert!(lower.is_ok());
+        assert_eq!(upper.unwrap(), lower.unwrap());
     }
 }
