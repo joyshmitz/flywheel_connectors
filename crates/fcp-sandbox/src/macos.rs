@@ -1,0 +1,501 @@
+//! macOS sandbox implementation using seatbelt (sandbox-exec).
+//!
+//! # Enforcement Mechanism
+//!
+//! macOS provides the `sandbox_init` API which enforces a profile specified in
+//! Scheme-based sandbox profile language (SBPL). The sandbox is enforced at the
+//! kernel level and cannot be bypassed from userspace.
+//!
+//! # Profile Generation
+//!
+//! We generate SBPL profiles dynamically based on the `CompiledPolicy`. The
+//! profile follows Apple's sandbox profile language conventions while enforcing
+//! FCP2's security requirements.
+//!
+//! # Limitations
+//!
+//! - Sandbox profiles are declarative and applied atomically
+//! - Once applied, restrictions cannot be relaxed
+//! - Some system resources require specific entitlements
+//! - Network filtering is coarse-grained (allow/deny per protocol)
+
+#![cfg(target_os = "macos")]
+
+use std::ffi::CString;
+use std::path::Path;
+
+use tracing::{debug, info, warn};
+
+use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError};
+
+// ============================================================================
+// macOS Sandbox
+// ============================================================================
+
+/// macOS sandbox using seatbelt profiles.
+#[derive(Debug, Default)]
+pub struct MacOsSandbox {
+    /// Cached profile string (for debugging).
+    _cached_profile: Option<String>,
+}
+
+impl MacOsSandbox {
+    /// Create a new macOS sandbox.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            _cached_profile: None,
+        }
+    }
+
+    /// Generate a seatbelt profile (SBPL) from the compiled policy.
+    fn generate_profile(&self, policy: &CompiledPolicy) -> String {
+        let mut profile = String::new();
+
+        // Version header
+        profile.push_str("(version 1)\n\n");
+
+        // Default deny
+        profile.push_str(";; Default deny all\n");
+        profile.push_str("(deny default)\n\n");
+
+        // Allow basic process operations
+        profile.push_str(";; Basic process operations\n");
+        profile.push_str("(allow process-info-codesignature)\n");
+        profile.push_str("(allow process-info-pidinfo)\n");
+        profile.push_str("(allow process-info-setcontrol)\n");
+        profile.push_str("(allow sysctl-read)\n");
+        profile.push_str("(allow mach-lookup\n");
+        profile.push_str("  (global-name \"com.apple.system.logger\")\n");
+        profile.push_str("  (global-name \"com.apple.system.notification_center\")\n");
+        profile.push_str(")\n\n");
+
+        // Memory operations
+        profile.push_str(";; Memory operations\n");
+        profile.push_str("(allow mach-priv-host-port)\n\n");
+
+        // Signal handling
+        profile.push_str(";; Signal handling\n");
+        profile.push_str("(allow signal (target self))\n\n");
+
+        // File system access
+        profile.push_str(";; Filesystem access\n");
+
+        // Always allow read of system libraries
+        profile.push_str("(allow file-read*\n");
+        profile.push_str("  (subpath \"/usr/lib\")\n");
+        profile.push_str("  (subpath \"/System/Library\")\n");
+        profile.push_str("  (subpath \"/Library/Frameworks\")\n");
+        profile.push_str("  (subpath \"/Applications/Xcode.app/Contents/Developer/Toolchains\")\n");
+        profile.push_str("  (literal \"/dev/null\")\n");
+        profile.push_str("  (literal \"/dev/random\")\n");
+        profile.push_str("  (literal \"/dev/urandom\")\n");
+        profile.push_str(")\n");
+
+        // Add read-only paths from policy
+        if !policy.readonly_paths.is_empty() {
+            profile.push_str("(allow file-read*\n");
+            for path in &policy.readonly_paths {
+                profile.push_str(&format!("  (subpath \"{}\")\n", path.display()));
+            }
+            profile.push_str(")\n");
+        }
+
+        // Add writable paths from policy
+        if !policy.writable_paths.is_empty() {
+            profile.push_str("(allow file-read* file-write*\n");
+            for path in &policy.writable_paths {
+                profile.push_str(&format!("  (subpath \"{}\")\n", path.display()));
+            }
+            profile.push_str(")\n");
+        }
+
+        profile.push('\n');
+
+        // Process execution
+        if policy.deny_exec {
+            profile.push_str(";; Process execution denied\n");
+            profile.push_str("(deny process-exec)\n");
+            profile.push_str("(deny process-fork)\n\n");
+        } else {
+            profile.push_str(";; Process execution allowed\n");
+            profile.push_str("(allow process-exec)\n");
+            profile.push_str("(allow process-fork)\n\n");
+        }
+
+        // Network access
+        if policy.block_direct_network {
+            profile.push_str(";; Direct network access blocked (use Network Guard)\n");
+            profile.push_str("(deny network*)\n");
+            // Allow Unix domain sockets for IPC with Network Guard
+            profile.push_str("(allow network-outbound\n");
+            profile.push_str("  (path \"/var/run/fcp-network-guard.sock\")\n");
+            profile.push_str(")\n");
+            profile.push_str("(allow network-bind network-inbound\n");
+            profile.push_str("  (local unix-socket)\n");
+            profile.push_str(")\n\n");
+        } else {
+            profile.push_str(";; Network access allowed\n");
+            profile.push_str("(allow network*)\n\n");
+        }
+
+        // Debugging / ptrace
+        if policy.deny_ptrace {
+            profile.push_str(";; Debugging denied\n");
+            profile.push_str("(deny process-info-codesignature (with no-log))\n");
+            profile.push_str("(deny system-privilege)\n\n");
+        }
+
+        // IPC
+        profile.push_str(";; Allow basic IPC\n");
+        profile.push_str("(allow ipc-posix-shm-read-data)\n");
+        profile.push_str("(allow ipc-posix-shm-write-data)\n\n");
+
+        // Resource limits
+        profile.push_str(&format!(
+            ";; Resource limits: memory={}MB, cpu={}%\n",
+            policy.memory_limit_bytes / (1024 * 1024),
+            policy.cpu_percent
+        ));
+        // Note: macOS sandbox doesn't have direct rlimit support in profiles
+        // We apply these via setrlimit separately
+
+        debug!(profile_len = profile.len(), "Generated macOS sandbox profile");
+
+        profile
+    }
+
+    /// Apply resource limits using setrlimit.
+    fn apply_rlimits(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        // Memory limit
+        let memory_limit = libc::rlimit {
+            rlim_cur: policy.memory_limit_bytes,
+            rlim_max: policy.memory_limit_bytes,
+        };
+        unsafe {
+            if libc::setrlimit(libc::RLIMIT_AS, &memory_limit) != 0 {
+                warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "Failed to set memory limit"
+                );
+            }
+        }
+
+        // CPU time limit
+        let cpu_seconds = policy.wall_clock_timeout.as_secs();
+        let cpu_limit = libc::rlimit {
+            rlim_cur: cpu_seconds,
+            rlim_max: cpu_seconds + 5,
+        };
+        unsafe {
+            if libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit) != 0 {
+                warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "Failed to set CPU limit"
+                );
+            }
+        }
+
+        // File descriptor limit
+        let fd_limit = libc::rlimit {
+            rlim_cur: 1024,
+            rlim_max: 4096,
+        };
+        unsafe {
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &fd_limit) != 0 {
+                warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "Failed to set file descriptor limit"
+                );
+            }
+        }
+
+        // Disable core dumps
+        let core_limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        unsafe {
+            if libc::setrlimit(libc::RLIMIT_CORE, &core_limit) != 0 {
+                warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "Failed to disable core dumps"
+                );
+            }
+        }
+
+        // No new processes if deny_exec
+        if policy.deny_exec {
+            let nproc_limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            unsafe {
+                if libc::setrlimit(libc::RLIMIT_NPROC, &nproc_limit) != 0 {
+                    warn!(
+                        error = %std::io::Error::last_os_error(),
+                        "Failed to set process limit"
+                    );
+                }
+            }
+        }
+
+        info!("Applied resource limits via setrlimit");
+        Ok(())
+    }
+}
+
+impl Sandbox for MacOsSandbox {
+    fn apply(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        info!(
+            profile = ?policy.profile,
+            memory_mb = policy.memory_limit_bytes / (1024 * 1024),
+            cpu_percent = policy.cpu_percent,
+            deny_exec = policy.deny_exec,
+            deny_ptrace = policy.deny_ptrace,
+            block_network = policy.block_direct_network,
+            "Applying macOS sandbox"
+        );
+
+        // Step 1: Apply resource limits
+        self.apply_rlimits(policy)?;
+
+        // Step 2: Generate and apply sandbox profile
+        let profile = self.generate_profile(policy);
+
+        // Convert profile to C string
+        let c_profile = CString::new(profile.as_bytes())
+            .map_err(|e| SandboxError::PolicyCompilationFailed(format!("invalid profile: {e}")))?;
+
+        // Apply sandbox using sandbox_init
+        let mut errorbuf: *mut i8 = std::ptr::null_mut();
+
+        let result = unsafe {
+            sandbox_init(
+                c_profile.as_ptr(),
+                0, // SANDBOX_NAMED (profile is inline, not a file)
+                &mut errorbuf,
+            )
+        };
+
+        if result != 0 {
+            let error_msg = if !errorbuf.is_null() {
+                let err = unsafe { std::ffi::CStr::from_ptr(errorbuf) };
+                let msg = err.to_string_lossy().to_string();
+                unsafe {
+                    sandbox_free_error(errorbuf);
+                }
+                msg
+            } else {
+                "unknown error".to_string()
+            };
+
+            return Err(SandboxError::ApplyFailed(format!(
+                "sandbox_init failed: {error_msg}"
+            )));
+        }
+
+        info!("macOS sandbox applied successfully");
+        Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        // Sandbox is available on all macOS versions we support (10.5+)
+        true
+    }
+
+    fn platform_name(&self) -> &'static str {
+        "macos"
+    }
+
+    fn verify_file_access(
+        &self,
+        policy: &CompiledPolicy,
+        path: &Path,
+        write: bool,
+    ) -> Result<(), SandboxError> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+        if write {
+            for writable in &policy.writable_paths {
+                if path.starts_with(writable) {
+                    return Ok(());
+                }
+            }
+            return Err(SandboxError::PolicyCompilationFailed(format!(
+                "write access to {} not allowed",
+                path.display()
+            )));
+        }
+
+        // Check system paths (always readable)
+        let system_paths = ["/usr/lib", "/System/Library", "/Library/Frameworks"];
+        for sys_path in system_paths {
+            if path.starts_with(sys_path) {
+                return Ok(());
+            }
+        }
+
+        // Check policy paths
+        for readable in policy.readonly_paths.iter().chain(&policy.writable_paths) {
+            if path.starts_with(readable) {
+                return Ok(());
+            }
+        }
+
+        Err(SandboxError::PolicyCompilationFailed(format!(
+            "read access to {} not allowed",
+            path.display()
+        )))
+    }
+
+    fn verify_exec_allowed(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        if policy.deny_exec {
+            Err(SandboxError::PolicyCompilationFailed(
+                "process execution is denied".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn verify_network_blocked(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        if policy.block_direct_network {
+            Ok(())
+        } else {
+            Err(SandboxError::PolicyCompilationFailed(
+                "direct network access is allowed (use Network Guard)".into(),
+            ))
+        }
+    }
+}
+
+// ============================================================================
+// FFI Bindings
+// ============================================================================
+
+/// sandbox_init flags.
+const SANDBOX_NAMED: u64 = 0x0001;
+
+extern "C" {
+    /// Initialize sandbox with a profile string.
+    fn sandbox_init(profile: *const i8, flags: u64, errorbuf: *mut *mut i8) -> i32;
+
+    /// Free error buffer from sandbox_init.
+    fn sandbox_free_error(errorbuf: *mut i8);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::CompiledPolicy;
+    use fcp_manifest::SandboxProfile;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn test_policy() -> CompiledPolicy {
+        CompiledPolicy {
+            profile: SandboxProfile::Strict,
+            memory_limit_bytes: 256 * 1024 * 1024,
+            cpu_percent: 50,
+            wall_clock_timeout: Duration::from_secs(30),
+            readonly_paths: vec![PathBuf::from("/usr"), PathBuf::from("/opt")],
+            writable_paths: vec![PathBuf::from("/tmp/test")],
+            deny_exec: true,
+            deny_ptrace: true,
+            block_direct_network: true,
+            state_dir: Some(PathBuf::from("/tmp/test")),
+            platform_flags: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_macos_sandbox_available() {
+        let sandbox = MacOsSandbox::new();
+        assert!(sandbox.is_available());
+        assert_eq!(sandbox.platform_name(), "macos");
+    }
+
+    #[test]
+    fn test_generate_profile_structure() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+        let profile = sandbox.generate_profile(&policy);
+
+        // Check basic structure
+        assert!(profile.contains("(version 1)"));
+        assert!(profile.contains("(deny default)"));
+
+        // Check file access rules
+        assert!(profile.contains("file-read*"));
+        assert!(profile.contains("/usr"));
+        assert!(profile.contains("/tmp/test"));
+
+        // Check network is blocked
+        assert!(profile.contains("network access blocked"));
+        assert!(profile.contains("(deny network*)"));
+
+        // Check exec is denied
+        assert!(profile.contains("(deny process-exec)"));
+        assert!(profile.contains("(deny process-fork)"));
+    }
+
+    #[test]
+    fn test_generate_profile_permissive() {
+        let sandbox = MacOsSandbox::new();
+        let mut policy = test_policy();
+        policy.block_direct_network = false;
+        policy.deny_exec = false;
+
+        let profile = sandbox.generate_profile(&policy);
+
+        // Check network is allowed
+        assert!(profile.contains("(allow network*)"));
+
+        // Check exec is allowed
+        assert!(profile.contains("(allow process-exec)"));
+        assert!(profile.contains("(allow process-fork)"));
+    }
+
+    #[test]
+    fn test_verify_file_access_system_paths() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+
+        // System paths should always be readable
+        assert!(sandbox
+            .verify_file_access(&policy, Path::new("/usr/lib/libSystem.B.dylib"), false)
+            .is_ok());
+        assert!(sandbox
+            .verify_file_access(&policy, Path::new("/System/Library/Frameworks/CoreFoundation.framework"), false)
+            .is_ok());
+
+        // But not writable
+        assert!(sandbox
+            .verify_file_access(&policy, Path::new("/usr/lib/test.dylib"), true)
+            .is_err());
+    }
+
+    #[test]
+    fn test_verify_file_access_policy_paths() {
+        let sandbox = MacOsSandbox::new();
+        let policy = test_policy();
+
+        // Writable path should allow read and write
+        assert!(sandbox
+            .verify_file_access(&policy, Path::new("/tmp/test/data.db"), false)
+            .is_ok());
+        assert!(sandbox
+            .verify_file_access(&policy, Path::new("/tmp/test/data.db"), true)
+            .is_ok());
+
+        // Unknown path should be denied
+        assert!(sandbox
+            .verify_file_access(&policy, Path::new("/home/user/secret"), false)
+            .is_err());
+    }
+}

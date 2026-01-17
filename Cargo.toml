@@ -146,7 +146,8 @@ fcp-testkit = { path = "crates/fcp-testkit" }
 fcp-webhook = { path = "crates/fcp-webhook" }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Default deny, but allow override for crates that legitimately need unsafe (e.g., fcp-sandbox)
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
