@@ -228,18 +228,33 @@ impl TelegramClient {
 }
 
 /// Options for sending messages.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SendMessageOptions {
     pub parse_mode: Option<String>,
     pub reply_to_message_id: Option<i64>,
     pub message_thread_id: Option<i64>,
 }
 
+#[allow(dead_code)] // Helper methods for future use
 impl SendMessageOptions {
     /// Set parse mode to HTML.
     #[must_use]
     pub fn html(mut self) -> Self {
-        self.parse_mode = Some("HTML".to_string());
+        self.parse_mode = Some("HTML".into());
+        self
+    }
+
+    /// Set parse mode to MarkdownV2.
+    #[must_use]
+    pub fn markdown_v2(mut self) -> Self {
+        self.parse_mode = Some("MarkdownV2".into());
+        self
+    }
+
+    /// Set reply to a specific message.
+    #[must_use]
+    pub fn reply_to_message_id(mut self, id: i64) -> Self {
+        self.reply_to_message_id = Some(id);
         self
     }
 }

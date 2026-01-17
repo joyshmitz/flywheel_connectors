@@ -493,17 +493,51 @@ impl DiscordConnector {
                     let total_chars: usize = embeds
                         .iter()
                         .map(|e| {
-                            let title_len = e
-                                .get("title")
+                            let mut size = 0;
+                            
+                            // Title
+                            size += e.get("title")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.len())
                                 .unwrap_or(0);
-                            let desc_len = e
-                                .get("description")
+                                
+                            // Description
+                            size += e.get("description")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.len())
                                 .unwrap_or(0);
-                            title_len + desc_len
+                                
+                            // Fields
+                            if let Some(fields) = e.get("fields").and_then(|v| v.as_array()) {
+                                for field in fields {
+                                    size += field.get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.len())
+                                        .unwrap_or(0);
+                                    size += field.get("value")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.len())
+                                        .unwrap_or(0);
+                                }
+                            }
+                            
+                            // Footer
+                            if let Some(footer) = e.get("footer") {
+                                size += footer.get("text")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.len())
+                                    .unwrap_or(0);
+                            }
+                            
+                            // Author
+                            if let Some(author) = e.get("author") {
+                                size += author.get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.len())
+                                    .unwrap_or(0);
+                            }
+                            
+                            size
                         })
                         .sum();
 
@@ -1210,5 +1244,43 @@ mod tests {
         assert_eq!(6000, 6000); // MAX_EMBED_TOTAL_CHARS
         assert_eq!(256, 256); // MAX_EMBED_TITLE
         assert_eq!(4096, 4096); // MAX_EMBED_DESCRIPTION
+    }
+
+    #[tokio::test]
+    async fn test_embed_total_limit_exceeded() {
+        let connector = DiscordConnector::new();
+
+        // Create an embed with fields that exceed 6000 chars total
+        let mut fields = Vec::new();
+        for i in 0..10 {
+            fields.push(json!({
+                "name": format!("Field {}", i),
+                "value": "x".repeat(600) // 10 * 600 = 6000 + names > 6000
+            }));
+        }
+
+        let input = json!({
+            "channel_id": "123",
+            "embeds": [{
+                "title": "Test",
+                "fields": fields
+            }]
+        });
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": input
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Total embed character count"), "Got: {}", message);
+            }
+            _ => panic!("Expected InvalidRequest for embed limit, got: {:?}", err),
+        }
     }
 }
