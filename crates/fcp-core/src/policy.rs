@@ -841,9 +841,54 @@ fn receipt_covers_inputs(receipt: &SanitizerReceipt, inputs: &[ObjectId]) -> boo
 }
 
 fn approval_token_object_id(token: &ApprovalToken) -> ObjectId {
-    ObjectId::from_unscoped_bytes(token.token_id.as_bytes())
+    // SECURITY: Use content-addressed ID to prevent malleability.
+    // We use the full canonical encoding of the token.
+    // Note: We use from_unscoped_bytes here because we don't have the Zone ObjectIdKey available
+    // in this context, but this still ensures the ID is bound to the token content.
+    let bytes = fcp_cbor::to_canonical_cbor(token).unwrap_or_else(|_| token.token_id.as_bytes().to_vec());
+    ObjectId::from_unscoped_bytes(&bytes)
 }
 
 fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
     ObjectId::from_unscoped_bytes(receipt.receipt_id.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ApprovalScope, ElevationScope, IntegrityLevel, ZoneId};
+
+    #[test]
+    fn test_approval_token_object_id_is_content_addressed() {
+        // Demonstrates that ObjectId is derived from full content, ensuring malleability protection.
+        
+        let token = ApprovalToken {
+            token_id: "test-token-123".to_string(),
+            issued_at_ms: 1000,
+            expires_at_ms: 2000,
+            issuer: "issuer".to_string(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "op".to_string(),
+                original_provenance_id: ObjectId::from_unscoped_bytes(b"prov"),
+                target_integrity: IntegrityLevel::Owner,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        };
+
+        let id1 = approval_token_object_id(&token);
+
+        // Mutate content but keep token_id
+        let mut token2 = token.clone();
+        if let ApprovalScope::Elevation(ref mut scope) = token2.scope {
+            scope.target_integrity = IntegrityLevel::Untrusted;
+        }
+        let id2 = approval_token_object_id(&token2);
+
+        // IDs MUST be different despite having same token_id
+        assert_ne!(id1, id2);
+        
+        // And they must NOT match the simple hash of the ID string
+        assert_ne!(id1, ObjectId::from_unscoped_bytes(b"test-token-123"));
+    }
 }
