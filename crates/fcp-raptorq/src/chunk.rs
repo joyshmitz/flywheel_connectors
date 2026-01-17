@@ -80,7 +80,16 @@ impl ChunkedObjectManifest {
             });
         }
 
-        let mut payload = Vec::with_capacity(self.total_len as usize);
+        // Pre-allocate based on verified actual chunks length, not just the manifest claim.
+        // Since we verified actual_len == self.total_len, this is safe from manifest lies,
+        // but we still cap it to avoid OOM from huge valid payloads if system is constrained.
+        // For now, usize limit is the main constraint.
+        let capacity = usize::try_from(actual_len).map_err(|_| ChunkError::LengthMismatch {
+            expected: self.total_len,
+            got: actual_len,
+        })?;
+
+        let mut payload = Vec::with_capacity(capacity);
         for chunk in chunks {
             payload.extend_from_slice(&chunk.bytes);
         }
@@ -117,7 +126,13 @@ impl ChunkedObjectManifest {
             });
         }
 
-        let mut payload = Vec::with_capacity(self.total_len as usize);
+        // Safe allocation based on actual chunks provided
+        let capacity = usize::try_from(actual_len).map_err(|_| ChunkError::LengthMismatch {
+            expected: self.total_len,
+            got: actual_len,
+        })?;
+
+        let mut payload = Vec::with_capacity(capacity);
         for chunk in chunks {
             payload.extend_from_slice(&chunk.bytes);
         }

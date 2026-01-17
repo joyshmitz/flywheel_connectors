@@ -360,4 +360,29 @@ mod tests {
         // Should have decoded by now
         panic!("Failed to decode payload");
     }
+
+    #[test]
+    fn test_encode_source_returns_symbols() {
+        let config = RaptorQConfig::default();
+        let payload = vec![0u8; 1024]; // Should match symbol size (1024) -> 1 source symbol
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let source = encoder.encode_source();
+        assert!(!source.is_empty(), "encode_source returned empty vector");
+        assert_eq!(source.len(), 1, "expected 1 source symbol");
+    }
+
+    #[test]
+    fn test_encode_all_returns_source_and_repair() {
+        let config = RaptorQConfig {
+            repair_ratio_bps: 10000, // 100% overhead -> 1 source, 1 repair
+            ..RaptorQConfig::default()
+        };
+        let payload = vec![0u8; 1024];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+
+        let all = encoder.encode_all();
+        // 1 source + 1 repair = 2 total
+        assert_eq!(all.len(), 2, "expected 2 symbols (1 source + 1 repair), got {}", all.len());
+    }
 }

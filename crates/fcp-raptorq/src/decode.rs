@@ -190,11 +190,22 @@ impl DecodeAdmissionController {
     /// Returns `Some(permit)` if a slot is available, `None` otherwise.
     #[must_use]
     pub fn try_acquire(&self) -> Option<DecodePermit> {
-        let current = self.active.fetch_add(1, Ordering::SeqCst);
-        if current >= self.max_concurrent {
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            return None;
+        let mut current = self.active.load(Ordering::SeqCst);
+        loop {
+            if current >= self.max_concurrent {
+                return None;
+            }
+            match self.active.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
         }
+
         Some(DecodePermit {
             active: Arc::clone(&self.active),
             started_at: Instant::now(),
@@ -608,5 +619,44 @@ mod tests {
 
         // Clone shares the same active counter
         assert_eq!(cloned.active_count(), 1);
+    }
+
+    #[test]
+    fn test_concurrent_acquire_respects_limit_strictly() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let max_concurrent = 5;
+        let controller = DecodeAdmissionController::with_limits(
+            max_concurrent,
+            1024,
+            Duration::from_secs(30),
+            100,
+        );
+        let controller = Arc::new(controller);
+        let barrier = Arc::new(Barrier::new(20)); // 20 threads
+
+        let mut handles = vec![];
+        for _ in 0..20 {
+            let c = controller.clone();
+            let b = barrier.clone();
+            handles.push(thread::spawn(move || {
+                b.wait();
+                let _permit = c.try_acquire();
+                // Hold permit for a bit
+                if _permit.is_some() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                // Verify we never see active_count > max_concurrent
+                let current = c.active_count();
+                assert!(current <= max_concurrent, "active count {} exceeded max {}", current, max_concurrent);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        
+        assert_eq!(controller.active_count(), 0);
     }
 }
