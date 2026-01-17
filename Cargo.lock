@@ -1316,6 +1316,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1557,6 +1558,7 @@ dependencies = [
  "fcp-manifest",
  "idna",
  "ipnet",
+ "libc",
  "pretty_assertions",
  "serde",
  "thiserror 2.0.17",
