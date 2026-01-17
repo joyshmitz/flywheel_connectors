@@ -364,6 +364,7 @@ mod resource_constraints {
             max_calls: None,
             max_bytes: None,
             idempotency_key: None,
+            credential_allow: vec![],
         };
 
         let token = create_token_with_constraints(&sk, &constraints);
@@ -393,6 +394,7 @@ mod resource_constraints {
             max_calls: None,
             max_bytes: None,
             idempotency_key: None,
+            credential_allow: vec![],
         };
 
         let token = create_token_with_constraints(&sk, &constraints);
@@ -422,6 +424,7 @@ mod resource_constraints {
             max_calls: None,
             max_bytes: None,
             idempotency_key: None,
+            credential_allow: vec![],
         };
 
         let token = create_token_with_constraints(&sk, &constraints);
@@ -916,6 +919,7 @@ mod adversarial_attacks {
             max_calls: None,
             max_bytes: None,
             idempotency_key: None,
+            credential_allow: vec![],
         };
 
         let mut constraints_bytes = Vec::new();

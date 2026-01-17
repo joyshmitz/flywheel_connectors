@@ -14,6 +14,7 @@ mod capability;
 mod checkpoint;
 mod connector;
 mod connector_state;
+mod credential;
 mod crdt;
 mod enrollment;
 mod error;
@@ -28,6 +29,7 @@ mod provenance;
 mod quorum;
 mod ratelimit;
 mod revocation;
+mod secret;
 pub mod util;
 mod zone_keys;
 
@@ -36,6 +38,7 @@ pub use capability::*;
 pub use checkpoint::*;
 pub use connector::*;
 pub use connector_state::*;
+pub use credential::*;
 pub use crdt::*;
 pub use enrollment::*;
 pub use error::*;
@@ -50,6 +53,7 @@ pub use provenance::*;
 pub use quorum::*;
 pub use ratelimit::*;
 pub use revocation::*;
+pub use secret::*;
 pub use zone_keys::*;
 
 // Re-export commonly used external types

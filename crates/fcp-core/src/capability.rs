@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::object::ObjectId;
-use crate::{FcpError, FcpResult};
+use crate::{CredentialId, FcpError, FcpResult};
 use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
 
 /// Canonical identifier validation error (NORMATIVE).
@@ -835,6 +835,14 @@ pub struct CapabilityConstraints {
     /// Idempotency key for deduplication
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+
+    /// Allowed credential IDs for secretless egress (NORMATIVE).
+    ///
+    /// Connectors can only use credentials listed here in egress requests.
+    /// The egress proxy verifies `CredentialId` is in this list before
+    /// injecting credential material.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_allow: Vec<CredentialId>,
 }
 
 /// Rate limit configuration.
