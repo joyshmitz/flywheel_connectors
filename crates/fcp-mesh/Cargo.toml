@@ -25,6 +25,7 @@ hkdf = "0.12"
 hmac = "0.12"
 rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
@@ -33,5 +34,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true
+fcp-cbor = { path = "../fcp-cbor" }
+semver.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
