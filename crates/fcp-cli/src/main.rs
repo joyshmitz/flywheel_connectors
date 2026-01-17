@@ -12,6 +12,7 @@ mod audit;
 mod bench;
 mod explain;
 mod install;
+mod doctor;
 
 use clap::{Parser, Subcommand};
 
@@ -36,6 +37,11 @@ enum Commands {
     /// Run benchmarks to measure and track FCP2 performance characteristics.
     /// Outputs machine-readable JSON with environment metadata for regression tracking.
     Bench(bench::BenchArgs),
+
+    /// Diagnose zone health and freshness.
+    ///
+    /// Checks checkpoint freshness, revocation status, and degraded mode state.
+    Doctor(doctor::DoctorArgs),
 
     /// Explain an allow/deny decision by rendering the `DecisionReceipt`.
     ///
@@ -65,6 +71,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
+        Commands::Doctor(args) => doctor::run(&args),
         Commands::Explain(args) => explain::run(&args),
         Commands::Install(args) => install::run(args),
     }
