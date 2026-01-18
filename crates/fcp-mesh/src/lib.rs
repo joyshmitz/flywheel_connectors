@@ -26,11 +26,13 @@
 pub mod admission;
 pub mod device;
 pub mod gossip;
+pub mod planner;
 pub mod session;
 pub mod symbol_request;
 
 pub use admission::*;
 pub use device::*;
 pub use gossip::*;
+pub use planner::*;
 pub use session::*;
 pub use symbol_request::*;
