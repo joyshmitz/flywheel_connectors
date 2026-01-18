@@ -19,6 +19,8 @@ constant_time_eq = "0.3"
 fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-protocol = { path = "../fcp-protocol" }
+fcp-raptorq = { path = "../fcp-raptorq" }
+raptorq.workspace = true
 fcp-tailscale = { path = "../fcp-tailscale" }
 hex.workspace = true
 hkdf = "0.12"

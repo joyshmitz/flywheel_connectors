@@ -313,7 +313,8 @@ impl PlannerContext {
     /// Exclude specific nodes by ID string.
     #[must_use]
     pub fn excluding(mut self, nodes: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.excluded_nodes.extend(nodes.into_iter().map(Into::into));
+        self.excluded_nodes
+            .extend(nodes.into_iter().map(Into::into));
         self
     }
 }
@@ -652,11 +653,8 @@ impl ExecutionPlanner {
 /// Compare semver strings (simple comparison).
 fn version_gte(installed: &str, required: &str) -> bool {
     // Parse as semver-like: split on dots and compare numerically
-    let parse = |s: &str| -> Vec<u32> {
-        s.split('.')
-            .filter_map(|p| p.parse::<u32>().ok())
-            .collect()
-    };
+    let parse =
+        |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse::<u32>().ok()).collect() };
 
     let inst = parse(installed);
     let req = parse(required);
