@@ -494,49 +494,55 @@ impl DiscordConnector {
                         .iter()
                         .map(|e| {
                             let mut size = 0;
-                            
+
                             // Title
-                            size += e.get("title")
+                            size += e
+                                .get("title")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.len())
                                 .unwrap_or(0);
-                                
+
                             // Description
-                            size += e.get("description")
+                            size += e
+                                .get("description")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.len())
                                 .unwrap_or(0);
-                                
+
                             // Fields
                             if let Some(fields) = e.get("fields").and_then(|v| v.as_array()) {
                                 for field in fields {
-                                    size += field.get("name")
+                                    size += field
+                                        .get("name")
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.len())
                                         .unwrap_or(0);
-                                    size += field.get("value")
+                                    size += field
+                                        .get("value")
                                         .and_then(|v| v.as_str())
                                         .map(|s| s.len())
                                         .unwrap_or(0);
                                 }
                             }
-                            
+
                             // Footer
                             if let Some(footer) = e.get("footer") {
-                                size += footer.get("text")
+                                size += footer
+                                    .get("text")
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.len())
                                     .unwrap_or(0);
                             }
-                            
+
                             // Author
                             if let Some(author) = e.get("author") {
-                                size += author.get("name")
+                                size += author
+                                    .get("name")
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.len())
                                     .unwrap_or(0);
                             }
-                            
+
                             size
                         })
                         .sum();
@@ -1278,7 +1284,11 @@ mod tests {
         let err = result.unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Total embed character count"), "Got: {}", message);
+                assert!(
+                    message.contains("Total embed character count"),
+                    "Got: {}",
+                    message
+                );
             }
             _ => panic!("Expected InvalidRequest for embed limit, got: {:?}", err),
         }

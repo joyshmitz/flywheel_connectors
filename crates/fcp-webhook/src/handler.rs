@@ -417,9 +417,9 @@ mod tests {
 
     #[test]
     fn test_idempotency_race_condition() {
+        use crate::HmacSha256Verifier;
         use std::sync::Arc;
         use std::thread;
-        use crate::HmacSha256Verifier;
 
         let verifier = HmacSha256Verifier::new("secret");
         let handler = Arc::new(WebhookHandler::new(verifier, "test"));
@@ -452,6 +452,9 @@ mod tests {
         let r2 = t2.join().unwrap();
 
         // If both return true, idempotency failed
-        assert!(!(r1 && r2), "Race condition detected: both threads processed the same event");
+        assert!(
+            !(r1 && r2),
+            "Race condition detected: both threads processed the same event"
+        );
     }
 }

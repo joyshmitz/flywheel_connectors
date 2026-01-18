@@ -7,11 +7,11 @@
 //! - [`NodeKeyAttestation`] - Owner-signed binding of `node_id` ↔ keys ↔ tags
 
 use chrono::{DateTime, Utc};
+use fcp_crypto::canonicalize::to_deterministic_cbor;
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, X25519PublicKey,
     canonical_signing_bytes,
 };
-use fcp_crypto::canonicalize::to_deterministic_cbor;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -250,8 +250,10 @@ impl NodeKeyAttestation {
             expires_at: expires_at.timestamp(),
         };
 
-        let signing_bytes =
-            canonical_signing_bytes(AttestationPayload::SCHEMA, &to_deterministic_cbor(&payload)?);
+        let signing_bytes = canonical_signing_bytes(
+            AttestationPayload::SCHEMA,
+            &to_deterministic_cbor(&payload)?,
+        );
 
         let signature = owner_key.sign(&signing_bytes);
 
@@ -301,8 +303,10 @@ impl NodeKeyAttestation {
             expires_at: self.expires_at.timestamp(),
         };
 
-        let signing_bytes =
-            canonical_signing_bytes(AttestationPayload::SCHEMA, &to_deterministic_cbor(&payload)?);
+        let signing_bytes = canonical_signing_bytes(
+            AttestationPayload::SCHEMA,
+            &to_deterministic_cbor(&payload)?,
+        );
 
         owner_pubkey
             .verify(&signing_bytes, &self.signature)

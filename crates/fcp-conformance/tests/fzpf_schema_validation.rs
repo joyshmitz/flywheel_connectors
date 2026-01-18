@@ -32,8 +32,8 @@ fn invalid_examples_dir() -> PathBuf {
 }
 
 fn load_schema() -> Value {
-    let schema_content = fs::read_to_string(schema_path())
-        .expect("Failed to read FZPF schema file");
+    let schema_content =
+        fs::read_to_string(schema_path()).expect("Failed to read FZPF schema file");
     serde_json::from_str(&schema_content).expect("Failed to parse FZPF schema JSON")
 }
 
@@ -336,11 +336,7 @@ fn test_validation_is_deterministic() {
     let results: Vec<_> = (0..5).map(|_| validate_file(&validator, &path)).collect();
 
     for (i, result) in results.iter().enumerate() {
-        assert!(
-            result.is_ok(),
-            "Validation run {} should succeed",
-            i + 1
-        );
+        assert!(result.is_ok(), "Validation run {} should succeed", i + 1);
     }
 }
 
@@ -351,11 +347,7 @@ fn test_error_messages_are_stable() {
 
     // Run validation multiple times - error messages should be consistent
     let errors: Vec<Vec<String>> = (0..3)
-        .map(|_| {
-            validate_file(&validator, &path)
-                .err()
-                .unwrap_or_default()
-        })
+        .map(|_| validate_file(&validator, &path).err().unwrap_or_default())
         .collect();
 
     // All error sets should be identical

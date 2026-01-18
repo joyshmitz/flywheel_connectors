@@ -257,7 +257,11 @@ impl FcpcFrame {
     ///
     /// # Errors
     /// Returns `FcpcError` if decryption fails.
-    pub fn open(&self, direction: SessionDirection, k_ctx: &[u8; 32]) -> Result<Vec<u8>, FcpcError> {
+    pub fn open(
+        &self,
+        direction: SessionDirection,
+        k_ctx: &[u8; 32],
+    ) -> Result<Vec<u8>, FcpcError> {
         let aad = build_fcpc_aad(&self.header);
         let nonce = ChaCha20Nonce::from_counter_directional(self.header.seq, direction.as_u8());
         let key = AeadKey::from_bytes(*k_ctx);
@@ -335,15 +339,8 @@ mod tests {
     fn decode_rejects_bad_magic() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);
         let dir = SessionDirection::InitiatorToResponder;
-        let frame = FcpcFrame::seal(
-            session_id,
-            1,
-            dir,
-            FcpcFrameFlags::default(),
-            b"x",
-            &K_CTX,
-        )
-        .expect("seal should succeed");
+        let frame = FcpcFrame::seal(session_id, 1, dir, FcpcFrameFlags::default(), b"x", &K_CTX)
+            .expect("seal should succeed");
         let mut bytes = frame.encode();
         bytes[0] = 0x00;
         let err = FcpcFrame::decode(&bytes).expect_err("bad magic should fail");

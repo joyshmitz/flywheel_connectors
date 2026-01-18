@@ -381,26 +381,8 @@ impl LinuxSandbox {
         // File modification syscalls (if writable paths exist)
         if !policy.writable_paths.is_empty() {
             allowed.extend([
-                TRUNCATE,
-                FTRUNCATE,
-                RENAME,
-                RENAMEAT,
-                MKDIR,
-                MKDIRAT,
-                RMDIR,
-                UNLINK,
-                UNLINKAT,
-                LINK,
-                SYMLINK,
-                CREAT,
-                CHMOD,
-                FCHMOD,
-                FCHMODAT,
-                CHOWN,
-                FCHOWN,
-                LCHOWN,
-                UMASK,
-                CHDIR,
+                TRUNCATE, FTRUNCATE, RENAME, RENAMEAT, MKDIR, MKDIRAT, RMDIR, UNLINK, UNLINKAT,
+                LINK, SYMLINK, CREAT, CHMOD, FCHMOD, FCHMODAT, CHOWN, FCHOWN, LCHOWN, UMASK, CHDIR,
                 FCHDIR,
             ]);
         }
@@ -550,10 +532,7 @@ impl LinuxSandbox {
             }
         }
 
-        info!(
-            syscall_count = filter.len(),
-            "Applied seccomp-bpf filter"
-        );
+        info!(syscall_count = filter.len(), "Applied seccomp-bpf filter");
 
         Ok(())
     }
@@ -729,7 +708,11 @@ fn check_userns_available() -> bool {
 }
 
 /// Set resource limit.
-fn set_rlimit(resource: libc::__rlimit_resource_t, soft: u64, hard: u64) -> Result<(), SandboxError> {
+fn set_rlimit(
+    resource: libc::__rlimit_resource_t,
+    soft: u64,
+    hard: u64,
+) -> Result<(), SandboxError> {
     let limit = libc::rlimit {
         rlim_cur: soft,
         rlim_max: hard,
@@ -951,14 +934,18 @@ mod tests {
         let policy = test_policy();
 
         // Should allow read from readonly paths
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/usr/lib/test.so"), false)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/usr/lib/test.so"), false)
+                .is_ok()
+        );
 
         // Should deny write to readonly paths
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/usr/lib/test.so"), true)
-            .is_err());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/usr/lib/test.so"), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -967,12 +954,16 @@ mod tests {
         let policy = test_policy();
 
         // Should allow read and write to writable paths
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/tmp/test/data.db"), false)
-            .is_ok());
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/tmp/test/data.db"), true)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/tmp/test/data.db"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/tmp/test/data.db"), true)
+                .is_ok()
+        );
     }
 
     #[test]

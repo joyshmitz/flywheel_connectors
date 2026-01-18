@@ -383,6 +383,11 @@ mod tests {
 
         let all = encoder.encode_all();
         // 1 source + 1 repair = 2 total
-        assert_eq!(all.len(), 2, "expected 2 symbols (1 source + 1 repair), got {}", all.len());
+        assert_eq!(
+            all.len(),
+            2,
+            "expected 2 symbols (1 source + 1 repair), got {}",
+            all.len()
+        );
     }
 }

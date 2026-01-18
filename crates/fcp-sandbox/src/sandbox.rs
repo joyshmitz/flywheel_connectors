@@ -375,9 +375,11 @@ mod tests {
         assert_eq!(policy.wall_clock_timeout, Duration::from_secs(30));
         assert!(policy.readonly_paths.contains(&PathBuf::from("/usr")));
         assert!(policy.readonly_paths.contains(&PathBuf::from("/lib")));
-        assert!(policy
-            .writable_paths
-            .contains(&PathBuf::from("/var/lib/fcp/connectors/test")));
+        assert!(
+            policy
+                .writable_paths
+                .contains(&PathBuf::from("/var/lib/fcp/connectors/test"))
+        );
         assert!(policy.deny_exec);
         assert!(policy.deny_ptrace);
         assert!(policy.block_direct_network);

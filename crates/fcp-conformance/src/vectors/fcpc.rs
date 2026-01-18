@@ -43,10 +43,13 @@ impl FcpcGoldenVector {
     pub fn verify(&self) -> Result<(), String> {
         use fcp_protocol::{FcpcFrame, FcpcFrameFlags, MeshSessionId, SessionDirection};
 
-        let session_id_bytes = hex::decode(&self.session_id).map_err(|e| format!("invalid session_id hex: {e}"))?;
+        let session_id_bytes =
+            hex::decode(&self.session_id).map_err(|e| format!("invalid session_id hex: {e}"))?;
         let key_bytes = hex::decode(&self.key).map_err(|e| format!("invalid key hex: {e}"))?;
-        let plaintext_bytes = hex::decode(&self.plaintext).map_err(|e| format!("invalid plaintext hex: {e}"))?;
-        let expected_frame_bytes = hex::decode(&self.expected_frame).map_err(|e| format!("invalid expected_frame hex: {e}"))?;
+        let plaintext_bytes =
+            hex::decode(&self.plaintext).map_err(|e| format!("invalid plaintext hex: {e}"))?;
+        let expected_frame_bytes = hex::decode(&self.expected_frame)
+            .map_err(|e| format!("invalid expected_frame hex: {e}"))?;
 
         if session_id_bytes.len() != 16 {
             return Err("session_id must be 16 bytes".into());
@@ -59,19 +62,27 @@ impl FcpcGoldenVector {
         let k_ctx = key_bytes.try_into().unwrap();
 
         // 1. Verify decoding
-        let decoded = FcpcFrame::decode(&expected_frame_bytes).map_err(|e| format!("decode failed: {e}"))?;
+        let decoded =
+            FcpcFrame::decode(&expected_frame_bytes).map_err(|e| format!("decode failed: {e}"))?;
 
         // 2. Verify header fields
         if decoded.header.session_id != session_id {
-            return Err(format!("session_id mismatch: got {:?}, want {:?}", decoded.header.session_id, session_id));
+            return Err(format!(
+                "session_id mismatch: got {:?}, want {:?}",
+                decoded.header.session_id, session_id
+            ));
         }
         if decoded.header.seq != self.seq {
-            return Err(format!("seq mismatch: got {}, want {}", decoded.header.seq, self.seq));
+            return Err(format!(
+                "seq mismatch: got {}, want {}",
+                decoded.header.seq, self.seq
+            ));
         }
 
         // 3. Verify decryption
         // Note: Golden vectors usually assume InitiatorToResponder for simplicity unless specified
-        let decrypted = decoded.open(SessionDirection::InitiatorToResponder, &k_ctx)
+        let decrypted = decoded
+            .open(SessionDirection::InitiatorToResponder, &k_ctx)
             .map_err(|e| format!("decrypt failed: {e}"))?;
 
         if decrypted != plaintext_bytes {
@@ -85,14 +96,15 @@ impl FcpcGoldenVector {
             SessionDirection::InitiatorToResponder,
             FcpcFrameFlags::default(),
             &plaintext_bytes,
-            &k_ctx
-        ).map_err(|e| format!("seal failed: {e}"))?;
+            &k_ctx,
+        )
+        .map_err(|e| format!("seal failed: {e}"))?;
 
         let encoded = sealed.encode();
         // Encoded bytes might differ if AAD/Tags are non-deterministic, but for ChaCha20Poly1305 they should be deterministic given key/nonce
         // However, `seal` uses `from_counter_directional` which matches what we expect.
         if encoded != expected_frame_bytes {
-             return Err("re-encoding mismatch".into());
+            return Err("re-encoding mismatch".into());
         }
 
         Ok(())

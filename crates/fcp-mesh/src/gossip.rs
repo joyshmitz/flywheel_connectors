@@ -756,7 +756,7 @@ impl MeshGossip {
         // mutable borrow of self.zone_states conflicts with immutable borrow of self.config
         // So we clone config cheaply (it's small) or extract fields.
         let config = self.config.clone();
-        
+
         self.zone_states
             .entry(zone_id.clone())
             .or_insert_with(|| GossipState::new(zone_id.clone(), &config))
@@ -1183,12 +1183,8 @@ mod tests {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let obj_id = test_object_id("admitted-obj");
 
-        let added = gossip.announce_object(
-            &test_zone(),
-            &obj_id,
-            ObjectAdmissionClass::Admitted,
-            1000,
-        );
+        let added =
+            gossip.announce_object(&test_zone(), &obj_id, ObjectAdmissionClass::Admitted, 1000);
 
         assert!(added);
         assert!(gossip.has_object(&test_zone(), &obj_id));

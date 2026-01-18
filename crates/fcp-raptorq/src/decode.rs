@@ -649,14 +649,17 @@ mod tests {
                 }
                 // Verify we never see active_count > max_concurrent
                 let current = c.active_count();
-                assert!(current <= max_concurrent, "active count {current} exceeded max {max_concurrent}");
+                assert!(
+                    current <= max_concurrent,
+                    "active count {current} exceeded max {max_concurrent}"
+                );
             }));
         }
 
         for h in handles {
             h.join().unwrap();
         }
-        
+
         assert_eq!(controller.active_count(), 0);
     }
 }

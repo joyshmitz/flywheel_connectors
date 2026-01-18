@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use fcp_manifest::{SandboxProfile, SandboxSection};
-use fcp_sandbox::{create_sandbox, CompiledPolicy};
+use fcp_sandbox::{CompiledPolicy, create_sandbox};
 
 // ============================================================================
 // Test Fixtures
@@ -109,7 +109,11 @@ fn test_state_dir_added_to_writable_paths() {
 
     let policy = CompiledPolicy::from_manifest(&manifest, state_dir).unwrap();
 
-    assert!(policy.writable_paths.contains(&PathBuf::from("/var/lib/fcp/connectors/test")));
+    assert!(
+        policy
+            .writable_paths
+            .contains(&PathBuf::from("/var/lib/fcp/connectors/test"))
+    );
 }
 
 // ============================================================================
@@ -304,22 +308,29 @@ fn test_empty_paths() {
 fn test_canary_connector_strict_profile() {
     let sandbox = create_sandbox().unwrap();
     let manifest = strict_manifest();
-    let policy = CompiledPolicy::from_manifest(&manifest, Some("/tmp/canary-state".into())).unwrap();
+    let policy =
+        CompiledPolicy::from_manifest(&manifest, Some("/tmp/canary-state".into())).unwrap();
 
     // Canary should be able to read from allowed paths
-    assert!(sandbox
-        .verify_file_access(&policy, &PathBuf::from("/usr/share/dict/words"), false)
-        .is_ok());
+    assert!(
+        sandbox
+            .verify_file_access(&policy, &PathBuf::from("/usr/share/dict/words"), false)
+            .is_ok()
+    );
 
     // Canary should be able to write to state directory
-    assert!(sandbox
-        .verify_file_access(&policy, &PathBuf::from("/tmp/canary-state/cache.db"), true)
-        .is_ok());
+    assert!(
+        sandbox
+            .verify_file_access(&policy, &PathBuf::from("/tmp/canary-state/cache.db"), true)
+            .is_ok()
+    );
 
     // Canary should NOT be able to read arbitrary paths
-    assert!(sandbox
-        .verify_file_access(&policy, &PathBuf::from("/etc/passwd"), false)
-        .is_err());
+    assert!(
+        sandbox
+            .verify_file_access(&policy, &PathBuf::from("/etc/passwd"), false)
+            .is_err()
+    );
 
     // Canary should NOT be able to execute processes
     assert!(sandbox.verify_exec_allowed(&policy).is_err());
@@ -336,12 +347,20 @@ fn test_canary_connector_moderate_profile() {
     let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
 
     // Should allow reads from /usr and /lib
-    assert!(sandbox
-        .verify_file_access(&policy, &PathBuf::from("/usr/bin/test"), false)
-        .is_ok());
-    assert!(sandbox
-        .verify_file_access(&policy, &PathBuf::from("/lib/x86_64-linux-gnu/libc.so.6"), false)
-        .is_ok());
+    assert!(
+        sandbox
+            .verify_file_access(&policy, &PathBuf::from("/usr/bin/test"), false)
+            .is_ok()
+    );
+    assert!(
+        sandbox
+            .verify_file_access(
+                &policy,
+                &PathBuf::from("/lib/x86_64-linux-gnu/libc.so.6"),
+                false
+            )
+            .is_ok()
+    );
 
     // Should block execution
     assert!(sandbox.verify_exec_allowed(&policy).is_err());

@@ -1009,7 +1009,7 @@ mod tests {
         match std::env::consts::ARCH {
             "x86_64" => assert_eq!(target.arch, "amd64"),
             "aarch64" => assert_eq!(target.arch, "arm64"),
-            _ => {}, // Other archs passed through
+            _ => {} // Other archs passed through
         }
     }
 

@@ -194,8 +194,7 @@ impl WindowsSandbox {
         let mut token: HANDLE = ptr::null_mut();
         let current_process = unsafe { GetCurrentProcess() };
 
-        let result =
-            unsafe { OpenProcessToken(current_process, TOKEN_ADJUST_DEFAULT, &mut token) };
+        let result = unsafe { OpenProcessToken(current_process, TOKEN_ADJUST_DEFAULT, &mut token) };
 
         if result == FALSE {
             return Err(SandboxError::SyscallFailed(format!(
@@ -211,19 +210,7 @@ impl WindowsSandbox {
         };
 
         let result = unsafe {
-            AllocateAndInitializeSid(
-                &authority,
-                1,
-                level,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                &mut sid,
-            )
+            AllocateAndInitializeSid(&authority, 1, level, 0, 0, 0, 0, 0, 0, 0, &mut sid)
         };
 
         if result == FALSE {
@@ -485,10 +472,7 @@ const TOKEN_ADJUST_DEFAULT: DWORD = 0x0080;
 // ============================================================================
 
 extern "system" {
-    fn CreateJobObjectW(
-        lpJobAttributes: *mut std::ffi::c_void,
-        lpName: LPCWSTR,
-    ) -> HANDLE;
+    fn CreateJobObjectW(lpJobAttributes: *mut std::ffi::c_void, lpName: LPCWSTR) -> HANDLE;
 
     fn SetInformationJobObject(
         hJob: HANDLE,
@@ -603,22 +587,22 @@ mod tests {
         let policy = test_policy();
 
         // System paths should be readable
-        assert!(sandbox
-            .verify_file_access(
-                &policy,
-                Path::new("C:\\Windows\\System32\\kernel32.dll"),
-                false
-            )
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(
+                    &policy,
+                    Path::new("C:\\Windows\\System32\\kernel32.dll"),
+                    false
+                )
+                .is_ok()
+        );
 
         // But not writable
-        assert!(sandbox
-            .verify_file_access(
-                &policy,
-                Path::new("C:\\Windows\\System32\\test.dll"),
-                true
-            )
-            .is_err());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("C:\\Windows\\System32\\test.dll"), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -627,12 +611,16 @@ mod tests {
         let policy = test_policy();
 
         // Writable path should allow read and write
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("C:\\Temp\\test\\data.db"), false)
-            .is_ok());
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("C:\\Temp\\test\\data.db"), true)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("C:\\Temp\\test\\data.db"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("C:\\Temp\\test\\data.db"), true)
+                .is_ok()
+        );
     }
 
     #[test]

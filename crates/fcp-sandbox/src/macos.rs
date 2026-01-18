@@ -160,7 +160,10 @@ impl MacOsSandbox {
         // Note: macOS sandbox doesn't have direct rlimit support in profiles
         // We apply these via setrlimit separately
 
-        debug!(profile_len = profile.len(), "Generated macOS sandbox profile");
+        debug!(
+            profile_len = profile.len(),
+            "Generated macOS sandbox profile"
+        );
 
         profile
     }
@@ -467,17 +470,27 @@ mod tests {
         let policy = test_policy();
 
         // System paths should always be readable
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/usr/lib/libSystem.B.dylib"), false)
-            .is_ok());
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/System/Library/Frameworks/CoreFoundation.framework"), false)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/usr/lib/libSystem.B.dylib"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(
+                    &policy,
+                    Path::new("/System/Library/Frameworks/CoreFoundation.framework"),
+                    false
+                )
+                .is_ok()
+        );
 
         // But not writable
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/usr/lib/test.dylib"), true)
-            .is_err());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/usr/lib/test.dylib"), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -486,16 +499,22 @@ mod tests {
         let policy = test_policy();
 
         // Writable path should allow read and write
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/tmp/test/data.db"), false)
-            .is_ok());
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/tmp/test/data.db"), true)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/tmp/test/data.db"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/tmp/test/data.db"), true)
+                .is_ok()
+        );
 
         // Unknown path should be denied
-        assert!(sandbox
-            .verify_file_access(&policy, Path::new("/home/user/secret"), false)
-            .is_err());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, Path::new("/home/user/secret"), false)
+                .is_err()
+        );
     }
 }

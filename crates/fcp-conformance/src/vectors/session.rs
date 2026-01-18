@@ -70,13 +70,16 @@ impl SessionGoldenVector {
             responder_ephemeral_pk: "00".repeat(32),
             hello_nonce: "00".repeat(16),
             ack_nonce: "00".repeat(16),
-            expected_shared_secret: "93fea2a7c1aeb62cfd6452ff5badae8bdffcbd7196dc910c89944006d85dbb68".into(),
+            expected_shared_secret:
+                "93fea2a7c1aeb62cfd6452ff5badae8bdffcbd7196dc910c89944006d85dbb68".into(),
             session_id: "00".repeat(16),
             expected_keys: SessionDerivedKeys {
                 k_ctx: "5f1c8e9e1f16618172a9fa8c5a83e373f29584590fe379898208aab446568b5e".into(),
                 k_data: "00".repeat(32), // Unused in current implementation
-                k_mac_i2r: "4e2ea40cb131c7d1e28bdca676195e69f3dd6fb0b88a4cceb5342f66bd4ca11c".into(),
-                k_mac_r2i: "9ad57873567f373ff5793940b27f76117472c0084d97550c39ef07c9c2025003".into(),
+                k_mac_i2r: "4e2ea40cb131c7d1e28bdca676195e69f3dd6fb0b88a4cceb5342f66bd4ca11c"
+                    .into(),
+                k_mac_r2i: "9ad57873567f373ff5793940b27f76117472c0084d97550c39ef07c9c2025003"
+                    .into(),
             },
         }
     }

@@ -14,10 +14,10 @@ use std::net::IpAddr;
 
 use fcp_manifest::{NetworkConstraints, SandboxProfile, SandboxSection};
 use fcp_sandbox::{
-    canonicalize_hostname, create_sandbox, is_hostname_canonical, is_link_local, is_localhost,
-    is_private_range, is_tailnet_range, CompiledPolicy, CredentialInjector, DefaultTlsVerifier,
-    DenyReason, EgressError, EgressGuard, EgressHttpRequest, EgressRequest, EgressTcpConnectRequest,
-    HttpHeader, NoOpCredentialInjector, TlsVerifier,
+    CompiledPolicy, CredentialInjector, DefaultTlsVerifier, DenyReason, EgressError, EgressGuard,
+    EgressHttpRequest, EgressRequest, EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector,
+    TlsVerifier, canonicalize_hostname, create_sandbox, is_hostname_canonical, is_link_local,
+    is_localhost, is_private_range, is_tailnet_range,
 };
 
 // ============================================================================
@@ -988,9 +988,11 @@ mod sandbox_profiles {
         let state_dir = Some(PathBuf::from("/var/lib/fcp/connectors/test"));
         let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
 
-        assert!(policy
-            .writable_paths
-            .contains(&PathBuf::from("/var/lib/fcp/connectors/test")));
+        assert!(
+            policy
+                .writable_paths
+                .contains(&PathBuf::from("/var/lib/fcp/connectors/test"))
+        );
     }
 
     #[test]
@@ -1258,19 +1260,25 @@ mod canary {
             CompiledPolicy::from_manifest(&section, Some("/tmp/canary-state".into())).unwrap();
 
         // Can read from allowed paths
-        assert!(sandbox
-            .verify_file_access(&policy, &PathBuf::from("/usr/share/dict/words"), false)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, &PathBuf::from("/usr/share/dict/words"), false)
+                .is_ok()
+        );
 
         // Can write to state directory
-        assert!(sandbox
-            .verify_file_access(&policy, &PathBuf::from("/tmp/canary-state/cache.db"), true)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, &PathBuf::from("/tmp/canary-state/cache.db"), true)
+                .is_ok()
+        );
 
         // Cannot read arbitrary paths
-        assert!(sandbox
-            .verify_file_access(&policy, &PathBuf::from("/etc/passwd"), false)
-            .is_err());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, &PathBuf::from("/etc/passwd"), false)
+                .is_err()
+        );
 
         // Cannot execute processes
         assert!(sandbox.verify_exec_allowed(&policy).is_err());
@@ -1306,12 +1314,16 @@ mod canary {
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
 
         // Can read from /usr, /lib, /opt
-        assert!(sandbox
-            .verify_file_access(&policy, &PathBuf::from("/usr/bin/test"), false)
-            .is_ok());
-        assert!(sandbox
-            .verify_file_access(&policy, &PathBuf::from("/opt/tool/bin"), false)
-            .is_ok());
+        assert!(
+            sandbox
+                .verify_file_access(&policy, &PathBuf::from("/usr/bin/test"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(&policy, &PathBuf::from("/opt/tool/bin"), false)
+                .is_ok()
+        );
 
         // Cannot execute
         assert!(sandbox.verify_exec_allowed(&policy).is_err());

@@ -184,7 +184,9 @@ fn frame_seal_empty_payload_golden_vector() {
 
     // Verify we can decode and open
     let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
-    let opened = decoded.open(dir, &GOLDEN_K_CTX).expect("open should succeed");
+    let opened = decoded
+        .open(dir, &GOLDEN_K_CTX)
+        .expect("open should succeed");
     assert_eq!(opened, plaintext);
 }
 
@@ -221,7 +223,9 @@ fn frame_seal_known_payload_golden_vector() {
 
     // Verify we can decode and open
     let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
-    let opened = decoded.open(dir, &GOLDEN_K_CTX).expect("open should succeed");
+    let opened = decoded
+        .open(dir, &GOLDEN_K_CTX)
+        .expect("open should succeed");
     assert_eq!(opened, plaintext);
 }
 
