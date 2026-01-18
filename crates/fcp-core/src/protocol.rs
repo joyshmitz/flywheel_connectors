@@ -903,6 +903,7 @@ pub struct ResourceTypeInfo {
 mod tests {
     use super::*;
     use crate::CapabilityToken;
+    use fcp_crypto::ed25519::{Ed25519Signature, Ed25519SigningKey};
 
     // ─────────────────────────────────────────────────────────────────────────
     // RequestId Tests
@@ -1025,6 +1026,26 @@ mod tests {
     // Invoke Tests
     // ─────────────────────────────────────────────────────────────────────────
 
+    fn base_invoke_request() -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_base"),
+            connector_id: ConnectorId::from_static("gmail:fcp2:1.0"),
+            operation: "gmail.search".parse().unwrap(),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
     #[test]
     fn invoke_request_serialization_roundtrip() {
         let req = InvokeRequest {
@@ -1068,6 +1089,46 @@ mod tests {
         assert_eq!(deserialized.deadline_ms, Some(30000));
         assert!(deserialized.holder_proof.is_none());
         assert!(deserialized.lease_seq.is_none());
+    }
+
+    #[test]
+    fn invoke_request_idempotency_key_length_ok() {
+        let mut req = base_invoke_request();
+        req.idempotency_key = Some("a".repeat(MAX_IDEMPOTENCY_KEY_LEN));
+        assert!(req.validate_idempotency_key().is_ok());
+    }
+
+    #[test]
+    fn invoke_request_idempotency_key_too_long() {
+        let mut req = base_invoke_request();
+        req.idempotency_key = Some("a".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1));
+        let err = req.validate_idempotency_key().unwrap_err();
+        match err {
+            InvokeValidationError::IdempotencyKeyTooLong { len, max } => {
+                assert_eq!(len, MAX_IDEMPOTENCY_KEY_LEN + 1);
+                assert_eq!(max, MAX_IDEMPOTENCY_KEY_LEN);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn holder_proof_signable_bytes_binding() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let request_id = RequestId::new("req_holder");
+        let operation_id: OperationId = "gmail.send".parse().unwrap();
+        let token_jti = b"token-jti-123";
+
+        let signable = HolderProof::signable_bytes(&request_id, &operation_id, token_jti);
+        let signature = signing_key.sign(&signable);
+        let holder_proof = HolderProof::new(signature.to_bytes(), TailscaleNodeId::new("node-123"));
+
+        let proof_sig = Ed25519Signature::from_bytes(&holder_proof.signature);
+        assert!(verifying_key.verify(&signable, &proof_sig).is_ok());
+
+        let mismatched = HolderProof::signable_bytes(&request_id, &operation_id, b"other-jti");
+        assert!(verifying_key.verify(&mismatched, &proof_sig).is_err());
     }
 
     #[test]

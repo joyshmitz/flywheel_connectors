@@ -448,12 +448,16 @@ fn credential_validation_errors_do_not_leak_secrets() {
 
     // Check all error variants don't contain secret bytes
     let errors = vec![
-        CredentialValidationError::Expired { credential_id: cred_id },
+        CredentialValidationError::Expired {
+            credential_id: cred_id,
+        },
         CredentialValidationError::HostNotAllowed {
             credential_id: cred_id,
             host: "evil.com".into(),
         },
-        CredentialValidationError::NotInCredentialAllow { credential_id: cred_id },
+        CredentialValidationError::NotInCredentialAllow {
+            credential_id: cred_id,
+        },
         CredentialValidationError::SecretNotFound { secret_id },
         CredentialValidationError::SecretRevoked { secret_id },
     ];

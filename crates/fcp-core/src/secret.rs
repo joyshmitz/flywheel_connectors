@@ -68,7 +68,9 @@ impl Default for SecretId {
 
 impl fmt::Debug for SecretId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SecretId").field(&self.0.to_string()).finish()
+        f.debug_tuple("SecretId")
+            .field(&self.0.to_string())
+            .finish()
     }
 }
 
@@ -215,7 +217,11 @@ pub struct KeyDerivationInfo {
     pub algorithm: String,
 
     /// Salt (if applicable).
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "crate::util::hex_or_bytes_vec")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "crate::util::hex_or_bytes_vec"
+    )]
     pub salt: Vec<u8>,
 
     /// Info/context string.

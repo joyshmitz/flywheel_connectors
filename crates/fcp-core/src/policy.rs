@@ -845,7 +845,8 @@ fn approval_token_object_id(token: &ApprovalToken) -> ObjectId {
     // We use the full canonical encoding of the token.
     // Note: We use from_unscoped_bytes here because we don't have the Zone ObjectIdKey available
     // in this context, but this still ensures the ID is bound to the token content.
-    let bytes = fcp_cbor::to_canonical_cbor(token).unwrap_or_else(|_| token.token_id.as_bytes().to_vec());
+    let bytes =
+        fcp_cbor::to_canonical_cbor(token).unwrap_or_else(|_| token.token_id.as_bytes().to_vec());
     ObjectId::from_unscoped_bytes(&bytes)
 }
 
@@ -861,7 +862,7 @@ mod tests {
     #[test]
     fn test_approval_token_object_id_is_content_addressed() {
         // Demonstrates that ObjectId is derived from full content, ensuring malleability protection.
-        
+
         let mut token = ApprovalToken {
             token_id: "test-token-123".to_string(),
             issued_at_ms: 1000,
@@ -886,7 +887,7 @@ mod tests {
 
         // IDs MUST be different despite having same token_id
         assert_ne!(id1, id2);
-        
+
         // And they must NOT match the simple hash of the ID string
         assert_ne!(id1, ObjectId::from_unscoped_bytes(b"test-token-123"));
     }
