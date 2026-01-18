@@ -1,0 +1,254 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build: Cross-platform release binaries
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: fcp
+            asset: fcp-linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: fcp
+            asset: fcp-linux-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: fcp
+            asset: fcp-darwin-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: fcp
+            asset: fcp-darwin-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: fcp.exe
+            asset: fcp-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --package fcp-cli --target ${{ matrix.target }}
+
+      - name: Create tarball (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          tar -cJf ../../../dist/${{ matrix.asset }}.tar.xz ${{ matrix.artifact }}
+          cd ../../../dist
+          shasum -a 256 "${{ matrix.asset }}.tar.xz" > "${{ matrix.asset }}.tar.xz.sha256"
+
+      - name: Create zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.artifact }}" -DestinationPath "dist/${{ matrix.asset }}.zip"
+          cd dist
+          $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.asset }}.zip").Hash.ToLower()
+          "$hash  ${{ matrix.asset }}.zip" | Out-File -Encoding ASCII "${{ matrix.asset }}.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build Connectors: Release builds for all connectors
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-connectors:
+    name: Build Connectors (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-amd64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            suffix: darwin-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: darwin-amd64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: connectors-${{ matrix.target }}
+
+      - name: Build connectors
+        run: |
+          cargo build --release -p fcp-anthropic --target ${{ matrix.target }}
+          cargo build --release -p fcp-discord --target ${{ matrix.target }}
+          cargo build --release -p fcp-openai --target ${{ matrix.target }}
+          cargo build --release -p fcp-telegram --target ${{ matrix.target }}
+
+      - name: Package connectors (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          for connector in fcp-anthropic fcp-discord fcp-openai fcp-telegram; do
+            tar -cJf ../../../dist/${connector}-${{ matrix.suffix }}.tar.xz ${connector}
+          done
+          cd ../../../dist
+          for f in *.tar.xz; do
+            shasum -a 256 "$f" > "$f.sha256"
+          done
+
+      - name: Package connectors (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          foreach ($connector in @("fcp-anthropic", "fcp-discord", "fcp-openai", "fcp-telegram")) {
+            $exe = "$connector.exe"
+            $zip = "${connector}-${{ matrix.suffix }}.zip"
+            Compress-Archive -Path "target/${{ matrix.target }}/release/$exe" -DestinationPath "dist/$zip"
+            cd dist
+            $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+            "$hash  $zip" | Out-File -Encoding ASCII "$zip.sha256"
+            cd ..
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: connectors-${{ matrix.suffix }}
+          path: dist/*
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Release: Create GitHub release with all artifacts
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: [build, build-connectors]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate combined checksums
+        run: |
+          cd dist
+          cat *.sha256 | sort > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*
+          body: |
+            ## FCP v${{ steps.version.outputs.version }}
+
+            ### Downloads
+
+            | Platform | CLI | Anthropic | Discord | OpenAI | Telegram |
+            |----------|-----|-----------|---------|--------|----------|
+            | Linux (x64) | [fcp](fcp-linux-amd64.tar.xz) | [anthropic](fcp-anthropic-linux-amd64.tar.xz) | [discord](fcp-discord-linux-amd64.tar.xz) | [openai](fcp-openai-linux-amd64.tar.xz) | [telegram](fcp-telegram-linux-amd64.tar.xz) |
+            | Linux (ARM64) | [fcp](fcp-linux-arm64.tar.xz) | [anthropic](fcp-anthropic-linux-arm64.tar.xz) | [discord](fcp-discord-linux-arm64.tar.xz) | [openai](fcp-openai-linux-arm64.tar.xz) | [telegram](fcp-telegram-linux-arm64.tar.xz) |
+            | macOS (ARM64) | [fcp](fcp-darwin-arm64.tar.xz) | [anthropic](fcp-anthropic-darwin-arm64.tar.xz) | [discord](fcp-discord-darwin-arm64.tar.xz) | [openai](fcp-openai-darwin-arm64.tar.xz) | [telegram](fcp-telegram-darwin-arm64.tar.xz) |
+            | macOS (x64) | [fcp](fcp-darwin-amd64.tar.xz) | [anthropic](fcp-anthropic-darwin-amd64.tar.xz) | [discord](fcp-discord-darwin-amd64.tar.xz) | [openai](fcp-openai-darwin-amd64.tar.xz) | [telegram](fcp-telegram-darwin-amd64.tar.xz) |
+            | Windows (x64) | [fcp](fcp-windows-amd64.exe.zip) | [anthropic](fcp-anthropic-windows-amd64.zip) | [discord](fcp-discord-windows-amd64.zip) | [openai](fcp-openai-windows-amd64.zip) | [telegram](fcp-telegram-windows-amd64.zip) |
+
+            ### Verification
+
+            ```bash
+            # Download and verify
+            curl -LO https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt --ignore-missing
+            ```
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Publish: Publish to crates.io (optional)
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Publish crates (dry-run)
+        run: |
+          # Dry run to verify everything is ready
+          # Uncomment the actual publish when ready:
+          # cargo publish -p fcp-cbor
+          # cargo publish -p fcp-core
+          # cargo publish -p fcp-crypto
+          # etc.
+          echo "Dry run: would publish crates to crates.io"
+          cargo publish -p fcp-cbor --dry-run || true
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -1,0 +1,71 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# If true, metadata will be collected with --all-features
+all-features = true
+
+[advisories]
+# The database of advisories to check
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# How to handle advisories that are not yet assigned a CVE
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+ignore = [
+    # Add advisory IDs to ignore here if needed
+]
+
+[licenses]
+# List of allowed licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+]
+# Confidence threshold for license detection
+confidence-threshold = 0.8
+# Allow private/unpublished crates
+private = { ignore = true }
+
+[bans]
+# Lint level for multiple versions of the same crate
+multiple-versions = "warn"
+# Lint level for crates that are not used
+wildcards = "allow"
+# Allow dev/build dependencies to have duplicates
+workspace-default-features = "allow"
+external-default-features = "allow"
+# Crates to deny outright
+deny = [
+    # Add crates to ban here
+]
+# Crates to skip when checking for multiple versions
+skip = [
+    # Common crates with version churn
+]
+skip-tree = [
+    # Skip entire dependency trees
+]
+
+[sources]
+# Allowed source types
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[sources.allow-org]
+# Allow crates from these GitHub organizations
+github = ["flywheel"]
