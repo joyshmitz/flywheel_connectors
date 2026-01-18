@@ -991,4 +991,519 @@ mod tests {
             Some(&object_id_key_2)
         );
     }
+
+    /// Test chain of three rotations (key1 → key2 → key3) verifying `prev_zone_key_id` linkage.
+    /// This ensures the full rotation history is preserved and all keys remain accessible.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn rotation_chain_three_epochs() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-chain");
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        // === Epoch 1: Initial key ===
+        let issued_at_1 = 1_700_000_000;
+        let zone_key_1 = random_zone_key();
+        let object_id_key_1 = random_object_id_key();
+        let zone_key_id_1 = ZoneKeyId::from_bytes([0x01; 8]);
+        let object_id_key_id_1 = ObjectIdKeyId::from_bytes([0x11; 8]);
+
+        let wrapped_zone_1 =
+            wrap_zone_key(&pk, &zone_id, &node_id, issued_at_1, &zone_key_1).unwrap();
+        let wrapped_object_1 =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at_1, &object_id_key_1).unwrap();
+
+        let manifest_1 = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: zone_key_id_1,
+            object_id_key_id: object_id_key_id_1,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_1,
+            valid_until: None,
+            prev_zone_key_id: None, // No previous key
+            wrapped_keys: vec![wrapped_zone_1],
+            wrapped_object_id_keys: vec![wrapped_object_1],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        let mut ring = ZoneKeyRing::new(zone_id.clone());
+        ring.apply_manifest(&manifest_1, &node_id, &sk).unwrap();
+        assert_eq!(ring.active_zone_key_id, Some(zone_key_id_1));
+
+        // === Epoch 2: First rotation (links to epoch 1) ===
+        let issued_at_2 = 1_700_100_000;
+        let zone_key_2 = random_zone_key();
+        let object_id_key_2 = random_object_id_key();
+        let zone_key_id_2 = ZoneKeyId::from_bytes([0x02; 8]);
+        let object_id_key_id_2 = ObjectIdKeyId::from_bytes([0x12; 8]);
+
+        let wrapped_zone_2 =
+            wrap_zone_key(&pk, &zone_id, &node_id, issued_at_2, &zone_key_2).unwrap();
+        let wrapped_object_2 =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at_2, &object_id_key_2).unwrap();
+
+        let manifest_2 = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: zone_key_id_2,
+            object_id_key_id: object_id_key_id_2,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_2,
+            valid_until: None,
+            prev_zone_key_id: Some(zone_key_id_1), // Links to epoch 1
+            wrapped_keys: vec![wrapped_zone_2],
+            wrapped_object_id_keys: vec![wrapped_object_2],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        ring.apply_manifest(&manifest_2, &node_id, &sk).unwrap();
+        assert_eq!(ring.active_zone_key_id, Some(zone_key_id_2));
+
+        // === Epoch 3: Second rotation (links to epoch 2) ===
+        let issued_at_3 = 1_700_200_000;
+        let zone_key_3 = random_zone_key();
+        let object_id_key_3 = random_object_id_key();
+        let zone_key_id_3 = ZoneKeyId::from_bytes([0x03; 8]);
+        let object_id_key_id_3 = ObjectIdKeyId::from_bytes([0x13; 8]);
+
+        let wrapped_zone_3 =
+            wrap_zone_key(&pk, &zone_id, &node_id, issued_at_3, &zone_key_3).unwrap();
+        let wrapped_object_3 =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at_3, &object_id_key_3).unwrap();
+
+        let manifest_3 = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: zone_key_id_3,
+            object_id_key_id: object_id_key_id_3,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_3,
+            valid_until: None,
+            prev_zone_key_id: Some(zone_key_id_2), // Links to epoch 2
+            wrapped_keys: vec![wrapped_zone_3],
+            wrapped_object_id_keys: vec![wrapped_object_3],
+            rekey_policy: Some(RekeyPolicy {
+                epoch_ratchet: true,
+                retain_epochs: Some(3), // Keep all 3 epochs
+                ..RekeyPolicy::default()
+            }),
+            signature: test_signature(),
+        };
+
+        ring.apply_manifest(&manifest_3, &node_id, &sk).unwrap();
+
+        // Verify final state
+        assert_eq!(ring.active_zone_key_id, Some(zone_key_id_3));
+        assert_eq!(ring.active_zone_key(), Some(&zone_key_3));
+
+        // CRITICAL: All three keys must be accessible (deterministic key selection)
+        assert_eq!(ring.zone_key(&zone_key_id_1), Some(&zone_key_1));
+        assert_eq!(ring.zone_key(&zone_key_id_2), Some(&zone_key_2));
+        assert_eq!(ring.zone_key(&zone_key_id_3), Some(&zone_key_3));
+
+        // All ObjectId keys also accessible
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_1),
+            Some(&object_id_key_1)
+        );
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_2),
+            Some(&object_id_key_2)
+        );
+        assert_eq!(
+            ring.object_id_key(&object_id_key_id_3),
+            Some(&object_id_key_3)
+        );
+
+        // Verify we can decrypt data from any epoch by switching active key
+        assert!(ring.set_active_zone_key(zone_key_id_1));
+        assert_eq!(ring.active_zone_key(), Some(&zone_key_1));
+        assert!(ring.set_active_zone_key(zone_key_id_2));
+        assert_eq!(ring.active_zone_key(), Some(&zone_key_2));
+        assert!(ring.set_active_zone_key(zone_key_id_3));
+        assert_eq!(ring.active_zone_key(), Some(&zone_key_3));
+    }
+
+    /// Test that applying the same manifest twice is idempotent.
+    /// This verifies manifest replay doesn't corrupt state.
+    #[test]
+    fn manifest_replay_is_idempotent() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-replay");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let zone_key = random_zone_key();
+        let object_id_key = random_object_id_key();
+        let zone_key_id = ZoneKeyId::from_bytes([0xAA; 8]);
+        let object_id_key_id = ObjectIdKeyId::from_bytes([0xBB; 8]);
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_object =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &object_id_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id,
+            object_id_key_id,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_object],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        let mut ring = ZoneKeyRing::new(zone_id);
+
+        // Apply manifest first time
+        ring.apply_manifest(&manifest, &node_id, &sk).unwrap();
+        let state_after_first = (
+            ring.active_zone_key_id,
+            ring.active_zone_key().copied(),
+            ring.active_object_id_key_id,
+        );
+
+        // Apply manifest second time (replay)
+        ring.apply_manifest(&manifest, &node_id, &sk).unwrap();
+        let state_after_second = (
+            ring.active_zone_key_id,
+            ring.active_zone_key().copied(),
+            ring.active_object_id_key_id,
+        );
+
+        // State should be identical after replay
+        assert_eq!(state_after_first, state_after_second);
+        assert_eq!(ring.zone_key(&zone_key_id), Some(&zone_key));
+    }
+
+    /// Test node addition to zone membership (new node can receive keys).
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn membership_change_node_addition() {
+        let zone_id = ZoneId::work();
+
+        // Two nodes initially in the zone
+        let node_1_id = TailscaleNodeId::new("node-1");
+        let node_2_id = TailscaleNodeId::new("node-2");
+        // New node to be added
+        let node_3_id = TailscaleNodeId::new("node-3-new");
+
+        let sk_1 = X25519SecretKey::generate();
+        let pk_1 = sk_1.public_key();
+        let sk_2 = X25519SecretKey::generate();
+        let pk_2 = sk_2.public_key();
+        let sk_3 = X25519SecretKey::generate();
+        let pk_3 = sk_3.public_key();
+
+        // === Initial manifest with 2 nodes ===
+        let issued_at_1 = 1_700_000_000;
+        let zone_key_1 = random_zone_key();
+        let object_id_key_1 = random_object_id_key();
+        let zone_key_id_1 = ZoneKeyId::from_bytes([0x01; 8]);
+        let object_id_key_id_1 = ObjectIdKeyId::from_bytes([0x11; 8]);
+
+        let wrapped_zone_1_for_1 =
+            wrap_zone_key(&pk_1, &zone_id, &node_1_id, issued_at_1, &zone_key_1).unwrap();
+        let wrapped_zone_1_for_2 =
+            wrap_zone_key(&pk_2, &zone_id, &node_2_id, issued_at_1, &zone_key_1).unwrap();
+        let wrapped_obj_1_for_1 =
+            wrap_object_id_key(&pk_1, &zone_id, &node_1_id, issued_at_1, &object_id_key_1).unwrap();
+        let wrapped_obj_1_for_2 =
+            wrap_object_id_key(&pk_2, &zone_id, &node_2_id, issued_at_1, &object_id_key_1).unwrap();
+
+        let manifest_1 = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: zone_key_id_1,
+            object_id_key_id: object_id_key_id_1,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_1,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone_1_for_1, wrapped_zone_1_for_2],
+            wrapped_object_id_keys: vec![wrapped_obj_1_for_1, wrapped_obj_1_for_2],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        let mut ring_1 = ZoneKeyRing::new(zone_id.clone());
+        let mut ring_2 = ZoneKeyRing::new(zone_id.clone());
+        let mut ring_3 = ZoneKeyRing::new(zone_id.clone());
+
+        ring_1
+            .apply_manifest(&manifest_1, &node_1_id, &sk_1)
+            .unwrap();
+        ring_2
+            .apply_manifest(&manifest_1, &node_2_id, &sk_2)
+            .unwrap();
+
+        // Node 3 cannot apply initial manifest (not a member yet)
+        let err = ring_3
+            .apply_manifest(&manifest_1, &node_3_id, &sk_3)
+            .expect_err("new node should not be in initial manifest");
+        assert!(matches!(err, ZoneKeyError::MissingWrappedZoneKey { .. }));
+
+        // === Second manifest: node-3 is added ===
+        let issued_at_2 = 1_700_100_000;
+        let zone_key_2 = random_zone_key();
+        let object_id_key_2 = random_object_id_key();
+        let zone_key_id_2 = ZoneKeyId::from_bytes([0x02; 8]);
+        let object_id_key_id_2 = ObjectIdKeyId::from_bytes([0x12; 8]);
+
+        // Wrap keys for all 3 nodes
+        let wrapped_zone_2_for_1 =
+            wrap_zone_key(&pk_1, &zone_id, &node_1_id, issued_at_2, &zone_key_2).unwrap();
+        let wrapped_zone_2_for_2 =
+            wrap_zone_key(&pk_2, &zone_id, &node_2_id, issued_at_2, &zone_key_2).unwrap();
+        let wrapped_zone_2_for_3 =
+            wrap_zone_key(&pk_3, &zone_id, &node_3_id, issued_at_2, &zone_key_2).unwrap();
+        let wrapped_obj_2_for_1 =
+            wrap_object_id_key(&pk_1, &zone_id, &node_1_id, issued_at_2, &object_id_key_2).unwrap();
+        let wrapped_obj_2_for_2 =
+            wrap_object_id_key(&pk_2, &zone_id, &node_2_id, issued_at_2, &object_id_key_2).unwrap();
+        let wrapped_obj_2_for_3 =
+            wrap_object_id_key(&pk_3, &zone_id, &node_3_id, issued_at_2, &object_id_key_2).unwrap();
+
+        let manifest_2 = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: zone_key_id_2,
+            object_id_key_id: object_id_key_id_2,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_2,
+            valid_until: None,
+            prev_zone_key_id: Some(zone_key_id_1),
+            wrapped_keys: vec![
+                wrapped_zone_2_for_1,
+                wrapped_zone_2_for_2,
+                wrapped_zone_2_for_3,
+            ],
+            wrapped_object_id_keys: vec![
+                wrapped_obj_2_for_1,
+                wrapped_obj_2_for_2,
+                wrapped_obj_2_for_3,
+            ],
+            rekey_policy: Some(RekeyPolicy {
+                rewrap_on_membership_change: true,
+                ..RekeyPolicy::default()
+            }),
+            signature: test_signature(),
+        };
+
+        // All 3 nodes can apply the new manifest
+        ring_1
+            .apply_manifest(&manifest_2, &node_1_id, &sk_1)
+            .unwrap();
+        ring_2
+            .apply_manifest(&manifest_2, &node_2_id, &sk_2)
+            .unwrap();
+        ring_3
+            .apply_manifest(&manifest_2, &node_3_id, &sk_3)
+            .unwrap();
+
+        // Verify all nodes have the new key
+        assert_eq!(ring_1.active_zone_key_id, Some(zone_key_id_2));
+        assert_eq!(ring_2.active_zone_key_id, Some(zone_key_id_2));
+        assert_eq!(ring_3.active_zone_key_id, Some(zone_key_id_2));
+
+        // All nodes have the same key value
+        assert_eq!(ring_1.active_zone_key(), Some(&zone_key_2));
+        assert_eq!(ring_2.active_zone_key(), Some(&zone_key_2));
+        assert_eq!(ring_3.active_zone_key(), Some(&zone_key_2));
+
+        // Original nodes have both old and new keys
+        assert!(ring_1.zone_key(&zone_key_id_1).is_some());
+        assert!(ring_2.zone_key(&zone_key_id_1).is_some());
+
+        // New node only has the new key (didn't receive the old key)
+        assert!(ring_3.zone_key(&zone_key_id_1).is_none());
+        assert!(ring_3.zone_key(&zone_key_id_2).is_some());
+    }
+
+    /// Test that `valid_until` expiration field is correctly stored.
+    #[test]
+    fn manifest_with_valid_until() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-expiry");
+        let issued_at = 1_700_000_000;
+        let expires_at = 1_700_100_000; // 100,000 seconds later
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let zone_key = random_zone_key();
+        let object_id_key = random_object_id_key();
+        let zone_key_id = ZoneKeyId::from_bytes([0xEE; 8]);
+        let object_id_key_id = ObjectIdKeyId::from_bytes([0xFF; 8]);
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_object =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &object_id_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id,
+            object_id_key_id,
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: Some(expires_at), // Expiration set
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_object],
+            rekey_policy: Some(RekeyPolicy {
+                overlap_window_secs: Some(3600), // 1 hour overlap
+                ..RekeyPolicy::default()
+            }),
+            signature: test_signature(),
+        };
+
+        // Manifest should apply successfully (expiration is metadata, not enforced in apply)
+        let mut ring = ZoneKeyRing::new(zone_id);
+        ring.apply_manifest(&manifest, &node_id, &sk).unwrap();
+
+        assert_eq!(ring.active_zone_key_id, Some(zone_key_id));
+        assert_eq!(manifest.valid_until, Some(expires_at));
+        assert_eq!(
+            manifest.rekey_policy.as_ref().unwrap().overlap_window_secs,
+            Some(3600)
+        );
+    }
+
+    /// Test XChaCha20-Poly1305 algorithm selection.
+    #[test]
+    fn manifest_with_xchacha20_poly1305() {
+        let zone_id = ZoneId::private();
+        let node_id = TailscaleNodeId::new("node-xchacha");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let zone_key = random_zone_key();
+        let object_id_key = random_object_id_key();
+
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let wrapped_object =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &object_id_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0xCC; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0xDD; 8]),
+            algorithm: ZoneKeyAlgorithm::XChaCha20Poly1305, // Extended nonce variant
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_object],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        let mut ring = ZoneKeyRing::new(zone_id);
+        ring.apply_manifest(&manifest, &node_id, &sk).unwrap();
+
+        assert_eq!(ring.active_zone_key(), Some(&zone_key));
+        assert_eq!(manifest.algorithm, ZoneKeyAlgorithm::XChaCha20Poly1305);
+    }
+
+    /// Test `ZoneKeyId` and `ObjectIdKeyId` formatting.
+    #[test]
+    fn key_id_formatting() {
+        let zone_key_id = ZoneKeyId::from_bytes([0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF]);
+        let object_id_key_id =
+            ObjectIdKeyId::from_bytes([0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10]);
+
+        // Display format should be lowercase hex
+        assert_eq!(format!("{zone_key_id}"), "0123456789abcdef");
+        assert_eq!(format!("{object_id_key_id}"), "fedcba9876543210");
+
+        // Debug format includes type name
+        assert!(format!("{zone_key_id:?}").contains("ZoneKeyId"));
+        assert!(format!("{object_id_key_id:?}").contains("ObjectIdKeyId"));
+    }
+
+    /// Test `ZoneKey` redacted debug output for security.
+    #[test]
+    fn zone_key_debug_is_redacted() {
+        let zone_key = ZoneKey::from_bytes([0x42; ZONE_KEY_LEN]);
+        let debug_output = format!("{zone_key:?}");
+
+        // Should NOT contain the actual key bytes
+        assert!(!debug_output.contains("42"));
+        // Should contain redaction marker
+        assert!(debug_output.contains("redacted"));
+    }
+
+    /// Test `set_active_zone_key` returns false for unknown key.
+    #[test]
+    fn set_active_key_unknown_returns_false() {
+        let zone_id = ZoneId::work();
+        let mut ring = ZoneKeyRing::new(zone_id);
+
+        let unknown_key_id = ZoneKeyId::from_bytes([0xFF; 8]);
+        let unknown_obj_key_id = ObjectIdKeyId::from_bytes([0xEE; 8]);
+
+        // Setting unknown key should return false
+        assert!(!ring.set_active_zone_key(unknown_key_id));
+        assert!(!ring.set_active_object_id_key(unknown_obj_key_id));
+
+        // Active key should remain None
+        assert!(ring.active_zone_key_id.is_none());
+        assert!(ring.active_object_id_key_id.is_none());
+    }
+
+    /// Test `wrapped_key_for` returns `None` when recipient not found.
+    #[test]
+    fn wrapped_key_for_missing_recipient() {
+        let zone_id = ZoneId::work();
+        let node_1_id = TailscaleNodeId::new("node-1");
+        let node_2_id = TailscaleNodeId::new("node-2");
+        let issued_at = 1_700_000_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+
+        let zone_key = random_zone_key();
+        let object_id_key = random_object_id_key();
+
+        // Only wrap for node-1
+        let wrapped_zone = wrap_zone_key(&pk, &zone_id, &node_1_id, issued_at, &zone_key).unwrap();
+        let wrapped_object =
+            wrap_object_id_key(&pk, &zone_id, &node_1_id, issued_at, &object_id_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![wrapped_zone],
+            wrapped_object_id_keys: vec![wrapped_object],
+            rekey_policy: None,
+            signature: test_signature(),
+        };
+
+        // node-1 found, node-2 not found
+        assert!(manifest.wrapped_key_for(&node_1_id).is_some());
+        assert!(manifest.wrapped_key_for(&node_2_id).is_none());
+        assert!(manifest.wrapped_object_id_key_for(&node_1_id).is_some());
+        assert!(manifest.wrapped_object_id_key_for(&node_2_id).is_none());
+    }
 }
