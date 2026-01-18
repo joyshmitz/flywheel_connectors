@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
+use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_protocol::{
     FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError, FrameFlags, SignedFcpsFrame, SymbolRecord,
