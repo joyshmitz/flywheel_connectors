@@ -1,7 +1,7 @@
 # Flywheel Connector Protocol (FCP)
 
 <div align="center">
-  <img src="illustration.webp" alt="FCP - Secure connectors for AI agents with zone-based isolation and capability tokens">
+  <img src="fcp_illustration.webp" alt="FCP - Secure connectors for AI agents with zone-based isolation and capability tokens">
 </div>
 
 > **Specification note:** `FCP_Specification_V2.md` is the *authoritative* interoperability contract.
