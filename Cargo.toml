@@ -26,6 +26,7 @@ members = [
     "connectors/discord",
     "connectors/openai",
     "connectors/telegram",
+    "connectors/twitter",
 ]
 
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).
@@ -100,6 +101,7 @@ bytes = "1.9"
 hex = { version = "0.4", features = ["serde"] }
 base64 = "0.22"
 bitflags = "2.6"
+percent-encoding = "2.3"
 
 # Fountain codes
 raptorq = "2.0"
