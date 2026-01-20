@@ -26,8 +26,22 @@ impl FcpcGoldenVector {
     #[must_use]
     #[allow(clippy::missing_const_for_fn)] // Cannot be const: Vec allocation
     pub fn load_all() -> Vec<Self> {
-        // TODO: Load from embedded CBOR/JSON files
-        vec![]
+        vec![Self {
+            description: "FCPC seal vector (seq=1, i2r, default flags)".into(),
+            session_id: "0102030405060708090a0b0c0d0e0f10".into(),
+            key: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+                .into(),
+            seq: 1,
+            plaintext: "48656c6c6f2c204643504321".into(),
+            expected_frame: concat!(
+                "4643504301000102030405060708090a0b0c0d0e0f10",
+                "01000000000000000100",
+                "0c000000",
+                "d7329f33da068f5e6ae6ed7d",
+                "d1e775d26470b07743efed714e38978d"
+            )
+            .into(),
+        }]
     }
 
     /// Verify the golden vector against the implementation.
@@ -118,7 +132,6 @@ mod tests {
     #[test]
     fn golden_vectors_parseable() {
         let vectors = FcpcGoldenVector::load_all();
-        // Currently empty, will be populated by conformance bead
-        assert!(vectors.is_empty(), "vectors not yet populated");
+        assert!(!vectors.is_empty(), "vectors should be populated");
     }
 }

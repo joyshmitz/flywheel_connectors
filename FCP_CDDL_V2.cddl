@@ -1,0 +1,340 @@
+; FCP_CDDL_V2.cddl
+; Normative CBOR object definitions for FCP2 interoperability.
+; This file mirrors serde CBOR encodings used in fcp-core/fcp-protocol/fcp-crypto.
+; Extend as new normative CBOR objects are introduced.
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Common Scalars
+; ─────────────────────────────────────────────────────────────────────────────
+
+zone_id = tstr
+node_id = tstr
+connector_id = tstr
+operation_id = tstr
+capability_id = tstr
+principal_id = tstr
+epoch_id = tstr
+
+schema_id = {
+  namespace: tstr,
+  name: tstr,
+  version: tstr
+}
+
+schema_hash = bstr .size 32
+object_id = bstr .size 32
+zone_key_id = bstr .size 8
+object_id_key_id = bstr .size 8
+zone_id_hash = bstr .size 32
+uuid = bstr .size 16
+
+session_id = bstr .size 16
+session_nonce = bstr .size 16
+session_cookie = bstr .size 32
+x25519_public_key = bstr .size 32
+ed25519_signature = bstr .size 64
+
+correlation_id = uuid
+
+hex_bytes = tstr ; hex-encoded bytes (used where serde hex is enforced)
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Enums
+; ─────────────────────────────────────────────────────────────────────────────
+
+taint_level = "Untainted" / "Tainted" / "HighlyTainted"
+risk_level = "low" / "medium" / "high" / "critical"
+safety_tier = "safe" / "risky" / "dangerous" / "critical" / "forbidden"
+idempotency_class = "none" / "best_effort" / "strict"
+
+integrity_level = "Untrusted" / "Community" / "Work" / "Private" / "Owner"
+confidentiality_level = "Public" / "Community" / "Work" / "Private" / "Owner"
+
+zone_key_algorithm = "chacha20poly1305" / "xchacha20poly1305"
+
+decision = "allow" / "deny"
+
+session_crypto_suite = 1 / 2
+
+taint_flag =
+  "PUBLIC_INPUT"
+/ "UNVERIFIED_LINK"
+/ "UNTRUSTED_TRANSFORM"
+/ "WEBHOOK_INJECTED"
+/ "USER_GENERATED"
+/ "POTENTIALLY_MALICIOUS"
+/ "AI_GENERATED"
+/ "CROSS_ZONE_UNAPPROVED"
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Provenance + Object Headers
+; ─────────────────────────────────────────────────────────────────────────────
+
+provenance_step = {
+  timestamp_ms: uint,
+  zone: zone_id,
+  actor: tstr,
+  action: tstr,
+  resource: tstr
+}
+
+provenance = {
+  origin_zone: zone_id,
+  chain: [* provenance_step],
+  taint: taint_level,
+  elevated: bool,
+  ? elevation_token: tstr
+}
+
+device_selector =
+  { "Tag": tstr }
+/ { "Class": tstr }
+/ { "NodeId": uint }
+/ { "Zone": zone_id }
+/ { "HasCapability": tstr }
+
+object_placement_policy = {
+  min_nodes: uint,
+  max_node_fraction_bps: uint,
+  preferred_devices: [* device_selector],
+  excluded_devices: [* device_selector],
+  target_coverage_bps: uint
+}
+
+object_header = {
+  schema: schema_id,
+  zone_id: zone_id,
+  created_at: uint,
+  provenance: provenance,
+  refs: [* object_id],
+  foreign_refs: [* object_id],
+  ? ttl_secs: uint,
+  ? placement: object_placement_policy
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Capability Objects
+; ─────────────────────────────────────────────────────────────────────────────
+
+capability_grant = {
+  capability: capability_id,
+  ? operation: operation_id
+}
+
+capability_constraints = {
+  ? resource_allow: [* tstr],
+  ? resource_deny: [* tstr],
+  ? max_calls: uint,
+  ? max_bytes: uint,
+  ? idempotency_key: tstr,
+  ? credential_allow: [* tstr]
+}
+
+capability_object = {
+  caps: [* capability_grant],
+  constraints: capability_constraints,
+  ? principal: principal_id,
+  ? valid_from: uint,
+  ? valid_until: uint
+}
+
+role_object = {
+  name: tstr,
+  caps: [* capability_grant],
+  includes: [* object_id]
+}
+
+role_assignment = {
+  role_id: object_id,
+  principal: principal_id,
+  constraints: capability_constraints
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Approval Tokens + Sanitizer Receipts
+; ─────────────────────────────────────────────────────────────────────────────
+
+approval_scope =
+  elevation_scope
+/ declassification_scope
+/ execution_scope
+
+elevation_scope = {
+  type: "elevation",
+  operation_id: operation_id,
+  original_provenance_id: object_id,
+  target_integrity: integrity_level
+}
+
+declassification_scope = {
+  type: "declassification",
+  from_zone: zone_id,
+  to_zone: zone_id,
+  object_ids: [* object_id],
+  target_confidentiality: confidentiality_level
+}
+
+execution_scope = {
+  type: "execution",
+  connector_id: connector_id,
+  method_pattern: tstr,
+  ? request_object_id: object_id,
+  ? input_hash: bstr .size 32,
+  input_constraints: [* input_constraint]
+}
+
+input_constraint = {
+  pointer: tstr,
+  expected: any
+}
+
+approval_token = {
+  token_id: tstr,
+  issued_at_ms: uint,
+  expires_at_ms: uint,
+  issuer: tstr,
+  scope: approval_scope,
+  zone_id: zone_id,
+  ? signature: bstr
+}
+
+sanitizer_receipt = {
+  receipt_id: tstr,
+  timestamp_ms: uint,
+  sanitizer_id: tstr,
+  sanitizer_zone: zone_id,
+  authorized_flags: [* taint_flag],
+  covered_inputs: [* object_id],
+  cleared_flags: [* taint_flag],
+  ? signature: bstr
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Session Handshake (CBOR)
+; ─────────────────────────────────────────────────────────────────────────────
+
+transport_limits = {
+  max_datagram_bytes: uint
+}
+
+mesh_session_hello = {
+  from: node_id,
+  to: node_id,
+  eph_pubkey: x25519_public_key,
+  nonce: session_nonce,
+  ? cookie: session_cookie,
+  timestamp: uint,
+  suites: [* session_crypto_suite],
+  ? transport_limits: transport_limits,
+  ? signature: ed25519_signature
+}
+
+mesh_session_ack = {
+  from: node_id,
+  to: node_id,
+  eph_pubkey: x25519_public_key,
+  nonce: session_nonce,
+  session_id: session_id,
+  suite: session_crypto_suite,
+  timestamp: uint,
+  ? signature: ed25519_signature
+}
+
+mesh_session_hello_retry = {
+  from: node_id,
+  to: node_id,
+  cookie: session_cookie,
+  timestamp: uint
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; HPKE + Zone Key Manifests
+; ─────────────────────────────────────────────────────────────────────────────
+
+hpke_sealed_box = {
+  enc: hex_bytes,
+  ciphertext: hex_bytes
+}
+
+wrapped_zone_key = {
+  recipient: node_id,
+  issued_at: uint,
+  sealed: hpke_sealed_box
+}
+
+wrapped_object_id_key = {
+  recipient: node_id,
+  issued_at: uint,
+  sealed: hpke_sealed_box
+}
+
+rekey_policy = {
+  epoch_ratchet: bool,
+  ? overlap_window_secs: uint,
+  ? retain_epochs: uint,
+  rewrap_on_membership_change: bool,
+  rotate_object_id_key_on_membership_change: bool
+}
+
+node_signature = {
+  node_id: tstr,
+  signature: signature64,
+  signed_at: uint
+}
+
+signature_set = {
+  signatures: [* node_signature]
+}
+
+zone_key_manifest = {
+  header: object_header,
+  zone_id: zone_id,
+  zone_key_id: zone_key_id,
+  object_id_key_id: object_id_key_id,
+  algorithm: zone_key_algorithm,
+  valid_from: uint,
+  ? valid_until: uint,
+  ? prev_zone_key_id: zone_key_id,
+  wrapped_keys: [* wrapped_zone_key],
+  wrapped_object_id_keys: [* wrapped_object_id_key],
+  ? rekey_policy: rekey_policy,
+  signature: node_signature
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Audit + Decision Receipts
+; ─────────────────────────────────────────────────────────────────────────────
+
+trace_context = {
+  trace_id: bstr .size 16,
+  span_id: bstr .size 8,
+  flags: uint
+}
+
+audit_event = {
+  header: object_header,
+  correlation_id: correlation_id,
+  ? trace_context: trace_context,
+  event_type: tstr,
+  actor: principal_id,
+  zone_id: zone_id,
+  ? connector_id: connector_id,
+  ? operation: operation_id,
+  ? capability_token_jti: uuid,
+  ? request_object_id: object_id,
+  ? result_object_id: object_id,
+  ? prev: object_id,
+  seq: uint,
+  occurred_at: uint,
+  signature: node_signature
+}
+
+decision_receipt = {
+  header: object_header,
+  request_object_id: object_id,
+  decision: decision,
+  reason_code: tstr,
+  evidence: [* object_id],
+  ? explanation: tstr,
+  signature: node_signature
+}

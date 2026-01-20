@@ -1332,6 +1332,7 @@ dependencies = [
  "hex",
  "jsonschema",
  "pretty_assertions",
+ "semver",
  "serde",
  "serde_json",
 ]

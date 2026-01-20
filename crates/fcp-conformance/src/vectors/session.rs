@@ -64,21 +64,23 @@ impl SessionGoldenVector {
             initiator_id: "node-initiator".into(),
             responder_id: "node-responder".into(),
             // Keys and nonces would be hardcoded here in a real vector
-            initiator_ephemeral_sk: "00".repeat(32),
-            initiator_ephemeral_pk: "00".repeat(32),
-            responder_ephemeral_sk: "00".repeat(32),
-            responder_ephemeral_pk: "00".repeat(32),
-            hello_nonce: "00".repeat(16),
-            ack_nonce: "00".repeat(16),
+            initiator_ephemeral_sk: "12".repeat(32),
+            initiator_ephemeral_pk:
+                "052a50773ac8d91773f2dc9662e12f0defe915e415b8a1c8e20a5a3d6ab2b843".into(),
+            responder_ephemeral_sk: "34".repeat(32),
+            responder_ephemeral_pk:
+                "ffc951aa6f2fa03096d1d1b579735b2f6f84019fe2f617aa65ff3d68705f2527".into(),
+            hello_nonce: "01".repeat(16),
+            ack_nonce: "02".repeat(16),
             expected_shared_secret:
-                "93fea2a7c1aeb62cfd6452ff5badae8bdffcbd7196dc910c89944006d85dbb68".into(),
-            session_id: "00".repeat(16),
+                "161e854907b902cf0ef64555458b3f0d86de9439c9eaf8595ea4834f8b4d0b0f".into(),
+            session_id: "77".repeat(16),
             expected_keys: SessionDerivedKeys {
-                k_ctx: "5f1c8e9e1f16618172a9fa8c5a83e373f29584590fe379898208aab446568b5e".into(),
+                k_ctx: "cf7f39884db5a0365e9529183e0664fbea8f585343b5a6c92de9e936aab6cc8f".into(),
                 k_data: "00".repeat(32), // Unused in current implementation
-                k_mac_i2r: "4e2ea40cb131c7d1e28bdca676195e69f3dd6fb0b88a4cceb5342f66bd4ca11c"
+                k_mac_i2r: "2114740f1b364fbaa79aead5054f827d66dd3a527415a9f198994c38314c2f4c"
                     .into(),
-                k_mac_r2i: "9ad57873567f373ff5793940b27f76117472c0084d97550c39ef07c9c2025003"
+                k_mac_r2i: "ccf67f71dc2b558d95d173351cfbedadf20b88ca1dc8097dcd77eea42c0d4d8d"
                     .into(),
             },
         }

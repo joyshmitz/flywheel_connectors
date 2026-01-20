@@ -29,6 +29,8 @@ pub struct FcpsGoldenVector {
     pub symbol_k: u16,
     /// Symbol payload (hex) - encrypted.
     pub symbol_payload: String,
+    /// Symbol auth tag (hex, 16 bytes).
+    pub auth_tag: String,
     /// Expected encoded frame (hex).
     pub expected_frame: String,
 }
@@ -38,8 +40,36 @@ impl FcpsGoldenVector {
     #[must_use]
     #[allow(clippy::missing_const_for_fn)] // Cannot be const: Vec allocation
     pub fn load_all() -> Vec<Self> {
-        // TODO: Load from embedded CBOR/JSON files
-        vec![]
+        vec![Self {
+            description: "FCPS frame with single symbol (encrypted + raptorq)".into(),
+            object_id: "11".repeat(32),
+            zone_key_id: "22".repeat(8),
+            zone_id_hash: "33".repeat(32),
+            epoch_id: 1000,
+            sender_instance_id: 0xDEAD_BEEF,
+            frame_seq: 42,
+            symbol_size: 64,
+            symbol_index: 0x1234_5678,
+            symbol_k: 100,
+            symbol_payload: "ab".repeat(64),
+            auth_tag: "cd".repeat(16),
+            expected_frame: concat!(
+                "46435053010004040100000056000000",
+                "1111111111111111111111111111111111111111111111111111111111111111",
+                "4000",
+                "2222222222222222",
+                "3333333333333333333333333333333333333333333333333333333333333333",
+                "e803000000000000",
+                "efbeadde00000000",
+                "2a00000000000000",
+                "78563412",
+                "6400",
+                "abababababababababababababababababababababababababababababababab",
+                "abababababababababababababababababababababababababababababababab",
+                "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+            )
+            .into(),
+        }]
     }
 
     /// Verify the golden vector against the implementation.
@@ -64,6 +94,12 @@ impl FcpsGoldenVector {
             .map_err(|e| format!("invalid zone_id_hash hex: {e}"))?;
         let symbol_payload_bytes = hex::decode(&self.symbol_payload)
             .map_err(|e| format!("invalid symbol_payload hex: {e}"))?;
+        let auth_tag_bytes =
+            hex::decode(&self.auth_tag).map_err(|e| format!("invalid auth_tag hex: {e}"))?;
+        let auth_tag: [u8; 16] = auth_tag_bytes
+            .clone()
+            .try_into()
+            .map_err(|_| "auth_tag must be 16 bytes".to_string())?;
         let expected_frame_bytes = hex::decode(&self.expected_frame)
             .map_err(|e| format!("invalid expected_frame hex: {e}"))?;
 
@@ -126,18 +162,11 @@ impl FcpsGoldenVector {
             return Err("symbol k mismatch".into());
         }
 
-        // Note: FcpsFrame logic expects payload+tag in `data` or separated?
-        // In `fcps.rs`: `data` is the payload. `auth_tag` is separate.
-        // If golden vector `symbol_payload` includes tag, we need to handle that.
-        // Assuming `symbol_payload` is just the encrypted data part for now.
-        // But wait, `SymbolRecord` has `auth_tag: [u8; 16]`.
-        // The golden vector should probably provide tag separately or `symbol_payload` includes it?
-        // Let's assume `symbol_payload` is ONLY the data part, and we ignore tag verification for now
-        // OR the vector should have `auth_tag`.
-        // Given I'm defining the struct, I'll add `auth_tag`.
-
         if symbol.data != symbol_payload_bytes {
             return Err("symbol data mismatch".into());
+        }
+        if symbol.auth_tag != auth_tag {
+            return Err("symbol auth tag mismatch".into());
         }
 
         // 4. Roundtrip check
@@ -147,7 +176,7 @@ impl FcpsGoldenVector {
                 esi: self.symbol_index,
                 k: self.symbol_k,
                 data: symbol_payload_bytes,
-                auth_tag: symbol.auth_tag, // Reuse tag from decode as we don't have it in vector yet
+                auth_tag,
             }],
         };
 
@@ -166,7 +195,6 @@ mod tests {
     #[test]
     fn golden_vectors_parseable() {
         let vectors = FcpsGoldenVector::load_all();
-        // Currently empty, will be populated by conformance bead
-        assert!(vectors.is_empty(), "vectors not yet populated");
+        assert!(!vectors.is_empty(), "vectors should be populated");
     }
 }

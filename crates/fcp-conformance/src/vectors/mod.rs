@@ -5,4 +5,5 @@
 
 pub mod fcpc;
 pub mod fcps;
+pub mod core;
 pub mod session;

@@ -13,6 +13,7 @@
 //! - Session handshake transcripts
 //! - Capability token `COSE_Sign1` encoding
 //! - `ObjectId` keyed derivation
+//! - Canonical CBOR payloads (schema hash prefix + CBOR bytes)
 //!
 //! These vectors are normative: if the implementation doesn't produce
 //! these exact bytes, it's non-compliant.
@@ -27,6 +28,7 @@ pub mod vectors;
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;
 pub use vectors::session::SessionGoldenVector;
+pub use vectors::core::{CanonicalPayloadGoldenVector, ObjectIdGoldenVector};
 
 // Re-export interop types for convenience
 pub use interop::{
