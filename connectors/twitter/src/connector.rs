@@ -6,10 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use fcp_core::{
-    BaseConnector, CapabilityGrant, CapabilityVerifier, FcpError, Introspection, OperationInfo,
-    SafetyTier,
-};
+use fcp_core::{BaseConnector, ConnectorId, FcpError};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, instrument};
@@ -41,9 +38,6 @@ pub struct TwitterConnector {
     /// Active stream handle
     stream_active: Arc<RwLock<bool>>,
 
-    /// Capability verifier
-    capability_verifier: Option<Arc<CapabilityVerifier>>,
-
     /// Stream subscriber count
     stream_subscribers: Arc<AtomicU64>,
 }
@@ -55,13 +49,12 @@ impl TwitterConnector {
         let (event_tx, _) = broadcast::channel(256);
 
         Self {
-            base: BaseConnector::new("twitter", env!("CARGO_PKG_VERSION")),
+            base: BaseConnector::new(ConnectorId::from_static("twitter:social:v1")),
             config: None,
             client: None,
             authenticated_user: None,
             event_tx,
             stream_active: Arc::new(RwLock::new(false)),
-            capability_verifier: None,
             stream_subscribers: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -71,47 +64,51 @@ impl TwitterConnector {
     pub async fn handle_configure(&mut self, params: Value) -> Result<Value, FcpError> {
         info!("Configuring Twitter connector");
 
-        let config: TwitterConfig =
-            serde_json::from_value(params).map_err(|e| FcpError::ConfigurationError {
-                code: 3001,
+        let config: TwitterConfig = serde_json::from_value(params).map_err(|e| {
+            FcpError::InvalidRequest {
+                code: 1001,
                 message: format!("Invalid configuration: {e}"),
-            })?;
+            }
+        })?;
 
         // Validate required fields
         if config.consumer_key.is_empty() {
-            return Err(FcpError::ConfigurationError {
-                code: 3002,
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
                 message: "consumer_key is required".into(),
             });
         }
         if config.consumer_secret.is_empty() {
-            return Err(FcpError::ConfigurationError {
-                code: 3002,
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
                 message: "consumer_secret is required".into(),
             });
         }
         if config.access_token.is_empty() {
-            return Err(FcpError::ConfigurationError {
-                code: 3002,
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
                 message: "access_token is required".into(),
             });
         }
         if config.access_token_secret.is_empty() {
-            return Err(FcpError::ConfigurationError {
-                code: 3002,
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
                 message: "access_token_secret is required".into(),
             });
         }
 
         // Create API client
-        let client =
-            TwitterApiClient::new(&config).map_err(|e| FcpError::ConfigurationError {
-                code: 3003,
-                message: format!("Failed to create API client: {e}"),
-            })?;
+        let client = TwitterApiClient::new(&config).map_err(|e| FcpError::External {
+            service: "twitter".into(),
+            message: format!("Failed to create API client: {e}"),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        })?;
 
         self.config = Some(config);
         self.client = Some(Arc::new(client));
+        self.base.set_configured(true);
 
         Ok(json!({
             "status": "configured"
@@ -119,8 +116,8 @@ impl TwitterConnector {
     }
 
     /// Handle the handshake method.
-    #[instrument(skip(self, params))]
-    pub async fn handle_handshake(&mut self, params: Value) -> Result<Value, FcpError> {
+    #[instrument(skip(self, _params))]
+    pub async fn handle_handshake(&mut self, _params: Value) -> Result<Value, FcpError> {
         info!("Performing Twitter connector handshake");
 
         let client = self.require_client()?;
@@ -128,22 +125,15 @@ impl TwitterConnector {
         // Get authenticated user to verify credentials
         let response = client.get_me().await.map_err(|e| e.to_fcp_error())?;
 
-        let user = response.data.ok_or_else(|| FcpError::Authentication {
-            code: 4001,
+        let user = response.data.ok_or_else(|| FcpError::Unauthorized {
+            code: 2001,
             message: "Failed to get authenticated user".into(),
         })?;
 
         info!(username = %user.username, user_id = %user.id, "Authenticated as user");
         self.authenticated_user = Some(user.clone());
 
-        // Set up capability verifier if provided
-        if let Some(capabilities) = params.get("capabilities") {
-            if let Ok(caps) = serde_json::from_value::<Vec<ConnectorCapability>>(capabilities.clone()) {
-                self.capability_verifier = Some(Arc::new(CapabilityVerifier::new(caps)));
-            }
-        }
-
-        self.base.set_ready(true);
+        self.base.set_handshaken(true);
 
         Ok(json!({
             "status": "ready",
@@ -159,14 +149,14 @@ impl TwitterConnector {
     #[instrument(skip(self))]
     pub async fn handle_health(&self) -> Result<Value, FcpError> {
         let metrics = self.base.metrics();
+        let is_ready = self.base.check_ready().is_ok();
 
         Ok(json!({
-            "status": if self.base.is_ready() { "healthy" } else { "not_ready" },
+            "status": if is_ready { "healthy" } else { "not_ready" },
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_success": metrics.requests_success,
-                "requests_failed": metrics.requests_failed,
-                "latency_avg_ms": metrics.latency_avg_ms
+                "requests_error": metrics.requests_error
             },
             "stream_active": *self.stream_active.read().await,
             "stream_subscribers": self.stream_subscribers.load(Ordering::Relaxed)
@@ -176,112 +166,38 @@ impl TwitterConnector {
     /// Handle the introspect method.
     #[instrument(skip(self))]
     pub async fn handle_introspect(&self) -> Result<Value, FcpError> {
-        let info = IntrospectionInfo {
-            name: "fcp-twitter".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            description: "X/Twitter API connector for the Flywheel Connector Protocol".into(),
-            archetypes: vec![
-                "operational".into(),
-                "streaming".into(),
-                "bidirectional".into(),
+        // Return introspection data as JSON - the proper Introspection struct
+        // requires many fields that we can't easily populate here
+        Ok(json!({
+            "connector": {
+                "id": "twitter:social:v1",
+                "name": "fcp-twitter",
+                "version": env!("CARGO_PKG_VERSION"),
+                "description": "X/Twitter API connector for the Flywheel Connector Protocol"
+            },
+            "archetypes": ["operational", "streaming", "bidirectional"],
+            "operations": [
+                {"id": "twitter.user.me", "summary": "Get the authenticated user", "risk": "low"},
+                {"id": "twitter.user.get", "summary": "Get a user by ID", "risk": "low"},
+                {"id": "twitter.user.by_username", "summary": "Get a user by username", "risk": "low"},
+                {"id": "twitter.tweet.get", "summary": "Get a tweet by ID", "risk": "low"},
+                {"id": "twitter.tweet.search", "summary": "Search recent tweets", "risk": "low"},
+                {"id": "twitter.user.timeline", "summary": "Get a user's tweets", "risk": "low"},
+                {"id": "twitter.user.mentions", "summary": "Get mentions", "risk": "low"},
+                {"id": "twitter.tweet.create", "summary": "Create a new tweet", "risk": "high"},
+                {"id": "twitter.tweet.reply", "summary": "Reply to a tweet", "risk": "high"},
+                {"id": "twitter.tweet.delete", "summary": "Delete a tweet", "risk": "high"},
+                {"id": "twitter.stream.rules.list", "summary": "List stream filter rules", "risk": "low"},
+                {"id": "twitter.stream.rules.add", "summary": "Add stream filter rules", "risk": "high"},
+                {"id": "twitter.stream.rules.delete", "summary": "Delete stream filter rules", "risk": "high"}
             ],
-            state_model: "singleton_writer".into(),
-            operations: vec![
-                // Read operations (Safe)
-                OperationInfo {
-                    name: "twitter.user.me".into(),
-                    description: "Get the authenticated user".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.account".into()),
-                },
-                OperationInfo {
-                    name: "twitter.user.get".into(),
-                    description: "Get a user by ID".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.public".into()),
-                },
-                OperationInfo {
-                    name: "twitter.user.by_username".into(),
-                    description: "Get a user by username".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.public".into()),
-                },
-                OperationInfo {
-                    name: "twitter.tweet.get".into(),
-                    description: "Get a tweet by ID".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.public".into()),
-                },
-                OperationInfo {
-                    name: "twitter.tweet.search".into(),
-                    description: "Search recent tweets".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.public".into()),
-                },
-                OperationInfo {
-                    name: "twitter.user.timeline".into(),
-                    description: "Get a user's tweets".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.public".into()),
-                },
-                OperationInfo {
-                    name: "twitter.user.mentions".into(),
-                    description: "Get the authenticated user's mentions".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.read.account".into()),
-                },
-                // Write operations (Dangerous)
-                OperationInfo {
-                    name: "twitter.tweet.create".into(),
-                    description: "Create a new tweet".into(),
-                    safety_tier: SafetyTier::Dangerous,
-                    required_capability: Some("twitter.write.tweets".into()),
-                },
-                OperationInfo {
-                    name: "twitter.tweet.reply".into(),
-                    description: "Reply to a tweet".into(),
-                    safety_tier: SafetyTier::Dangerous,
-                    required_capability: Some("twitter.write.tweets".into()),
-                },
-                OperationInfo {
-                    name: "twitter.tweet.delete".into(),
-                    description: "Delete a tweet".into(),
-                    safety_tier: SafetyTier::Dangerous,
-                    required_capability: Some("twitter.write.tweets".into()),
-                },
-                // Stream operations (Safe for read, Dangerous for rules)
-                OperationInfo {
-                    name: "twitter.stream.rules.list".into(),
-                    description: "List current stream filter rules".into(),
-                    safety_tier: SafetyTier::Safe,
-                    required_capability: Some("twitter.stream.read".into()),
-                },
-                OperationInfo {
-                    name: "twitter.stream.rules.add".into(),
-                    description: "Add stream filter rules".into(),
-                    safety_tier: SafetyTier::Dangerous,
-                    required_capability: Some("twitter.stream.rules".into()),
-                },
-                OperationInfo {
-                    name: "twitter.stream.rules.delete".into(),
-                    description: "Delete stream filter rules".into(),
-                    safety_tier: SafetyTier::Dangerous,
-                    required_capability: Some("twitter.stream.rules".into()),
-                },
-            ],
-            network_constraints: json!({
-                "host_allow": [
-                    "api.twitter.com",
-                    "upload.twitter.com",
-                    "stream.twitter.com"
-                ],
+            "network_constraints": {
+                "host_allow": ["api.twitter.com", "upload.twitter.com", "stream.twitter.com"],
                 "port_allow": [443],
                 "deny_localhost": true,
                 "deny_private_ranges": true
-            }),
-        };
-
-        Ok(serde_json::to_value(info).unwrap_or_default())
+            }
+        }))
     }
 
     /// Handle the invoke method.
@@ -298,18 +214,11 @@ impl TwitterConnector {
         let args = params.get("args").cloned().unwrap_or(json!({}));
 
         debug!(operation = %operation, "Invoking Twitter operation");
-        self.base.increment_requests();
 
-        let start = std::time::Instant::now();
         let result = self.dispatch_operation(operation, args).await;
-        let latency_ms = start.elapsed().as_millis() as u64;
 
-        self.base.record_latency(latency_ms);
-
-        match &result {
-            Ok(_) => self.base.increment_success(),
-            Err(_) => self.base.increment_failed(),
-        }
+        // Record request success/failure
+        self.base.record_request(result.is_ok());
 
         result
     }
@@ -329,15 +238,7 @@ impl TwitterConnector {
             });
         }
 
-        // Check capability
-        if let Some(verifier) = &self.capability_verifier {
-            verifier.require_capability("twitter.stream.read")?;
-        }
-
-        let config = self.config.as_ref().ok_or_else(|| FcpError::ConfigurationError {
-            code: 3001,
-            message: "Connector not configured".into(),
-        })?;
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
 
         // Start stream if not already active
         let mut stream_active = self.stream_active.write().await;
@@ -412,7 +313,7 @@ impl TwitterConnector {
         let mut stream_active = self.stream_active.write().await;
         *stream_active = false;
 
-        self.base.set_ready(false);
+        self.base.set_handshaken(false);
 
         Ok(json!({
             "status": "shutdown"
@@ -424,17 +325,7 @@ impl TwitterConnector {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn require_client(&self) -> Result<Arc<TwitterApiClient>, FcpError> {
-        self.client.clone().ok_or_else(|| FcpError::ConfigurationError {
-            code: 3001,
-            message: "Connector not configured".into(),
-        })
-    }
-
-    fn check_capability(&self, capability: &str) -> Result<(), FcpError> {
-        if let Some(verifier) = &self.capability_verifier {
-            verifier.require_capability(capability)?;
-        }
-        Ok(())
+        self.client.clone().ok_or(FcpError::NotConfigured)
     }
 
     async fn dispatch_operation(&self, operation: &str, args: Value) -> Result<Value, FcpError> {
@@ -472,7 +363,6 @@ impl TwitterConnector {
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn op_user_me(&self) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.account")?;
         let client = self.require_client()?;
 
         let response = client.get_me().await.map_err(|e| e.to_fcp_error())?;
@@ -484,7 +374,6 @@ impl TwitterConnector {
     }
 
     async fn op_user_get(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.public")?;
         let client = self.require_client()?;
 
         let user_id = args
@@ -504,7 +393,6 @@ impl TwitterConnector {
     }
 
     async fn op_user_by_username(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.public")?;
         let client = self.require_client()?;
 
         let username = args
@@ -534,7 +422,6 @@ impl TwitterConnector {
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn op_tweet_get(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.public")?;
         let client = self.require_client()?;
 
         let tweet_id = args
@@ -554,7 +441,6 @@ impl TwitterConnector {
     }
 
     async fn op_tweet_search(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.public")?;
         let client = self.require_client()?;
 
         let query = args
@@ -584,7 +470,6 @@ impl TwitterConnector {
     }
 
     async fn op_tweet_create(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.write.tweets")?;
         let client = self.require_client()?;
 
         let text = args
@@ -619,7 +504,6 @@ impl TwitterConnector {
     }
 
     async fn op_tweet_reply(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.write.tweets")?;
         let client = self.require_client()?;
 
         let text = args
@@ -666,7 +550,6 @@ impl TwitterConnector {
     }
 
     async fn op_tweet_delete(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.write.tweets")?;
         let client = self.require_client()?;
 
         let tweet_id = args
@@ -689,7 +572,6 @@ impl TwitterConnector {
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn op_user_timeline(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.public")?;
         let client = self.require_client()?;
 
         let user_id = args
@@ -716,7 +598,6 @@ impl TwitterConnector {
     }
 
     async fn op_user_mentions(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.read.account")?;
         let client = self.require_client()?;
 
         // Use authenticated user ID if not provided
@@ -751,7 +632,6 @@ impl TwitterConnector {
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn op_stream_rules_list(&self) -> Result<Value, FcpError> {
-        self.check_capability("twitter.stream.read")?;
         let client = self.require_client()?;
 
         let response = client.get_stream_rules().await.map_err(|e| e.to_fcp_error())?;
@@ -763,7 +643,6 @@ impl TwitterConnector {
     }
 
     async fn op_stream_rules_add(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.stream.rules")?;
         let client = self.require_client()?;
 
         let rules_value = args.get("rules").ok_or_else(|| FcpError::InvalidRequest {
@@ -787,7 +666,6 @@ impl TwitterConnector {
     }
 
     async fn op_stream_rules_delete(&self, args: Value) -> Result<Value, FcpError> {
-        self.check_capability("twitter.stream.rules")?;
         let client = self.require_client()?;
 
         let ids_value = args.get("ids").ok_or_else(|| FcpError::InvalidRequest {

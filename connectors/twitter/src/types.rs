@@ -115,7 +115,7 @@ pub struct TwitterApiError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Twitter tweet object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Tweet {
     /// Tweet ID
     pub id: String,
@@ -270,7 +270,7 @@ pub struct ContextAnnotationEntity {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Twitter user object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct User {
     /// User ID
     pub id: String,
