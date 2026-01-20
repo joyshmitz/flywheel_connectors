@@ -871,11 +871,15 @@ Round 13+:   Converging on stable design
 
 ### Setup
 
-```bash
-# Install APR
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/automated_plan_reviser_pro/main/install.sh" | bash
+Install APR:
 
-# Install Oracle (GPT Pro browser automation)
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/automated_plan_reviser_pro/main/install.sh" | bash
+```
+
+Install Oracle (GPT Pro browser automation):
+
+```bash
 npm install -g @steipete/oracle
 ```
 
