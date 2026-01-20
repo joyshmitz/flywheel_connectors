@@ -160,16 +160,31 @@ pub fn hpke_seal(
     plaintext: &[u8],
     aad: &Fcp2Aad,
 ) -> CryptoResult<HpkeSealedBox> {
+    let mut rng = rand::rngs::OsRng;
+    hpke_seal_with_rng(recipient_pk, plaintext, aad, &mut rng)
+}
+
+/// Seal (encrypt) data to a recipient's public key using HPKE with caller-provided RNG.
+///
+/// This is intended for deterministic test vectors and fuzz harnesses.
+///
+/// # Errors
+///
+/// Returns an error if HPKE operations fail.
+pub fn hpke_seal_with_rng<R: rand::CryptoRng + rand::RngCore>(
+    recipient_pk: &X25519PublicKey,
+    plaintext: &[u8],
+    aad: &Fcp2Aad,
+    rng: &mut R,
+) -> CryptoResult<HpkeSealedBox> {
     let pk = <X25519HkdfSha256 as Kem>::PublicKey::from_bytes(&recipient_pk.to_bytes())
         .map_err(|e| CryptoError::HpkeFailed(format!("invalid recipient public key: {e}")))?;
-
-    let mut rng = rand::rngs::OsRng;
     let (enc, mut sender_ctx) = hpke::setup_sender::<
         ChaCha20Poly1305Aead,
         HkdfSha256,
         X25519HkdfSha256,
         _,
-    >(&OpModeS::Base, &pk, b"FCP2-HPKE", &mut rng)
+    >(&OpModeS::Base, &pk, b"FCP2-HPKE", rng)
     .map_err(|e| CryptoError::HpkeFailed(format!("setup_sender failed: {e}")))?;
 
     let aad_bytes = aad.encode();
