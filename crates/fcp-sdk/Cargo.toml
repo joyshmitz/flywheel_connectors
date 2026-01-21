@@ -12,6 +12,8 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+fcp-core = { path = "../fcp-core" }
+fcp-manifest = { path = "../fcp-manifest" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

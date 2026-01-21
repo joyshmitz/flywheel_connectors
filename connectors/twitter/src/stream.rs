@@ -36,6 +36,7 @@ pub enum StreamEvent {
 }
 
 /// Twitter filtered stream connection.
+#[derive(Debug)]
 pub struct FilteredStream {
     config: TwitterConfig,
     bearer_token: String,
