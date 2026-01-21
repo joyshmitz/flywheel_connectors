@@ -57,3 +57,9 @@ docs/fcp_additional_connectors_prioritized.md
 # apr runtime locks
 .apr/.locks/
 fuzz/target/
+
+# NTM agent coordination
+.ntm/
+
+# Compiled binaries
+a.out
