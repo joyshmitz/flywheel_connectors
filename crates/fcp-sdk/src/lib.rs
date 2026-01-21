@@ -66,11 +66,13 @@ pub use fcp_core::{
     BaseConnector,
     Bidirectional,
     // Capability tokens
+    CapabilityGrant,
     CapabilityToken,
 
     // Identifiers
     ConnectorId,
     ConnectorMetrics,
+    CorrelationId,
     // Cost and availability
     CostEstimate,
     CurrencyCost,
@@ -78,10 +80,10 @@ pub use fcp_core::{
     ErrorCategory,
     // Events
     EventAck,
+    EventCaps,
     EventData,
     EventEnvelope,
     EventNack,
-
     EventStream,
     FcpConnector,
     FcpError,
@@ -102,16 +104,19 @@ pub use fcp_core::{
     InvokeStatus,
     LivenessResponse,
     ObjectId,
+    OperationId,
     Polling,
+    Principal,
     // Provenance
     Provenance,
     ProvenanceStep,
     RateLimitStatus,
     ReadinessResponse,
-
+    ReplayBufferInfo,
+    RequestId,
     RequestResponse,
     ResourceAvailability,
-
+    SessionId,
     ShutdownAck,
     ShutdownRequest,
     SimulateRequest,
@@ -119,15 +124,14 @@ pub use fcp_core::{
     Streaming,
     SubscribeRequest,
     SubscribeResponse,
+    SubscribeResult,
     TaintFlag,
     TaintLevel,
-
     // Observability
     TraceContext,
+    TrustLevel,
     UnsubscribeRequest,
-
     Webhook,
-
     ZoneId,
 
     // Core connector infrastructure
