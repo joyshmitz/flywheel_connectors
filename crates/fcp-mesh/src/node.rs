@@ -399,6 +399,11 @@ impl MeshNode {
     /// Enforce capability, holder proof, and revocation checks for an invoke request.
     ///
     /// Returns the verified capability claims on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeEnforcementError` if idempotency validation, capability
+    /// verification, holder proof checks, or revocation checks fail.
     pub fn enforce_invoke_request<F>(
         &self,
         request: &InvokeRequest,
@@ -461,6 +466,10 @@ impl MeshNode {
     }
 
     /// Validate that a receipt correctly references its intent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeEnforcementError::ReceiptValidation` if binding fails.
     pub fn validate_receipt_binding(
         &self,
         receipt: &OperationReceipt,
@@ -637,6 +646,10 @@ impl MeshNode {
     }
 
     /// Encode a control-plane envelope for degraded transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError::DegradedTransport` if encoding fails.
     pub fn encode_control_plane(
         &mut self,
         envelope: &ControlPlaneEnvelope,
@@ -646,6 +659,10 @@ impl MeshNode {
     }
 
     /// Decode a control-plane frame in degraded mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError::DegradedTransport` if decoding fails.
     pub fn decode_control_plane(
         &mut self,
         frame: &fcp_protocol::FcpsFrame,
@@ -658,6 +675,11 @@ impl MeshNode {
     }
 
     /// Decode a control-plane frame and enforce retention via handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError` if decoding fails or the handler rejects the
+    /// envelope.
     pub fn process_control_plane_frame(
         &mut self,
         frame: &fcp_protocol::FcpsFrame,

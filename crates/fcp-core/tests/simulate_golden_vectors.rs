@@ -80,6 +80,7 @@ struct SimulateResponseVector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct CostEstimateVector {
     description: String,
     has_api_credits: bool,
@@ -94,6 +95,7 @@ struct CostEstimateVector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct ResourceAvailabilityVector {
     description: String,
     available: bool,
@@ -111,7 +113,7 @@ struct ResourceAvailabilityVector {
 mod schema_validation {
     use super::*;
 
-    /// Create a minimal valid SimulateRequest for testing.
+    /// Create a minimal valid `SimulateRequest` for testing.
     fn make_valid_request() -> SimulateRequest {
         SimulateRequest::new(
             ConnectorId::new("vendor", "test", "v1").unwrap(),

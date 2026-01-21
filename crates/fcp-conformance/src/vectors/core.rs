@@ -1,7 +1,7 @@
-//! Core primitive golden vectors (canonical CBOR + ObjectId derivation).
+//! Core primitive golden vectors (canonical CBOR + `ObjectId` derivation).
 //!
 //! These vectors lock down byte-level determinism for schema hashing, canonical
-//! serialization, and ObjectId derivation.
+//! serialization, and `ObjectId` derivation.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ pub struct CanonicalPayloadGoldenVector {
     pub description: String,
     /// Schema namespace (e.g., "fcp.test").
     pub schema_namespace: String,
-    /// Schema name (e.g., "GoldenStruct").
+    /// Schema name (e.g., `GoldenStruct`).
     pub schema_name: String,
     /// Schema version (major).
     pub schema_version_major: u64,
@@ -118,7 +118,7 @@ impl CanonicalPayloadGoldenVector {
     }
 }
 
-/// Golden vector for keyed ObjectId derivation.
+/// Golden vector for keyed `ObjectId` derivation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectIdGoldenVector {
     /// Human-readable description of the test case.
@@ -135,16 +135,16 @@ pub struct ObjectIdGoldenVector {
     pub schema_version_minor: u64,
     /// Schema version (patch).
     pub schema_version_patch: u64,
-    /// ObjectId key (hex, 32 bytes).
+    /// `ObjectId` key (hex, 32 bytes).
     pub key: String,
     /// Content bytes (hex).
     pub content: String,
-    /// Expected ObjectId (hex, 32 bytes).
+    /// Expected `ObjectId` (hex, 32 bytes).
     pub expected_object_id: String,
 }
 
 impl ObjectIdGoldenVector {
-    /// Load all ObjectId golden vectors.
+    /// Load all `ObjectId` golden vectors.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)] // Cannot be const: Vec allocation
     pub fn load_all() -> Vec<Self> {

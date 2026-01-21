@@ -241,7 +241,7 @@ impl DegradedModeEncoder {
         &mut self,
         envelope: &ControlPlaneEnvelope,
         epoch_id: u64,
-        source_id: TailscaleNodeId,
+        source_id: &TailscaleNodeId,
         timestamp: u64,
         signing_key: &Ed25519SigningKey,
     ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
@@ -642,10 +642,10 @@ mod tests {
             }
         }
 
-        let decoded = result.expect("should have decoded");
-        assert_eq!(decoded.payload, envelope.payload);
-        assert_eq!(decoded.schema_hash, envelope.schema_hash);
-        assert_eq!(decoded.object_id, envelope.object_id);
+        let decoded_envelope = result.expect("should have decoded");
+        assert_eq!(decoded_envelope.payload, envelope.payload);
+        assert_eq!(decoded_envelope.schema_hash, envelope.schema_hash);
+        assert_eq!(decoded_envelope.object_id, envelope.object_id);
     }
 
     #[test]
@@ -724,7 +724,7 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-test");
 
         let signed_frames = encoder
-            .encode_signed(&envelope, 3000, source_id, 1_704_067_200, &signing_key)
+            .encode_signed(&envelope, 3000, &source_id, 1_704_067_200, &signing_key)
             .expect("encode signed");
 
         let mut result = None;
@@ -743,8 +743,8 @@ mod tests {
             }
         }
 
-        let decoded = result.expect("should have decoded");
-        assert_eq!(decoded.payload, envelope.payload);
+        let decoded_envelope = result.expect("should have decoded");
+        assert_eq!(decoded_envelope.payload, envelope.payload);
     }
 
     #[test]
@@ -761,7 +761,7 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-wrong");
 
         let signed_frames = encoder
-            .encode_signed(&envelope, 4000, source_id, 1_704_067_200, &signing_key)
+            .encode_signed(&envelope, 4000, &source_id, 1_704_067_200, &signing_key)
             .expect("encode");
 
         let result = decoder.process_signed_frame(

@@ -9,6 +9,10 @@ use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
 use fcp_tailscale::{NodeId, NodeKeyAttestation, NodeKeys, MeshIdentity};
 use semver::Version;
 
+fn now_ts_u64() -> u64 {
+    Utc::now().timestamp().try_into().unwrap_or(0)
+}
+
 fn create_test_keys() -> (
     Ed25519SigningKey,
     fcp_crypto::Ed25519VerifyingKey,
@@ -39,7 +43,7 @@ fn create_header(zone_id: ZoneId, schema: SchemaId) -> ObjectHeader {
     ObjectHeader {
         schema,
         zone_id: zone_id.clone(),
-        created_at: Utc::now().timestamp() as u64,
+        created_at: now_ts_u64(),
         provenance: Provenance::new(zone_id),
         refs: vec![],
         foreign_refs: vec![],
@@ -97,11 +101,14 @@ fn test_enrollment_lifecycle_with_revocation() {
     .expect("Failed to create enrollment request");
 
     // 3. Owner Approves Request
-    let initial_manifest = create_empty_manifest(zone_id.clone(), Utc::now().timestamp() as u64, &owner_key);
+    let initial_manifest = create_empty_manifest(zone_id.clone(), now_ts_u64(), &owner_key);
+    let approval_header_zone_id = zone_id.clone();
+    let attestation_header_zone_id = zone_id.clone();
+    let revocation_header_zone_id = zone_id.clone();
     let approval = DeviceEnrollmentApproval::sign(
         &owner_key,
         &request,
-        zone_id.clone(),
+        zone_id,
         vec!["tag:fcp-work".to_string()],
         initial_manifest,
         24,
@@ -110,7 +117,7 @@ fn test_enrollment_lifecycle_with_revocation() {
 
     // 4. Store Approval as Mesh Object to get ObjectId
     let approval_schema = SchemaId::new("fcp.core", "DeviceEnrollmentApproval", Version::new(1, 0, 0));
-    let approval_header = create_header(zone_id.clone(), approval_schema);
+    let approval_header = create_header(approval_header_zone_id, approval_schema);
     let approval_body = fcp_cbor::to_canonical_cbor(&approval).expect("Failed to serialize approval");
     
     let approval_id = StoredObject::derive_id(&approval_header, &approval_body, &object_id_key)
@@ -128,7 +135,7 @@ fn test_enrollment_lifecycle_with_revocation() {
 
     // 6. Store Attestation as Mesh Object
     let attestation_schema = SchemaId::new("fcp.tailscale", "NodeKeyAttestation", Version::new(1, 0, 0));
-    let attestation_header = create_header(zone_id.clone(), attestation_schema);
+    let attestation_header = create_header(attestation_header_zone_id, attestation_schema);
     let attestation_body = fcp_cbor::to_canonical_cbor(&attestation).expect("Failed to serialize attestation");
 
     let attestation_id = StoredObject::derive_id(&attestation_header, &attestation_body, &object_id_key)
@@ -144,13 +151,13 @@ fn test_enrollment_lifecycle_with_revocation() {
     // 8. Revoke the Attestation
     let revocation = RevocationObject {
         header: create_header(
-            zone_id.clone(), 
-            SchemaId::new("fcp.core", "RevocationObject", Version::new(1, 0, 0))
+            revocation_header_zone_id,
+            SchemaId::new("fcp.core", "RevocationObject", Version::new(1, 0, 0)),
         ),
         revoked: vec![attestation_id],
         scope: RevocationScope::NodeAttestation,
         reason: "Device compromised".to_string(),
-        effective_at: Utc::now().timestamp() as u64,
+        effective_at: now_ts_u64(),
         expires_at: None,
         signature: [0u8; 64],
     };
@@ -164,22 +171,19 @@ fn test_enrollment_lifecycle_with_revocation() {
     // 10. Verify Removal Workflow Implications
     // We verify the attestation signature first
     let identity = MeshIdentity::new(
-        device_id.clone(),
+        device_id,
         "test-host".to_string(),
         vec![],
         vec![],
         owner_key.verifying_key(),
         node_keys,
-    ).with_attestation(attestation.clone());
+    ).with_attestation(attestation);
 
     assert!(identity.verify_attestation().is_ok());
 
     // Then we check revocation against the registry
-    let is_valid = if let Ok(_) = identity.verify_attestation() {
-        !registry.is_revoked(&attestation_id)
-    } else {
-        false
-    };
+    let attestation_ok = identity.verify_attestation().is_ok();
+    let is_valid = attestation_ok && !registry.is_revoked(&attestation_id);
 
     assert!(!is_valid, "Identity should be invalid because attestation is revoked");
 }

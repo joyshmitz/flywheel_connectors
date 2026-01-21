@@ -601,7 +601,9 @@ impl ExecutionPlanner {
 
         if local_count > 0 {
             // Additional bonus beyond what fitness already gives
-            let bonus = DATA_LOCALITY_BONUS * (local_count as f64) / 2.0;
+            let local_count_f64 =
+                f64::from(u32::try_from(local_count).unwrap_or(u32::MAX));
+            let bonus = DATA_LOCALITY_BONUS * local_count_f64 / 2.0;
             candidate.adjust(ScoreAdjustment::bonus(
                 AdjustmentFactor::DataLocality,
                 bonus,
@@ -661,10 +663,11 @@ fn version_gte(installed: &str, required: &str) -> bool {
 
     for (i, r) in req.iter().enumerate() {
         let i_val = inst.get(i).copied().unwrap_or(0);
-        match i_val.cmp(r) {
-            Ordering::Greater => return true,
-            Ordering::Less => return false,
-            Ordering::Equal => continue,
+        if i_val > *r {
+            return true;
+        }
+        if i_val < *r {
+            return false;
         }
     }
     true
@@ -693,7 +696,7 @@ impl ExecutionPlan {
     /// Create an execution plan from candidates.
     #[must_use]
     pub fn from_candidates(
-        candidates: Vec<CandidateNode>,
+        candidates: &[CandidateNode],
         total_nodes: usize,
         timestamp: u64,
     ) -> Self {
@@ -1005,7 +1008,7 @@ mod tests {
         let context = PlannerContext::new(test_connector_id());
 
         let candidates = planner.plan(&input, &context);
-        let plan = ExecutionPlan::from_candidates(candidates, nodes.len(), 1000);
+        let plan = ExecutionPlan::from_candidates(&candidates, nodes.len(), 1000);
 
         assert!(plan.has_target());
         assert_eq!(plan.alternatives.len(), 2);

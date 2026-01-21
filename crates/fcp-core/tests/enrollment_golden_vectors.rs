@@ -9,7 +9,7 @@
 //! 2. **Adversarial Tests**: Attack scenario simulations
 //!    - Replay old enrollment approval
 //!    - Forge enrollment without owner signature
-//!    - Impersonate node_id during enrollment
+//!    - Impersonate `node_id` during enrollment
 //!    - Use keys from removed device
 //!    - Tamper with enrollment request
 //! 3. **Enrollment Flow**: End-to-end enrollment workflow validation
@@ -53,6 +53,10 @@ fn log_test_event(test_name: &str, event: &str, details: &serde_json::Value) {
     println!("{}", serde_json::to_string(&log).unwrap());
 }
 
+fn now_ts_u64() -> u64 {
+    Utc::now().timestamp().try_into().unwrap_or(0)
+}
+
 /// Create test keys for enrollment scenarios.
 fn create_test_keys() -> (
     Ed25519SigningKey,               // device signing secret
@@ -80,7 +84,7 @@ fn create_test_manifest(_owner_key: &Ed25519SigningKey) -> ZoneKeyManifest {
     use rand::RngCore;
 
     let zone_id = ZoneId::work();
-    let valid_from = Utc::now().timestamp() as u64;
+    let valid_from = now_ts_u64();
 
     let mut zone_key_id_bytes = [0u8; 8];
     rand::rngs::OsRng.fill_bytes(&mut zone_key_id_bytes);
@@ -208,9 +212,9 @@ fn generate_enrollment_request_vectors() {
 
     let request_with_meta = DeviceEnrollmentRequest::new(
         "device-002",
-        signing_key.clone(),
-        encryption_key.clone(),
-        issuance_key.clone(),
+        signing_key,
+        encryption_key,
+        issuance_key,
         metadata,
         &signing_secret,
     )
@@ -311,7 +315,7 @@ fn generate_enrollment_approval_vectors() {
             "fcp:zone:owner".into(),
             "fcp:role:admin".into(),
         ],
-        manifest.clone(),
+        manifest,
         720, // 30 days
     )
     .expect("approval should succeed");
@@ -393,8 +397,7 @@ fn generate_key_rotation_vectors() {
 
         vectors.push(KeyRotationVector {
             description: format!(
-                "{} key aged {} hours (rotation: {} hours)",
-                key_type_name, age_hours, rotation_hours
+                "{key_type_name} key aged {age_hours} hours (rotation: {rotation_hours} hours)"
             ),
             key_type: key_type_name.to_string(),
             rotation_hours,
@@ -453,7 +456,7 @@ fn generate_enrollment_status_vectors() {
     let vectors: Vec<EnrollmentStatusVector> = statuses
         .iter()
         .map(|status| EnrollmentStatusVector {
-            description: format!("Enrollment status: {}", status),
+            description: format!("Enrollment status: {status}"),
             status: status.to_string(),
             is_enrolled: status.is_enrolled(),
             is_renewable: status.is_renewable(),
@@ -624,14 +627,14 @@ mod adversarial {
                     }),
                 );
             }
-            Err(e) => panic!("Unexpected error type: {:?}", e),
+            Err(e) => panic!("Unexpected error type: {e:?}"),
             Ok(()) => panic!("Forged approval should not verify"),
         }
     }
 
-    /// Attack: Impersonate node_id during enrollment.
+    /// Attack: Impersonate `node_id` during enrollment.
     ///
-    /// Scenario: Attacker tries to enroll with a different device_id than
+    /// Scenario: Attacker tries to enroll with a different `device_id` than
     /// their actual device, attempting to steal an identity.
     #[test]
     fn attack_impersonate_device_id() {
@@ -721,7 +724,7 @@ mod adversarial {
             &request,
             ZoneId::work(),
             vec!["fcp:zone:work".into()],
-            manifest.clone(),
+            manifest,
             168,
         )
         .expect("approval should succeed");
@@ -742,7 +745,7 @@ mod adversarial {
                     semver::Version::new(1, 0, 0),
                 ),
                 zone_id: ZoneId::work(),
-                created_at: chrono::Utc::now().timestamp() as u64,
+                created_at: now_ts_u64(),
                 provenance: fcp_core::Provenance::new(ZoneId::work()),
                 refs: vec![],
                 foreign_refs: vec![],
@@ -757,7 +760,7 @@ mod adversarial {
             })],
             scope: RevocationScope::NodeAttestation,
             reason: "Device removed from mesh".to_string(),
-            effective_at: chrono::Utc::now().timestamp() as u64,
+            effective_at: now_ts_u64(),
             expires_at: None,
             signature: [0u8; 64], // Would be properly signed in production
         };
@@ -1450,7 +1453,7 @@ mod device_removal {
                     semver::Version::new(1, 0, 0),
                 ),
                 zone_id: ZoneId::work(),
-                created_at: Utc::now().timestamp() as u64,
+                created_at: now_ts_u64(),
                 provenance: fcp_core::Provenance::new(ZoneId::work()),
                 refs: vec![],
                 foreign_refs: vec![],
@@ -1460,7 +1463,7 @@ mod device_removal {
             revoked: vec![attestation_id],
             scope: RevocationScope::NodeAttestation,
             reason: "Device decommissioned".to_string(),
-            effective_at: Utc::now().timestamp() as u64,
+            effective_at: now_ts_u64(),
             expires_at: None,
             signature: [0u8; 64],
         };
@@ -1513,7 +1516,7 @@ mod device_removal {
                     semver::Version::new(1, 0, 0),
                 ),
                 zone_id: ZoneId::work(),
-                created_at: Utc::now().timestamp() as u64,
+                created_at: now_ts_u64(),
                 provenance: fcp_core::Provenance::new(ZoneId::work()),
                 refs: vec![],
                 foreign_refs: vec![],
@@ -1523,7 +1526,7 @@ mod device_removal {
             revoked: vec![key_id],
             scope: RevocationScope::NodeAttestation,
             reason: "Device removed".to_string(),
-            effective_at: Utc::now().timestamp() as u64,
+            effective_at: now_ts_u64(),
             expires_at: None,
             signature: [0u8; 64],
         };
@@ -1533,7 +1536,7 @@ mod device_removal {
         // Device attempts to re-enroll with same keys
         let request = DeviceEnrollmentRequest::new(
             "device-reenroll-attempt",
-            signing_key.clone(),
+            signing_key,
             encryption_key,
             issuance_key,
             DeviceMetadata::default(),
@@ -1631,7 +1634,7 @@ mod device_removal {
                     semver::Version::new(1, 0, 0),
                 ),
                 zone_id: ZoneId::work(),
-                created_at: Utc::now().timestamp() as u64,
+                created_at: now_ts_u64(),
                 provenance: fcp_core::Provenance::new(ZoneId::work()),
                 refs: vec![],
                 foreign_refs: vec![],
@@ -1641,7 +1644,7 @@ mod device_removal {
             revoked: device_ids.clone(),
             scope: RevocationScope::NodeAttestation,
             reason: "Bulk device removal".to_string(),
-            effective_at: Utc::now().timestamp() as u64,
+            effective_at: now_ts_u64(),
             expires_at: None,
             signature: [0u8; 64],
         };
@@ -1650,7 +1653,7 @@ mod device_removal {
 
         // All devices should be revoked
         for id in &device_ids {
-            assert!(registry.is_revoked(id), "Device {:?} should be revoked", id);
+            assert!(registry.is_revoked(id), "Device {id:?} should be revoked");
         }
 
         // Non-revoked device should not be affected

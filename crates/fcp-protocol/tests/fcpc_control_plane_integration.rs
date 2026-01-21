@@ -5,8 +5,8 @@
 //! "FCPC can carry InvokeRequest/Response + receipts end-to-end in the system harness."
 //!
 //! This test proves library-level integration between:
-//! - `fcp-core`: InvokeRequest, InvokeResponse, ControlPlaneObject types
-//! - `fcp-protocol`: FcpcFrame seal/open, retention classification
+//! - `fcp-core`: `InvokeRequest`, `InvokeResponse`, `ControlPlaneObject` types
+//! - `fcp-protocol`: `FcpcFrame` seal/open, retention classification
 //! - `fcp-cbor`: Canonical CBOR serialization
 
 use fcp_cbor::SchemaId;
@@ -95,7 +95,7 @@ fn invoke_request_round_trip_through_fcpc() {
         placement: None,
     };
 
-    let control_obj = ControlPlaneObject::new(header, request_json.clone());
+    let control_obj = ControlPlaneObject::new(header, request_json);
 
     // Verify retention classification
     assert_eq!(control_obj.retention(), ControlPlaneRetention::Required);
@@ -170,7 +170,7 @@ fn invoke_response_round_trip_through_fcpc() {
         placement: None,
     };
 
-    let control_obj = ControlPlaneObject::new(header, response_json.clone());
+    let control_obj = ControlPlaneObject::new(header, response_json);
     assert_eq!(control_obj.retention(), ControlPlaneRetention::Required);
 
     // 4. Seal into FCPC frame

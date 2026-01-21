@@ -2015,7 +2015,7 @@ mod tests {
                 locale: Some("en-US".into()),
                 pagination: None,
                 trace_id: Some("trace-123".into()),
-                request_tags: Default::default(),
+                request_tags: HashMap::default(),
             }),
             correlation_id: Some(CorrelationId::new()),
         };

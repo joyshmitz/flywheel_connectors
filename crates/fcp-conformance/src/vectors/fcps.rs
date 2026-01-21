@@ -97,7 +97,6 @@ impl FcpsGoldenVector {
         let auth_tag_bytes =
             hex::decode(&self.auth_tag).map_err(|e| format!("invalid auth_tag hex: {e}"))?;
         let auth_tag: [u8; 16] = auth_tag_bytes
-            .clone()
             .try_into()
             .map_err(|_| "auth_tag must be 16 bytes".to_string())?;
         let expected_frame_bytes = hex::decode(&self.expected_frame)

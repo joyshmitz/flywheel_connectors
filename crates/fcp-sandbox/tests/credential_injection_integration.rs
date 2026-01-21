@@ -3,9 +3,9 @@
 //! Proves that the egress proxy's credential injection is safe and enforceable:
 //! - HTTP header injection works correctly for authorized credentials
 //! - Host binding enforcement rejects credentials for wrong hosts
-//! - Capability gating via credential_allow works
+//! - Capability gating via `credential_allow` works
 //! - Secrets never leak into logs, errors, or debug output
-//! - Structured logging includes correlation_id and reason_code on denial
+//! - Structured logging includes `correlation_id` and `reason_code` on denial
 //!
 //! These tests satisfy the nnja acceptance criteria:
 //! "Egress proxy credential injection tests proving secretless credential handling."
@@ -44,7 +44,7 @@ struct MockCredentialMeta {
 #[derive(Default)]
 struct MockCredentialInjector {
     credentials: HashMap<String, MockCredentialMeta>,
-    /// Counts inject_http calls for auditing.
+    /// Counts `inject_http` calls for auditing.
     inject_count: AtomicUsize,
     /// Counts authorization checks.
     auth_check_count: AtomicUsize,
@@ -139,7 +139,7 @@ impl CredentialInjector for MockCredentialInjector {
     fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
         if self.credentials.contains_key(credential_id) {
             // Return simulated auth bytes (not real secret)
-            Ok(Some(format!("[TCP_AUTH:{}]", credential_id).into_bytes()))
+            Ok(Some(format!("[TCP_AUTH:{credential_id}]").into_bytes()))
         } else {
             Err(EgressError::CredentialError(format!(
                 "credential not found: {credential_id}"
@@ -596,7 +596,7 @@ mod integration {
         // - evidence: credential_id, operation_id, capability's credential_allow list
     }
 
-    /// Simulates denial when host doesn't match credential's host_allow.
+    /// Simulates denial when host doesn't match credential's `host_allow`.
     #[test]
     fn full_flow_denied_host_binding_mismatch() {
         let guard = EgressGuard::new();

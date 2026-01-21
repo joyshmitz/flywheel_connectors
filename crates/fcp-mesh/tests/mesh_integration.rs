@@ -1,4 +1,4 @@
-//! FCP2 MeshNode Integration Tests
+//! FCP2 `MeshNode` Integration Tests
 //!
 //! Comprehensive integration tests for mesh node orchestration covering:
 //! - Routing (symbol routing, control-plane routing, multi-hop, load balancing)
@@ -120,6 +120,7 @@ mod meshnode {
         symbol_store.put_object_meta(meta).await.unwrap();
 
         for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
             let symbol = StoredSymbol {
                 meta: SymbolMeta {
                     object_id,
@@ -128,7 +129,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi as u8; 16]),
+                data: Bytes::from(vec![esi_byte; 16]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -181,6 +182,7 @@ mod meshnode {
         symbol_store.put_object_meta(meta).await.unwrap();
 
         for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
             let symbol = StoredSymbol {
                 meta: SymbolMeta {
                     object_id,
@@ -189,7 +191,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi as u8; 16]),
+                data: Bytes::from(vec![esi_byte; 16]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -260,6 +262,7 @@ mod meshnode {
         symbol_store.put_object_meta(meta).await.unwrap();
 
         for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
             let symbol = StoredSymbol {
                 meta: SymbolMeta {
                     object_id,
@@ -268,7 +271,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi as u8; 16]),
+                data: Bytes::from(vec![esi_byte; 16]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
