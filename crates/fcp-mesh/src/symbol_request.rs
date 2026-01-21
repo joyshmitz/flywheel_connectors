@@ -145,6 +145,8 @@ pub struct SymbolRequestHandler {
     active_transfers: HashMap<ObjectId, TransferState>,
     /// Completed transfers awaiting SymbolAck.
     completed_awaiting_ack: HashSet<ObjectId>,
+    /// Completed transfers (SymbolAck received).
+    completed_transfers: HashSet<ObjectId>,
 }
 
 /// Policy for symbol request handling.
@@ -210,6 +212,7 @@ impl SymbolRequestHandler {
             policy,
             active_transfers: HashMap::new(),
             completed_awaiting_ack: HashSet::new(),
+            completed_transfers: HashSet::new(),
         }
     }
 
@@ -343,6 +346,23 @@ impl SymbolRequestHandler {
         }
     }
 
+    /// Track symbols sent for a request (starts or updates transfer state).
+    pub fn track_transfer(&mut self, request: &SymbolRequest, sent_esis: impl IntoIterator<Item = u32>) {
+        let state = self
+            .active_transfers
+            .entry(request.object_id)
+            .or_insert_with(|| TransferState {
+                object_id: request.object_id,
+                total_needed: request.max_symbols,
+                sent_esis: HashSet::new(),
+                last_status: None,
+                stopped: false,
+            });
+
+        state.total_needed = state.total_needed.max(request.max_symbols);
+        state.sent_esis.extend(sent_esis);
+    }
+
     /// Process a symbol acknowledgment (stop condition).
     ///
     /// Stops sending symbols for the acknowledged object.
@@ -355,6 +375,7 @@ impl SymbolRequestHandler {
         );
 
         self.completed_awaiting_ack.remove(&ack.object_id);
+        self.completed_transfers.insert(ack.object_id);
 
         if let Some(state) = self.active_transfers.get_mut(&ack.object_id) {
             state.stopped = true;
@@ -367,6 +388,9 @@ impl SymbolRequestHandler {
     /// Check if a transfer should stop.
     #[must_use]
     pub fn should_stop(&self, object_id: &ObjectId) -> bool {
+        if self.completed_transfers.contains(object_id) {
+            return true;
+        }
         self.active_transfers
             .get(object_id)
             .is_some_and(|s| s.stopped)

@@ -2,8 +2,8 @@
 //!
 //! Tests for FCP Specification Section 9.4 Simulate operation:
 //! - SimulateRequest/SimulateResponse canonical encoding round-trip
-//! - CostEstimate deterministic population
-//! - ResourceAvailability deterministic population
+//! - `CostEstimate` deterministic population
+//! - `ResourceAvailability` deterministic population
 //! - Missing capability reporting stability
 //!
 //! # Test Categories
@@ -52,6 +52,7 @@ fn log_test_event(test_name: &str, event: &str, details: &serde_json::Value) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct SimulateRequestVector {
     description: String,
     request_id: String,
@@ -65,6 +66,7 @@ struct SimulateRequestVector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct SimulateResponseVector {
     description: String,
     request_id: String,
@@ -285,7 +287,7 @@ mod response_validation {
 
     #[test]
     fn response_with_availability() {
-        let avail = ResourceAvailability::available().with_rate_limit(100, Some(1700000000));
+        let avail = ResourceAvailability::available().with_rate_limit(100, Some(1_700_000_000));
 
         let resp = SimulateResponse::allowed(RequestId::new("req_005")).with_availability(avail);
 
@@ -293,7 +295,7 @@ mod response_validation {
         let avail = resp.availability.unwrap();
         assert!(avail.available);
         assert_eq!(avail.rate_limit_remaining, Some(100));
-        assert_eq!(avail.rate_limit_reset_at, Some(1700000000));
+        assert_eq!(avail.rate_limit_reset_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -488,11 +490,11 @@ mod resource_availability {
 
     #[test]
     fn resource_with_rate_limit() {
-        let avail = ResourceAvailability::available().with_rate_limit(50, Some(1700000000));
+        let avail = ResourceAvailability::available().with_rate_limit(50, Some(1_700_000_000));
 
         assert!(avail.available);
         assert_eq!(avail.rate_limit_remaining, Some(50));
-        assert_eq!(avail.rate_limit_reset_at, Some(1700000000));
+        assert_eq!(avail.rate_limit_reset_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -504,7 +506,7 @@ mod resource_availability {
     #[test]
     fn resource_availability_serialization_roundtrip() {
         let avail = ResourceAvailability::available()
-            .with_rate_limit(100, Some(1700000000))
+            .with_rate_limit(100, Some(1_700_000_000))
             .with_details("API healthy");
 
         let json_str = serde_json::to_string(&avail).expect("serialization should succeed");
@@ -518,8 +520,8 @@ mod resource_availability {
 
     #[test]
     fn resource_availability_deterministic() {
-        let avail1 = ResourceAvailability::available().with_rate_limit(100, Some(1700000000));
-        let avail2 = ResourceAvailability::available().with_rate_limit(100, Some(1700000000));
+        let avail1 = ResourceAvailability::available().with_rate_limit(100, Some(1_700_000_000));
+        let avail2 = ResourceAvailability::available().with_rate_limit(100, Some(1_700_000_000));
 
         let json1 = serde_json::to_string(&avail1).unwrap();
         let json2 = serde_json::to_string(&avail2).unwrap();
@@ -536,6 +538,7 @@ mod resource_availability {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn generate_simulate_request_vectors() {
     log_test_event(
         "generate_simulate_request_vectors",
@@ -676,6 +679,7 @@ fn generate_simulate_request_vectors() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn generate_simulate_response_vectors() {
     log_test_event(
         "generate_simulate_response_vectors",
@@ -745,7 +749,7 @@ fn generate_simulate_response_vectors() {
     // Vector 4: Allowed with availability
     let resp4 = SimulateResponse::allowed(RequestId::new("req_avail_004")).with_availability(
         ResourceAvailability::available()
-            .with_rate_limit(100, Some(1700000000))
+            .with_rate_limit(100, Some(1_700_000_000))
             .with_details("API healthy, rate limit headroom available"),
     );
 
@@ -796,7 +800,8 @@ fn generate_simulate_response_vectors() {
         "FCP-4029",
     )
     .with_availability(
-        ResourceAvailability::unavailable("Rate limit exhausted").with_rate_limit(0, Some(1700001000)),
+        ResourceAvailability::unavailable("Rate limit exhausted")
+            .with_rate_limit(0, Some(1_700_001_000)),
     );
 
     vectors.push(SimulateResponseVector {
@@ -975,7 +980,7 @@ fn generate_resource_availability_vectors() {
 
     // Vector 3: Available with rate limit info
     let avail3 = ResourceAvailability::available()
-        .with_rate_limit(100, Some(1700000000))
+        .with_rate_limit(100, Some(1_700_000_000))
         .with_details("API healthy");
     vectors.push(ResourceAvailabilityVector {
         description: "Available with rate limit and details".to_string(),
@@ -989,7 +994,7 @@ fn generate_resource_availability_vectors() {
 
     // Vector 4: Rate limited (remaining = 0)
     let avail4 = ResourceAvailability::unavailable("Rate limit exceeded")
-        .with_rate_limit(0, Some(1700001000));
+        .with_rate_limit(0, Some(1_700_001_000));
     vectors.push(ResourceAvailabilityVector {
         description: "Rate limited - remaining is zero".to_string(),
         available: avail4.available,
@@ -1109,11 +1114,8 @@ mod adversarial {
     #[test]
     fn extremely_long_failure_reason() {
         let long_reason = "x".repeat(10000);
-        let resp = SimulateResponse::denied(
-            RequestId::new("req_long"),
-            long_reason.clone(),
-            "FCP-TEST",
-        );
+        let resp =
+            SimulateResponse::denied(RequestId::new("req_long"), long_reason, "FCP-TEST");
 
         assert_eq!(resp.failure_reason.unwrap().len(), 10000);
     }
@@ -1135,7 +1137,7 @@ mod adversarial {
         let caps: Vec<String> = (0..1000).map(|i| format!("cap.test.{i}")).collect();
 
         let resp = SimulateResponse::denied(RequestId::new("req_many"), "Many caps", "FCP-3001")
-            .with_missing_capabilities(caps.clone());
+            .with_missing_capabilities(caps);
 
         assert_eq!(resp.missing_capabilities.len(), 1000);
 

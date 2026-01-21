@@ -12,7 +12,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId};
+use fcp_core::{
+    CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId,
+    OperationIntent, OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId,
+};
+use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_store::{ObjectStore, QuarantineStore, SymbolStore};
@@ -24,14 +28,15 @@ use crate::admission::{
     AdmissionController, AdmissionError, AdmissionPolicy, ObjectAdmissionClass,
 };
 use crate::degraded::{
-    ControlPlaneEnvelope, DegradedModeDecoder, DegradedModeEncoder, DegradedTransportError,
-    RetentionClass,
+    ControlPlaneEnvelope, ControlPlaneHandler, DegradedModeDecoder, DegradedModeEncoder,
+    DegradedTransportError, RetentionClass,
 };
 use crate::device::DeviceProfile;
 use crate::gossip::{GossipConfig, MeshGossip};
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, NodeInfo, PlannerContext, PlannerInput,
 };
+use crate::session::MeshSession;
 use crate::symbol_request::{
     SymbolRequestError, SymbolRequestHandler, SymbolRequestMetrics, SymbolRequestPolicy,
     SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine,
@@ -130,6 +135,50 @@ pub enum MeshNodeError {
     /// Degraded-mode transport error.
     #[error("degraded transport error: {0}")]
     DegradedTransport(#[from] DegradedTransportError),
+
+    /// Enforcement error.
+    #[error("enforcement error: {0}")]
+    Enforcement(#[from] MeshNodeEnforcementError),
+}
+
+/// Enforcement errors for control-plane requests.
+#[derive(Debug, Error)]
+pub enum MeshNodeEnforcementError {
+    /// Invoke request validation error.
+    #[error("invoke validation error: {0}")]
+    InvokeValidation(#[from] InvokeValidationError),
+
+    /// Capability token verification failed.
+    #[error("capability verification failed: {0}")]
+    CapabilityVerification(#[from] FcpError),
+
+    /// Holder proof required for holder-bound token.
+    #[error("holder proof required for holder node {holder_node}")]
+    HolderProofRequired { holder_node: String },
+
+    /// Holder proof node mismatch.
+    #[error("holder proof node mismatch: expected {expected}, got {actual}")]
+    HolderProofNodeMismatch { expected: String, actual: String },
+
+    /// Holder proof verification failed.
+    #[error("holder proof verification failed")]
+    HolderProofInvalid,
+
+    /// Holder proof key missing.
+    #[error("holder proof key missing for holder node {holder_node}")]
+    HolderKeyMissing { holder_node: String },
+
+    /// Capability token missing JTI claim.
+    #[error("capability token missing jti claim")]
+    MissingTokenJti,
+
+    /// Capability token revoked.
+    #[error("capability token revoked: {token_id}")]
+    TokenRevoked { token_id: ObjectId },
+
+    /// Receipt validation error.
+    #[error("receipt validation failed: {0}")]
+    ReceiptValidation(#[from] fcp_core::OperationValidationError),
 }
 
 /// Per-peer state used for planning.
@@ -172,6 +221,7 @@ pub struct MeshNode {
     object_store: Arc<dyn ObjectStore>,
     symbol_store: Arc<dyn SymbolStore>,
     quarantine_store: Arc<QuarantineStore>,
+    sessions: HashMap<NodeId, MeshSession>,
     peers: HashMap<NodeId, PeerState>,
     local_profile: Option<DeviceProfile>,
     local_symbols: HashSet<ObjectId>,
@@ -206,6 +256,7 @@ impl MeshNode {
             object_store,
             symbol_store,
             quarantine_store,
+            sessions: HashMap::new(),
             local_node,
             local_node_ts,
             peers: HashMap::new(),
@@ -271,11 +322,42 @@ impl MeshNode {
         self.peers.len()
     }
 
+    /// Register an authenticated mesh session for a peer.
+    pub fn register_session(&mut self, session: MeshSession, now_ms: u64) {
+        self.admission
+            .set_authenticated(&session.peer_id, true, now_ms);
+        self.sessions.insert(session.peer_id.clone(), session);
+    }
+
+    /// Remove a mesh session for a peer (marks unauthenticated).
+    pub fn remove_session(&mut self, peer_id: &NodeId, now_ms: u64) {
+        self.sessions.remove(peer_id);
+        self.admission.set_authenticated(peer_id, false, now_ms);
+    }
+
+    /// Check whether a peer is authenticated.
+    #[must_use]
+    pub fn is_peer_authenticated(&self, peer_id: &NodeId) -> bool {
+        self.sessions.contains_key(peer_id) || self.admission.is_authenticated(peer_id)
+    }
+
     /// Build a planner input from current local + peer state.
     fn build_planner_input(&self, now_ms: u64) -> PlannerInput {
         let mut nodes = Vec::new();
+        let mut singleton_holder: Option<String> = None;
+        let now_secs = now_ms / 1000;
 
         if let Some(profile) = &self.local_profile {
+            if singleton_holder.is_none()
+                && self
+                    .local_leases
+                    .iter()
+                    .any(|lease| lease.purpose == crate::planner::LeasePurpose::SingletonWriter
+                        && lease.expires_at > now_secs)
+            {
+                singleton_holder = Some(profile.node_id.as_str().to_string());
+            }
+
             nodes.push(NodeInfo {
                 profile: profile.clone(),
                 local_symbols: self.local_symbols.clone(),
@@ -284,6 +366,15 @@ impl MeshNode {
         }
 
         for state in self.peers.values() {
+            if singleton_holder.is_none()
+                && state.held_leases.iter().any(|lease| {
+                    lease.purpose == crate::planner::LeasePurpose::SingletonWriter
+                        && lease.expires_at > now_secs
+                })
+            {
+                singleton_holder = Some(state.profile.node_id.as_str().to_string());
+            }
+
             nodes.push(NodeInfo {
                 profile: state.profile.clone(),
                 local_symbols: state.local_symbols.clone(),
@@ -291,7 +382,11 @@ impl MeshNode {
             });
         }
 
-        PlannerInput::new(nodes, now_ms)
+        let mut input = PlannerInput::new(nodes, now_ms);
+        if let Some(holder) = singleton_holder {
+            input = input.with_singleton_holder(holder);
+        }
+        input
     }
 
     /// Plan execution candidates for a connector.
@@ -299,6 +394,80 @@ impl MeshNode {
     pub fn plan_execution(&self, context: &PlannerContext, now_ms: u64) -> Vec<CandidateNode> {
         let input = self.build_planner_input(now_ms);
         self.planner.plan(&input, context)
+    }
+
+    /// Enforce capability, holder proof, and revocation checks for an invoke request.
+    ///
+    /// Returns the verified capability claims on success.
+    pub fn enforce_invoke_request<F>(
+        &self,
+        request: &InvokeRequest,
+        verifier: &CapabilityVerifier,
+        revocations: &RevocationRegistry,
+        resource_uris: &[String],
+        mut holder_key_lookup: F,
+    ) -> Result<CwtClaims, MeshNodeEnforcementError>
+    where
+        F: FnMut(&TailscaleNodeId) -> Option<Ed25519VerifyingKey>,
+    {
+        request.validate_idempotency_key()?;
+
+        let claims = verifier.verify(&request.capability_token, &request.operation, resource_uris)?;
+
+        if let Some(holder_node) = claims.get_holder_node() {
+            let proof = request.holder_proof.as_ref().ok_or_else(|| {
+                MeshNodeEnforcementError::HolderProofRequired {
+                    holder_node: holder_node.to_string(),
+                }
+            })?;
+
+            if proof.holder_node.as_str() != holder_node {
+                return Err(MeshNodeEnforcementError::HolderProofNodeMismatch {
+                    expected: holder_node.to_string(),
+                    actual: proof.holder_node.as_str().to_string(),
+                });
+            }
+
+            let token_jti = claims
+                .get_jti()
+                .ok_or(MeshNodeEnforcementError::MissingTokenJti)?;
+            let signable = fcp_core::HolderProof::signable_bytes(
+                &request.id,
+                &request.operation,
+                token_jti,
+            );
+
+            let key = holder_key_lookup(&proof.holder_node).ok_or_else(|| {
+                MeshNodeEnforcementError::HolderKeyMissing {
+                    holder_node: proof.holder_node.as_str().to_string(),
+                }
+            })?;
+
+            let signature = Ed25519Signature::from_bytes(&proof.signature);
+            if key.verify(&signable, &signature).is_err() {
+                return Err(MeshNodeEnforcementError::HolderProofInvalid);
+            }
+        }
+
+        let token_jti = claims
+            .get_jti()
+            .ok_or(MeshNodeEnforcementError::MissingTokenJti)?;
+        let token_id = ObjectId::from_unscoped_bytes(token_jti);
+        if revocations.is_revoked(&token_id) {
+            return Err(MeshNodeEnforcementError::TokenRevoked { token_id });
+        }
+
+        Ok(claims)
+    }
+
+    /// Validate that a receipt correctly references its intent.
+    pub fn validate_receipt_binding(
+        &self,
+        receipt: &OperationReceipt,
+        intent: &OperationIntent,
+    ) -> Result<(), MeshNodeEnforcementError> {
+        fcp_core::validate_receipt_intent_binding(receipt, intent)?;
+        Ok(())
     }
 
     /// Announce an admitted object for gossip.
@@ -353,9 +522,21 @@ impl MeshNode {
             });
         }
 
+        if self.quarantine_store.contains(&request.object_id) {
+            return Err(SymbolRequestError::AdmissionRejected(
+                AdmissionError::ObjectQuarantined {
+                    object_id: request.object_id.to_string(),
+                },
+            ));
+        }
+
+        let authenticated = is_authenticated || self.is_peer_authenticated(peer);
+        self.admission
+            .set_authenticated(peer, authenticated, now_ms);
+
         let validated = match self.symbol_requests.validate_request(
             &request,
-            is_authenticated,
+            authenticated,
             &mut self.admission,
             peer,
             now_ms,
@@ -435,6 +616,8 @@ impl MeshNode {
         );
 
         already_sent.extend(response.symbol_esis.iter().copied());
+        self.symbol_requests
+            .track_transfer(&request, response.symbol_esis.iter().copied());
         self.symbol_metrics
             .record_symbols_sent(response.symbol_count(), request.missing_hint.is_some());
 
@@ -472,6 +655,21 @@ impl MeshNode {
         Ok(self
             .degraded_decoder
             .process_frame(frame, expected_zone_id, retention)?)
+    }
+
+    /// Decode a control-plane frame and enforce retention via handler.
+    pub fn process_control_plane_frame(
+        &mut self,
+        frame: &fcp_protocol::FcpsFrame,
+        expected_zone_id: &ZoneId,
+        retention: RetentionClass,
+        handler: &dyn ControlPlaneHandler,
+    ) -> Result<Option<ControlPlaneEnvelope>, MeshNodeError> {
+        let envelope = self.decode_control_plane(frame, expected_zone_id, retention)?;
+        if let Some(ref env) = envelope {
+            handler.handle(env.clone())?;
+        }
+        Ok(envelope)
     }
 
     /// Snapshot metrics.

@@ -2075,7 +2075,8 @@ mod tests {
 
     #[test]
     fn simulate_response_with_availability() {
-        let availability = ResourceAvailability::available().with_rate_limit(95, Some(1700000000));
+        let availability =
+            ResourceAvailability::available().with_rate_limit(95, Some(1_700_000_000));
 
         let resp =
             SimulateResponse::allowed(RequestId::new("sim_004")).with_availability(availability);
@@ -2084,7 +2085,7 @@ mod tests {
         let avail = resp.availability.unwrap();
         assert!(avail.available);
         assert_eq!(avail.rate_limit_remaining, Some(95));
-        assert_eq!(avail.rate_limit_reset_at, Some(1700000000));
+        assert_eq!(avail.rate_limit_reset_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -2227,11 +2228,11 @@ mod tests {
 
     #[test]
     fn resource_availability_with_rate_limit() {
-        let avail = ResourceAvailability::available().with_rate_limit(50, Some(1700000000));
+        let avail = ResourceAvailability::available().with_rate_limit(50, Some(1_700_000_000));
 
         assert!(avail.available);
         assert_eq!(avail.rate_limit_remaining, Some(50));
-        assert_eq!(avail.rate_limit_reset_at, Some(1700000000));
+        assert_eq!(avail.rate_limit_reset_at, Some(1_700_000_000));
     }
 
     #[test]
@@ -2244,7 +2245,7 @@ mod tests {
     #[test]
     fn resource_availability_serialization_roundtrip() {
         let avail = ResourceAvailability::available()
-            .with_rate_limit(100, Some(1700000000))
+            .with_rate_limit(100, Some(1_700_000_000))
             .with_details("Healthy");
 
         let json = serde_json::to_string(&avail).unwrap();
@@ -2252,7 +2253,7 @@ mod tests {
 
         assert!(deserialized.available);
         assert_eq!(deserialized.rate_limit_remaining, Some(100));
-        assert_eq!(deserialized.rate_limit_reset_at, Some(1700000000));
+        assert_eq!(deserialized.rate_limit_reset_at, Some(1_700_000_000));
         assert_eq!(deserialized.details, Some("Healthy".into()));
     }
 }

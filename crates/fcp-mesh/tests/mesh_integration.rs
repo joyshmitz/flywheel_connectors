@@ -52,11 +52,18 @@ mod meshnode {
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
     use fcp_core::{ObjectHeader, Provenance, ZoneKeyId};
-    use fcp_mesh::{MeshNode, MeshNodeConfig};
+    use fcp_mesh::{
+        ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig,
+        RetentionClass, SymbolRequestError,
+    };
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
-        StoredSymbol, SymbolMeta,
+        StoredSymbol, SymbolMeta, SymbolStore,
+    };
+    use fcp_protocol::{
+        DecodeStatus, SymbolAck, SymbolAckReason, SymbolRequest,
+        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED,
     };
     use raptorq::ObjectTransmissionInformation;
     use semver::Version;
@@ -65,6 +72,19 @@ mod meshnode {
     fn test_header(zone_id: &ZoneId) -> ObjectHeader {
         ObjectHeader {
             schema: SchemaId::new("fcp.mesh", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    fn status_header(zone_id: &ZoneId) -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.status", "DecodeStatus", Version::new(1, 0, 0)),
             zone_id: zone_id.clone(),
             created_at: 0,
             provenance: Provenance::new(zone_id.clone()),
@@ -131,6 +151,310 @@ mod meshnode {
 
         assert!(!response.symbol_esis.is_empty());
         assert!(response.symbol_esis.len() <= 2);
+    }
+
+    #[tokio::test]
+    async fn meshnode_decode_status_stops_transfer() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([2u8; 8]);
+        let object_id = test_object_id("meshnode-decode-stop");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-1"),
+            object_store,
+            symbol_store.clone(),
+            quarantine_store,
+        );
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi as u8; 16]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            4,
+            1,
+        );
+
+        let _ = node
+            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        let status = DecodeStatus {
+            header: status_header(&zone_id),
+            object_id,
+            zone_id: zone_id.clone(),
+            zone_key_id,
+            epoch_id: 1,
+            received_unique: 4,
+            needed: 0,
+            complete: true,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+
+        node.handle_decode_status(&status);
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect_err("should stop after decode status complete");
+
+        assert!(matches!(err, SymbolRequestError::AlreadyComplete { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_ack_stops_transfer() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([3u8; 8]);
+        let object_id = test_object_id("meshnode-ack-stop");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-1"),
+            object_store,
+            symbol_store.clone(),
+            quarantine_store,
+        );
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi as u8; 16]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            4,
+            1,
+        );
+
+        let _ = node
+            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        let ack = SymbolAck::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            SymbolAckReason::Complete,
+            4,
+        );
+
+        node.handle_symbol_ack(&ack);
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect_err("should stop after ack");
+
+        assert!(matches!(err, SymbolRequestError::AlreadyComplete { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_unauthenticated_bounds_enforced() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([4u8; 8]);
+        let object_id = test_object_id("meshnode-unauth-bounds");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-1"),
+            object_store,
+            symbol_store.clone(),
+            quarantine_store,
+        );
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 1,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect_err("unauthenticated request should be bounded");
+
+        assert!(matches!(err, SymbolRequestError::BoundsExceeded { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_degraded_control_plane_roundtrip() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([5u8; 8]);
+        let object_id = test_object_id("meshnode-degraded-roundtrip");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-1").with_sender_instance_id(9),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        );
+
+        let payload = vec![0xAB; 128];
+        let schema_hash = SchemaId::new("fcp.mesh", "ControlPlane", Version::new(1, 0, 0))
+            .hash()
+            .as_bytes()
+            .to_owned();
+        let mut schema_hash_bytes = [0u8; 32];
+        schema_hash_bytes.copy_from_slice(&schema_hash);
+
+        let envelope = ControlPlaneEnvelope::new(
+            payload.clone(),
+            schema_hash_bytes,
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            RetentionClass::Required,
+        );
+
+        let frames = node
+            .encode_control_plane(&envelope, 42)
+            .expect("encode control plane");
+
+        let mut decoded = None;
+        for frame in frames {
+            if let Some(result) = node
+                .decode_control_plane(&frame, &zone_id, RetentionClass::Required)
+                .expect("decode control plane")
+            {
+                decoded = Some(result);
+                break;
+            }
+        }
+
+        let decoded = decoded.expect("should decode envelope");
+        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.schema_hash, schema_hash_bytes);
+        assert_eq!(decoded.object_id, object_id);
+    }
+
+    #[tokio::test]
+    async fn meshnode_control_plane_handler_stores_required() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([6u8; 8]);
+        let object_id = test_object_id("meshnode-control-plane-handler");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-1").with_sender_instance_id(11),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        );
+
+        let payload = vec![0xCD; 64];
+        let schema_hash = SchemaId::new("fcp.mesh", "ControlPlane", Version::new(1, 0, 0))
+            .hash()
+            .as_bytes()
+            .to_owned();
+        let mut schema_hash_bytes = [0u8; 32];
+        schema_hash_bytes.copy_from_slice(&schema_hash);
+
+        let envelope = ControlPlaneEnvelope::new(
+            payload,
+            schema_hash_bytes,
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            RetentionClass::Required,
+        );
+
+        let frames = node
+            .encode_control_plane(&envelope, 77)
+            .expect("encode control plane");
+
+        let handler = InMemoryControlPlaneHandler::new();
+        for frame in frames {
+            let _ = node
+                .process_control_plane_frame(&frame, &zone_id, RetentionClass::Required, &handler)
+                .expect("process control plane");
+        }
+
+        assert_eq!(handler.count(), 1);
+        assert!(handler.get(&object_id).is_some());
     }
 }
 

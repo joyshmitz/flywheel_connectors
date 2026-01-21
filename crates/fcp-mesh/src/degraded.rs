@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
+use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_protocol::{
     FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError, FrameFlags, SignedFcpsFrame, SymbolRecord,
@@ -66,6 +66,10 @@ pub enum DegradedTransportError {
     /// Frame missing CONTROL_PLANE flag.
     #[error("frame missing CONTROL_PLANE flag")]
     MissingControlPlaneFlag,
+
+    /// Zone ID hash mismatch.
+    #[error("zone id hash mismatch: expected {expected:?}, got {got:?}")]
+    ZoneMismatch { expected: ZoneIdHash, got: ZoneIdHash },
 
     /// Signature verification failed.
     #[error("signature verification failed")]
@@ -296,6 +300,19 @@ impl DegradedModeDecoder {
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
+        let expected_hash = expected_zone_id.hash();
+        if frame.header.zone_id_hash != expected_hash {
+            warn!(
+                object_id = %frame.header.object_id,
+                expected = %hex::encode(expected_hash.as_ref()),
+                got = %hex::encode(frame.header.zone_id_hash.as_ref()),
+                "degraded_mode: zone id hash mismatch"
+            );
+            return Err(DegradedTransportError::ZoneMismatch {
+                expected: expected_hash,
+                got: frame.header.zone_id_hash,
+            });
+        }
         // Verify CONTROL_PLANE flag
         if !frame.header.flags.contains(FrameFlags::CONTROL_PLANE) {
             warn!(
@@ -658,6 +675,38 @@ mod tests {
         assert!(matches!(
             result,
             Err(DegradedTransportError::MissingControlPlaneFlag)
+        ));
+    }
+
+    #[test]
+    fn decoder_rejects_zone_mismatch() {
+        let config = test_config();
+        let mut decoder = DegradedModeDecoder::new(config);
+
+        let zone_id = test_zone_id();
+        let other_zone: ZoneId = "z:other".parse().expect("valid zone id");
+
+        let frame = FcpsFrame {
+            header: FcpsFrameHeader {
+                version: FCPS_VERSION,
+                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                symbol_count: 0,
+                total_payload_len: 0,
+                object_id: ObjectId::from_bytes([0; 32]),
+                symbol_size: 64,
+                zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+                zone_id_hash: zone_id.hash(),
+                epoch_id: 0,
+                sender_instance_id: 0,
+                frame_seq: 0,
+            },
+            symbols: vec![],
+        };
+
+        let result = decoder.process_frame(&frame, &other_zone, RetentionClass::Required);
+        assert!(matches!(
+            result,
+            Err(DegradedTransportError::ZoneMismatch { .. })
         ));
     }
 
