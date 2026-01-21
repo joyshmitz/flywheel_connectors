@@ -10,8 +10,8 @@
 
 // Core traits
 pub use crate::{
-    async_trait, BaseConnector, Bidirectional, FcpConnector, Polling, RequestResponse, Streaming,
-    Webhook,
+    BaseConnector, Bidirectional, FcpConnector, Polling, RequestResponse, Streaming, Webhook,
+    async_trait,
 };
 
 // Error types
@@ -43,7 +43,9 @@ pub use crate::CapabilityToken;
 pub use crate::{Provenance, TaintFlag, TaintLevel};
 
 // Archetypes and state models
-pub use crate::{ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel};
+pub use crate::{
+    ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel,
+};
 
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};

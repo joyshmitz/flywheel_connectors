@@ -25,10 +25,10 @@ pub mod schemas;
 pub mod vectors;
 
 // Re-export vector types for convenience
+pub use vectors::core::{CanonicalPayloadGoldenVector, ObjectIdGoldenVector};
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;
 pub use vectors::session::SessionGoldenVector;
-pub use vectors::core::{CanonicalPayloadGoldenVector, ObjectIdGoldenVector};
 
 // Re-export interop types for convenience
 pub use interop::{

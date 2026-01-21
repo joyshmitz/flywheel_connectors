@@ -63,20 +63,27 @@
 
 /// Core connector trait and base implementation.
 pub use fcp_core::{
-    // Core connector infrastructure
-    async_trait,
     BaseConnector,
     Bidirectional,
-    ConnectorMetrics,
-    EventStream,
-    FcpConnector,
-    Polling,
-    RequestResponse,
-    Streaming,
-    Webhook,
+    // Capability tokens
+    CapabilityToken,
 
+    // Identifiers
+    ConnectorId,
+    ConnectorMetrics,
+    // Cost and availability
+    CostEstimate,
+    CurrencyCost,
     // Error types
     ErrorCategory,
+    // Events
+    EventAck,
+    EventData,
+    EventEnvelope,
+    EventNack,
+
+    EventStream,
+    FcpConnector,
     FcpError,
     FcpErrorResponse,
     FcpResult,
@@ -84,54 +91,47 @@ pub use fcp_core::{
     // Protocol messages
     HandshakeRequest,
     HandshakeResponse,
+    // Health and metrics
+    HealthSnapshot,
+    HealthState,
+    InstanceId,
     Introspection,
     InvokeContext,
     InvokeRequest,
     InvokeResponse,
     InvokeStatus,
+    LivenessResponse,
+    ObjectId,
+    Polling,
+    // Provenance
+    Provenance,
+    ProvenanceStep,
+    RateLimitStatus,
+    ReadinessResponse,
+
+    RequestResponse,
+    ResourceAvailability,
+
     ShutdownAck,
     ShutdownRequest,
     SimulateRequest,
     SimulateResponse,
+    Streaming,
     SubscribeRequest,
     SubscribeResponse,
-    UnsubscribeRequest,
-
-    // Cost and availability
-    CostEstimate,
-    CurrencyCost,
-    ResourceAvailability,
-
-    // Events
-    EventAck,
-    EventData,
-    EventEnvelope,
-    EventNack,
-
-    // Health and metrics
-    HealthSnapshot,
-    HealthState,
-    LivenessResponse,
-    RateLimitStatus,
-    ReadinessResponse,
-
-    // Identifiers
-    ConnectorId,
-    InstanceId,
-    ObjectId,
-    ZoneId,
-
-    // Capability tokens
-    CapabilityToken,
-
-    // Provenance
-    Provenance,
-    ProvenanceStep,
     TaintFlag,
     TaintLevel,
 
     // Observability
     TraceContext,
+    UnsubscribeRequest,
+
+    Webhook,
+
+    ZoneId,
+
+    // Core connector infrastructure
+    async_trait,
 };
 
 /// Re-exports from fcp-manifest for connector configuration.

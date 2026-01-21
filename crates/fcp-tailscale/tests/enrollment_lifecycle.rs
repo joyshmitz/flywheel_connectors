@@ -6,7 +6,7 @@ use fcp_core::{
     StoredObject, ZoneId, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
 };
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
-use fcp_tailscale::{NodeId, NodeKeyAttestation, NodeKeys, MeshIdentity};
+use fcp_tailscale::{MeshIdentity, NodeId, NodeKeyAttestation, NodeKeys};
 use semver::Version;
 
 fn now_ts_u64() -> u64 {
@@ -52,17 +52,21 @@ fn create_header(zone_id: ZoneId, schema: SchemaId) -> ObjectHeader {
     }
 }
 
-fn create_empty_manifest(zone_id: ZoneId, valid_from: u64, _owner_key: &Ed25519SigningKey) -> ZoneKeyManifest {
+fn create_empty_manifest(
+    zone_id: ZoneId,
+    valid_from: u64,
+    _owner_key: &Ed25519SigningKey,
+) -> ZoneKeyManifest {
     let signature = NodeSignature::new(
         fcp_core::NodeId::new("owner"), // fcp-core NodeId, not Tailscale NodeId
-        [0u8; 64], 
-        valid_from
+        [0u8; 64],
+        valid_from,
     );
-    
+
     ZoneKeyManifest {
         header: create_header(
-            zone_id.clone(), 
-            SchemaId::new("fcp.zone", "ZoneKeyManifest", Version::new(1, 0, 0))
+            zone_id.clone(),
+            SchemaId::new("fcp.zone", "ZoneKeyManifest", Version::new(1, 0, 0)),
         ),
         zone_id,
         zone_key_id: ZoneKeyId::from_bytes([0u8; 8]),
@@ -84,7 +88,7 @@ fn test_enrollment_lifecycle_with_revocation() {
     let zone_id = ZoneId::work();
     let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
     let owner_key = Ed25519SigningKey::generate();
-    
+
     let (device_signing_secret, device_signing_pub, device_enc_pub, device_issuance_pub, node_keys) =
         create_test_keys();
     let device_id = NodeId::new("node-test-123");
@@ -116,10 +120,15 @@ fn test_enrollment_lifecycle_with_revocation() {
     .expect("Failed to sign approval");
 
     // 4. Store Approval as Mesh Object to get ObjectId
-    let approval_schema = SchemaId::new("fcp.core", "DeviceEnrollmentApproval", Version::new(1, 0, 0));
+    let approval_schema = SchemaId::new(
+        "fcp.core",
+        "DeviceEnrollmentApproval",
+        Version::new(1, 0, 0),
+    );
     let approval_header = create_header(approval_header_zone_id, approval_schema);
-    let approval_body = fcp_cbor::to_canonical_cbor(&approval).expect("Failed to serialize approval");
-    
+    let approval_body =
+        fcp_cbor::to_canonical_cbor(&approval).expect("Failed to serialize approval");
+
     let approval_id = StoredObject::derive_id(&approval_header, &approval_body, &object_id_key)
         .expect("Failed to derive approval ID");
 
@@ -134,16 +143,19 @@ fn test_enrollment_lifecycle_with_revocation() {
     .expect("Failed to sign attestation");
 
     // 6. Store Attestation as Mesh Object
-    let attestation_schema = SchemaId::new("fcp.tailscale", "NodeKeyAttestation", Version::new(1, 0, 0));
+    let attestation_schema =
+        SchemaId::new("fcp.tailscale", "NodeKeyAttestation", Version::new(1, 0, 0));
     let attestation_header = create_header(attestation_header_zone_id, attestation_schema);
-    let attestation_body = fcp_cbor::to_canonical_cbor(&attestation).expect("Failed to serialize attestation");
+    let attestation_body =
+        fcp_cbor::to_canonical_cbor(&attestation).expect("Failed to serialize attestation");
 
-    let attestation_id = StoredObject::derive_id(&attestation_header, &attestation_body, &object_id_key)
-        .expect("Failed to derive attestation ID");
+    let attestation_id =
+        StoredObject::derive_id(&attestation_header, &attestation_body, &object_id_key)
+            .expect("Failed to derive attestation ID");
 
     // 7. Initialize Revocation Registry
     let mut registry = RevocationRegistry::new();
-    
+
     // Verify not revoked yet
     assert!(!registry.is_revoked(&approval_id));
     assert!(!registry.is_revoked(&attestation_id));
@@ -161,12 +173,18 @@ fn test_enrollment_lifecycle_with_revocation() {
         expires_at: None,
         signature: [0u8; 64],
     };
-    
+
     registry.add_revocation(&revocation);
 
     // 9. Verify Revocation
-    assert!(registry.is_revoked(&attestation_id), "Attestation should be revoked");
-    assert!(!registry.is_revoked(&approval_id), "Approval should NOT be revoked (different ID)");
+    assert!(
+        registry.is_revoked(&attestation_id),
+        "Attestation should be revoked"
+    );
+    assert!(
+        !registry.is_revoked(&approval_id),
+        "Approval should NOT be revoked (different ID)"
+    );
 
     // 10. Verify Removal Workflow Implications
     // We verify the attestation signature first
@@ -177,7 +195,8 @@ fn test_enrollment_lifecycle_with_revocation() {
         vec![],
         owner_key.verifying_key(),
         node_keys,
-    ).with_attestation(attestation);
+    )
+    .with_attestation(attestation);
 
     assert!(identity.verify_attestation().is_ok());
 
@@ -185,5 +204,8 @@ fn test_enrollment_lifecycle_with_revocation() {
     let attestation_ok = identity.verify_attestation().is_ok();
     let is_valid = attestation_ok && !registry.is_revoked(&attestation_id);
 
-    assert!(!is_valid, "Identity should be invalid because attestation is revoked");
+    assert!(
+        !is_valid,
+        "Identity should be invalid because attestation is revoked"
+    );
 }

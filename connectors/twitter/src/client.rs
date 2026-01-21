@@ -84,10 +84,9 @@ impl TwitterApiClient {
     /// Make a request using app-only (Bearer) authentication.
     #[instrument(skip(self))]
     pub async fn get_app_only<T: DeserializeOwned>(&self, endpoint: &str) -> TwitterResult<T> {
-        let bearer = self
-            .bearer_token
-            .as_ref()
-            .ok_or_else(|| TwitterError::Config("Bearer token required for app-only auth".into()))?;
+        let bearer = self.bearer_token.as_ref().ok_or_else(|| {
+            TwitterError::Config("Bearer token required for app-only auth".into())
+        })?;
 
         self.request_bearer("GET", endpoint, None::<&()>, bearer)
             .await
@@ -320,25 +319,21 @@ impl TwitterApiClient {
 
     /// Get the authenticated user.
     pub async fn get_me(&self) -> TwitterResult<TwitterResponse<User>> {
-        let params = vec![
-            (
-                "user.fields".to_string(),
-                "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
-                    .to_string(),
-            ),
-        ];
+        let params = vec![(
+            "user.fields".to_string(),
+            "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
+                .to_string(),
+        )];
         self.get_with_params("/2/users/me", &params).await
     }
 
     /// Get a user by ID.
     pub async fn get_user(&self, user_id: &str) -> TwitterResult<TwitterResponse<User>> {
-        let params = vec![
-            (
-                "user.fields".to_string(),
-                "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
-                    .to_string(),
-            ),
-        ];
+        let params = vec![(
+            "user.fields".to_string(),
+            "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
+                .to_string(),
+        )];
         self.get_with_params(&format!("/2/users/{}", user_id), &params)
             .await
     }
@@ -348,13 +343,11 @@ impl TwitterApiClient {
         &self,
         username: &str,
     ) -> TwitterResult<TwitterResponse<User>> {
-        let params = vec![
-            (
-                "user.fields".to_string(),
-                "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
-                    .to_string(),
-            ),
-        ];
+        let params = vec![(
+            "user.fields".to_string(),
+            "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
+                .to_string(),
+        )];
         self.get_with_params(&format!("/2/users/by/username/{}", username), &params)
             .await
     }
@@ -365,7 +358,8 @@ impl TwitterApiClient {
 
     /// Get a tweet by ID.
     pub async fn get_tweet(&self, tweet_id: &str) -> TwitterResult<TwitterResponse<Tweet>> {
-        let params = vec![
+        let params =
+            vec![
             (
                 "tweet.fields".to_string(),
                 "id,text,author_id,created_at,public_metrics,entities,attachments,conversation_id"
@@ -386,7 +380,10 @@ impl TwitterApiClient {
     }
 
     /// Get multiple tweets by ID.
-    pub async fn get_tweets(&self, tweet_ids: &[&str]) -> TwitterResult<TwitterResponse<Vec<Tweet>>> {
+    pub async fn get_tweets(
+        &self,
+        tweet_ids: &[&str],
+    ) -> TwitterResult<TwitterResponse<Vec<Tweet>>> {
         let params = vec![
             ("ids".to_string(), tweet_ids.join(",")),
             (
@@ -539,19 +536,24 @@ impl TwitterApiClient {
 
     /// Get current stream rules.
     pub async fn get_stream_rules(&self) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self.bearer_token.as_ref().ok_or_else(|| {
-            TwitterError::Config("Bearer token required for stream rules".into())
-        })?;
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         self.request_bearer("GET", "/2/tweets/search/stream/rules", None::<&()>, bearer)
             .await
     }
 
     /// Add stream rules.
-    pub async fn add_stream_rules(&self, rules: &[StreamRule]) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self.bearer_token.as_ref().ok_or_else(|| {
-            TwitterError::Config("Bearer token required for stream rules".into())
-        })?;
+    pub async fn add_stream_rules(
+        &self,
+        rules: &[StreamRule],
+    ) -> TwitterResult<StreamRulesResponse> {
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         #[derive(serde::Serialize)]
         struct AddRulesRequest<'a> {
@@ -564,10 +566,14 @@ impl TwitterApiClient {
     }
 
     /// Delete stream rules by ID.
-    pub async fn delete_stream_rules(&self, rule_ids: &[&str]) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self.bearer_token.as_ref().ok_or_else(|| {
-            TwitterError::Config("Bearer token required for stream rules".into())
-        })?;
+    pub async fn delete_stream_rules(
+        &self,
+        rule_ids: &[&str],
+    ) -> TwitterResult<StreamRulesResponse> {
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         #[derive(serde::Serialize)]
         struct DeleteRulesRequest<'a> {
@@ -783,12 +789,6 @@ mod tests {
         let result = client.get_me().await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            TwitterError::Api {
-                status: 401,
-                ..
-            }
-        ));
+        assert!(matches!(err, TwitterError::Api { status: 401, .. }));
     }
 }

@@ -56,14 +56,14 @@ mod meshnode {
         ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig,
         RetentionClass, SymbolRequestError,
     };
+    use fcp_protocol::{
+        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
+        SymbolRequest,
+    };
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
         StoredSymbol, SymbolMeta, SymbolStore,
-    };
-    use fcp_protocol::{
-        DecodeStatus, SymbolAck, SymbolAckReason, SymbolRequest,
-        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED,
     };
     use raptorq::ObjectTransmissionInformation;
     use semver::Version;
@@ -693,8 +693,7 @@ mod routing {
 
         let input = PlannerInput::new(nodes, 1000);
         // Exclude node-1 and node-2 (already visited in multi-hop)
-        let context =
-            PlannerContext::new(connector_id.clone()).excluding(vec!["node-1", "node-2"]);
+        let context = PlannerContext::new(connector_id.clone()).excluding(vec!["node-1", "node-2"]);
 
         let planner = ExecutionPlanner::new();
         let candidates = planner.plan(&input, &context);
@@ -726,8 +725,7 @@ mod routing {
         let nodes = vec![
             NodeInfo {
                 profile: {
-                    let mut p =
-                        create_profile_with_connector("node-high", &connector_id, "1.0.0");
+                    let mut p = create_profile_with_connector("node-high", &connector_id, "1.0.0");
                     p.memory_mb = 32768;
                     p.cpu_cores = 16;
                     p
@@ -967,7 +965,10 @@ mod admission_control {
 
         // Unauthenticated request should be rejected
         let result = controller.check_admission(&peer, 100, 5, false, now_ms);
-        assert!(matches!(result, Err(AdmissionError::AuthenticationRequired)));
+        assert!(matches!(
+            result,
+            Err(AdmissionError::AuthenticationRequired)
+        ));
 
         // Authenticated request should pass
         let result2 = controller.check_admission(&peer, 100, 5, true, now_ms);
@@ -1166,8 +1167,7 @@ mod policy_enforcement {
         ];
 
         let input = PlannerInput::new(nodes, 1000);
-        let context =
-            PlannerContext::new(connector_id.clone()).with_target_zone(work_zone.clone());
+        let context = PlannerContext::new(connector_id.clone()).with_target_zone(work_zone.clone());
 
         let planner = ExecutionPlanner::new();
         let candidates = planner.plan(&input, &context);
@@ -1306,8 +1306,7 @@ mod policy_enforcement {
             },
             NodeInfo {
                 profile: {
-                    let mut p =
-                        create_profile_with_connector("node-small", &connector_id, "1.0.0");
+                    let mut p = create_profile_with_connector("node-small", &connector_id, "1.0.0");
                     p.memory_mb = 4096;
                     p
                 },

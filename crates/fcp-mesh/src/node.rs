@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use fcp_core::{
-    CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId,
-    OperationIntent, OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId,
+    CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
+    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId,
 };
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
@@ -349,11 +349,10 @@ impl MeshNode {
 
         if let Some(profile) = &self.local_profile {
             if singleton_holder.is_none()
-                && self
-                    .local_leases
-                    .iter()
-                    .any(|lease| lease.purpose == crate::planner::LeasePurpose::SingletonWriter
-                        && lease.expires_at > now_secs)
+                && self.local_leases.iter().any(|lease| {
+                    lease.purpose == crate::planner::LeasePurpose::SingletonWriter
+                        && lease.expires_at > now_secs
+                })
             {
                 singleton_holder = Some(profile.node_id.as_str().to_string());
             }
@@ -417,7 +416,8 @@ impl MeshNode {
     {
         request.validate_idempotency_key()?;
 
-        let claims = verifier.verify(&request.capability_token, &request.operation, resource_uris)?;
+        let claims =
+            verifier.verify(&request.capability_token, &request.operation, resource_uris)?;
 
         if let Some(holder_node) = claims.get_holder_node() {
             let proof = request.holder_proof.as_ref().ok_or_else(|| {
@@ -436,11 +436,8 @@ impl MeshNode {
             let token_jti = claims
                 .get_jti()
                 .ok_or(MeshNodeEnforcementError::MissingTokenJti)?;
-            let signable = fcp_core::HolderProof::signable_bytes(
-                &request.id,
-                &request.operation,
-                token_jti,
-            );
+            let signable =
+                fcp_core::HolderProof::signable_bytes(&request.id, &request.operation, token_jti);
 
             let key = holder_key_lookup(&proof.holder_node).ok_or_else(|| {
                 MeshNodeEnforcementError::HolderKeyMissing {

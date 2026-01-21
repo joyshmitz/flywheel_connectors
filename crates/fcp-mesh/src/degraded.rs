@@ -69,7 +69,10 @@ pub enum DegradedTransportError {
 
     /// Zone ID hash mismatch.
     #[error("zone id hash mismatch: expected {expected:?}, got {got:?}")]
-    ZoneMismatch { expected: ZoneIdHash, got: ZoneIdHash },
+    ZoneMismatch {
+        expected: ZoneIdHash,
+        got: ZoneIdHash,
+    },
 
     /// Signature verification failed.
     #[error("signature verification failed")]

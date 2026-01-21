@@ -214,11 +214,7 @@ mod tests {
 
         let signer = OAuthSigner::new(&config);
         let header = signer
-            .sign(
-                "GET",
-                "https://api.twitter.com/2/users/me",
-                &[],
-            )
+            .sign("GET", "https://api.twitter.com/2/users/me", &[])
             .unwrap();
 
         assert!(header.starts_with("OAuth "));

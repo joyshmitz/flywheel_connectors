@@ -29,8 +29,7 @@ impl FcpcGoldenVector {
         vec![Self {
             description: "FCPC seal vector (seq=1, i2r, default flags)".into(),
             session_id: "0102030405060708090a0b0c0d0e0f10".into(),
-            key: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-                .into(),
+            key: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".into(),
             seq: 1,
             plaintext: "48656c6c6f2c204643504321".into(),
             expected_frame: concat!(

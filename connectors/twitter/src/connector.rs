@@ -3,12 +3,12 @@
 //! Implements the Flywheel Connector Protocol for Twitter/X API.
 //! Supports Operational, Streaming, and Bidirectional archetypes.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{BaseConnector, ConnectorId, FcpError};
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -64,12 +64,11 @@ impl TwitterConnector {
     pub async fn handle_configure(&mut self, params: Value) -> Result<Value, FcpError> {
         info!("Configuring Twitter connector");
 
-        let config: TwitterConfig = serde_json::from_value(params).map_err(|e| {
-            FcpError::InvalidRequest {
+        let config: TwitterConfig =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid configuration: {e}"),
-            }
-        })?;
+            })?;
 
         // Validate required fields
         if config.consumer_key.is_empty() {
@@ -384,7 +383,10 @@ impl TwitterConnector {
                 message: "Missing 'user_id' argument".into(),
             })?;
 
-        let response = client.get_user(user_id).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .get_user(user_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "user": response.data,
@@ -432,7 +434,10 @@ impl TwitterConnector {
                 message: "Missing 'tweet_id' argument".into(),
             })?;
 
-        let response = client.get_tweet(tweet_id).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .get_tweet(tweet_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "tweet": response.data,
@@ -443,24 +448,39 @@ impl TwitterConnector {
     async fn op_tweet_search(&self, args: Value) -> Result<Value, FcpError> {
         let client = self.require_client()?;
 
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1006,
-                message: "Missing 'query' argument".into(),
-            })?;
+        let query =
+            args.get("query")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1006,
+                    message: "Missing 'query' argument".into(),
+                })?;
 
         let params = SearchTweetsParams {
             query: query.to_string(),
-            max_results: args.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u32),
-            next_token: args.get("next_token").and_then(|v| v.as_str()).map(String::from),
-            since_id: args.get("since_id").and_then(|v| v.as_str()).map(String::from),
-            sort_order: args.get("sort_order").and_then(|v| v.as_str()).map(String::from),
+            max_results: args
+                .get("max_results")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            next_token: args
+                .get("next_token")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            since_id: args
+                .get("since_id")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            sort_order: args
+                .get("sort_order")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             ..Default::default()
         };
 
-        let response = client.search_recent(&params).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .search_recent(&params)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "tweets": response.data,
@@ -472,13 +492,13 @@ impl TwitterConnector {
     async fn op_tweet_create(&self, args: Value) -> Result<Value, FcpError> {
         let client = self.require_client()?;
 
-        let text = args
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1006,
-                message: "Missing 'text' argument".into(),
-            })?;
+        let text =
+            args.get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1006,
+                    message: "Missing 'text' argument".into(),
+                })?;
 
         // Validate tweet length (280 characters max)
         if text.chars().count() > 280 {
@@ -493,7 +513,10 @@ impl TwitterConnector {
             ..Default::default()
         };
 
-        let response = client.create_tweet(&request).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .create_tweet(&request)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "tweet": {
@@ -506,13 +529,13 @@ impl TwitterConnector {
     async fn op_tweet_reply(&self, args: Value) -> Result<Value, FcpError> {
         let client = self.require_client()?;
 
-        let text = args
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1006,
-                message: "Missing 'text' argument".into(),
-            })?;
+        let text =
+            args.get("text")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1006,
+                    message: "Missing 'text' argument".into(),
+                })?;
 
         let reply_to = args
             .get("reply_to")
@@ -539,7 +562,10 @@ impl TwitterConnector {
             ..Default::default()
         };
 
-        let response = client.create_tweet(&request).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .create_tweet(&request)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "tweet": {
@@ -560,7 +586,10 @@ impl TwitterConnector {
                 message: "Missing 'tweet_id' argument".into(),
             })?;
 
-        let response = client.delete_tweet(tweet_id).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .delete_tweet(tweet_id)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "deleted": response.data.deleted
@@ -582,7 +611,10 @@ impl TwitterConnector {
                 message: "Missing 'user_id' argument".into(),
             })?;
 
-        let max_results = args.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let pagination_token = args.get("pagination_token").and_then(|v| v.as_str());
 
         let response = client
@@ -612,7 +644,10 @@ impl TwitterConnector {
             });
         };
 
-        let max_results = args.get("max_results").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
         let pagination_token = args.get("pagination_token").and_then(|v| v.as_str());
 
         let response = client
@@ -634,7 +669,10 @@ impl TwitterConnector {
     async fn op_stream_rules_list(&self) -> Result<Value, FcpError> {
         let client = self.require_client()?;
 
-        let response = client.get_stream_rules().await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .get_stream_rules()
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "rules": response.data,
@@ -656,7 +694,10 @@ impl TwitterConnector {
                 message: format!("Invalid rules format: {e}"),
             })?;
 
-        let response = client.add_stream_rules(&rules).await.map_err(|e| e.to_fcp_error())?;
+        let response = client
+            .add_stream_rules(&rules)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
 
         Ok(json!({
             "rules": response.data,

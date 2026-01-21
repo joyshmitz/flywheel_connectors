@@ -48,8 +48,7 @@ impl CanonicalPayloadGoldenVector {
             name: "test".into(),
             active: true,
             expected_schema_hash:
-                "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23"
-                    .into(),
+                "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23".into(),
             expected_cbor: "a3626964193039646e616d65647465737466616374697665f5".into(),
         }]
     }
@@ -91,10 +90,11 @@ impl CanonicalPayloadGoldenVector {
 
         let expected_schema_hash = hex::decode(&self.expected_schema_hash)
             .map_err(|e| format!("invalid expected_schema_hash hex: {e}"))?;
-        let expected_cbor =
-            hex::decode(&self.expected_cbor).map_err(|e| format!("invalid expected_cbor hex: {e}"))?;
+        let expected_cbor = hex::decode(&self.expected_cbor)
+            .map_err(|e| format!("invalid expected_cbor hex: {e}"))?;
 
-        let mut expected_payload = Vec::with_capacity(expected_schema_hash.len() + expected_cbor.len());
+        let mut expected_payload =
+            Vec::with_capacity(expected_schema_hash.len() + expected_cbor.len());
         expected_payload.extend_from_slice(&expected_schema_hash);
         expected_payload.extend_from_slice(&expected_cbor);
 
@@ -158,8 +158,8 @@ impl ObjectIdGoldenVector {
             schema_version_patch: 0,
             key: "0000000000000000000000000000000000000000000000000000000000000000".into(),
             content: "68656c6c6f".into(),
-            expected_object_id:
-                "5fc04a5e6c6b549580a78b9dd99d7f92208022873def22441f58b8df8dd84f7e".into(),
+            expected_object_id: "5fc04a5e6c6b549580a78b9dd99d7f92208022873def22441f58b8df8dd84f7e"
+                .into(),
         }]
     }
 

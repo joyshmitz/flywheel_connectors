@@ -262,14 +262,17 @@ mod response_validation {
             "Capabilities missing",
             "FCP-3001",
         )
-        .with_missing_capabilities(vec![
-            "cap.admin.write".into(),
-            "cap.admin.delete".into(),
-        ]);
+        .with_missing_capabilities(vec!["cap.admin.write".into(), "cap.admin.delete".into()]);
 
         assert_eq!(resp.missing_capabilities.len(), 2);
-        assert!(resp.missing_capabilities.contains(&"cap.admin.write".to_string()));
-        assert!(resp.missing_capabilities.contains(&"cap.admin.delete".to_string()));
+        assert!(
+            resp.missing_capabilities
+                .contains(&"cap.admin.write".to_string())
+        );
+        assert!(
+            resp.missing_capabilities
+                .contains(&"cap.admin.delete".to_string())
+        );
     }
 
     #[test]
@@ -428,7 +431,10 @@ mod cost_estimate {
         let json1 = serde_json::to_string(&cost1).unwrap();
         let json2 = serde_json::to_string(&cost2).unwrap();
 
-        assert_eq!(json1, json2, "CostEstimate serialization must be deterministic");
+        assert_eq!(
+            json1, json2,
+            "CostEstimate serialization must be deterministic"
+        );
     }
 }
 
@@ -1080,8 +1086,9 @@ mod missing_capabilities {
 
     #[test]
     fn missing_capabilities_single_item() {
-        let resp = SimulateResponse::denied(RequestId::new("req_single"), "Missing cap", "FCP-3001")
-            .with_missing_capabilities(vec!["cap.only.one".into()]);
+        let resp =
+            SimulateResponse::denied(RequestId::new("req_single"), "Missing cap", "FCP-3001")
+                .with_missing_capabilities(vec!["cap.only.one".into()]);
 
         assert_eq!(resp.missing_capabilities.len(), 1);
         assert_eq!(resp.missing_capabilities[0], "cap.only.one");
@@ -1116,8 +1123,7 @@ mod adversarial {
     #[test]
     fn extremely_long_failure_reason() {
         let long_reason = "x".repeat(10000);
-        let resp =
-            SimulateResponse::denied(RequestId::new("req_long"), long_reason, "FCP-TEST");
+        let resp = SimulateResponse::denied(RequestId::new("req_long"), long_reason, "FCP-TEST");
 
         assert_eq!(resp.failure_reason.unwrap().len(), 10000);
     }
@@ -1165,7 +1171,9 @@ mod adversarial {
 
     #[test]
     fn zero_cost_values() {
-        let cost = CostEstimate::with_credits(0).and_duration_ms(0).and_bytes(0);
+        let cost = CostEstimate::with_credits(0)
+            .and_duration_ms(0)
+            .and_bytes(0);
 
         assert_eq!(cost.api_credits, Some(0));
         assert_eq!(cost.estimated_duration_ms, Some(0));

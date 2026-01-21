@@ -347,7 +347,11 @@ impl SymbolRequestHandler {
     }
 
     /// Track symbols sent for a request (starts or updates transfer state).
-    pub fn track_transfer(&mut self, request: &SymbolRequest, sent_esis: impl IntoIterator<Item = u32>) {
+    pub fn track_transfer(
+        &mut self,
+        request: &SymbolRequest,
+        sent_esis: impl IntoIterator<Item = u32>,
+    ) {
         let state = self
             .active_transfers
             .entry(request.object_id)

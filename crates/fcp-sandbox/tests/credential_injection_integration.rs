@@ -164,7 +164,11 @@ fn bearer_credential(id: &str, hosts: Vec<&str>) -> (String, MockCredentialMeta)
     )
 }
 
-fn api_key_credential(id: &str, header_name: &str, hosts: Vec<&str>) -> (String, MockCredentialMeta) {
+fn api_key_credential(
+    id: &str,
+    header_name: &str,
+    hosts: Vec<&str>,
+) -> (String, MockCredentialMeta) {
     (
         id.to_string(),
         MockCredentialMeta {
@@ -448,7 +452,9 @@ mod secret_leakage_prevention {
     fn debug_output_never_contains_secrets() {
         let injector = test_injector();
         let mut headers = vec![];
-        injector.inject_http("cred-api-bearer", &mut headers).unwrap();
+        injector
+            .inject_http("cred-api-bearer", &mut headers)
+            .unwrap();
 
         // Debug output of headers should show redacted values
         let debug_output = format!("{headers:?}");
@@ -463,7 +469,9 @@ mod secret_leakage_prevention {
     fn injected_value_shows_redaction_marker() {
         let injector = test_injector();
         let mut headers = vec![];
-        injector.inject_http("cred-api-bearer", &mut headers).unwrap();
+        injector
+            .inject_http("cred-api-bearer", &mut headers)
+            .unwrap();
 
         // The injected value contains the credential ID in redaction marker
         // This proves the connector can identify which credential was used
@@ -750,9 +758,15 @@ mod audit_events {
         let injector = test_injector();
 
         // Multiple injections
-        injector.inject_http("cred-api-bearer", &mut vec![]).unwrap();
-        injector.inject_http("cred-trusted-key", &mut vec![]).unwrap();
-        injector.inject_http("cred-api-bearer", &mut vec![]).unwrap();
+        injector
+            .inject_http("cred-api-bearer", &mut vec![])
+            .unwrap();
+        injector
+            .inject_http("cred-trusted-key", &mut vec![])
+            .unwrap();
+        injector
+            .inject_http("cred-api-bearer", &mut vec![])
+            .unwrap();
 
         // Verify all injections were counted (for audit trail)
         assert_eq!(injector.inject_count(), 3);

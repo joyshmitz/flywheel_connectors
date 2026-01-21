@@ -601,8 +601,7 @@ impl ExecutionPlanner {
 
         if local_count > 0 {
             // Additional bonus beyond what fitness already gives
-            let local_count_f64 =
-                f64::from(u32::try_from(local_count).unwrap_or(u32::MAX));
+            let local_count_f64 = f64::from(u32::try_from(local_count).unwrap_or(u32::MAX));
             let bonus = DATA_LOCALITY_BONUS * local_count_f64 / 2.0;
             candidate.adjust(ScoreAdjustment::bonus(
                 AdjustmentFactor::DataLocality,
