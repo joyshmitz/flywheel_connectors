@@ -338,3 +338,197 @@ decision_receipt = {
   ? explanation: tstr,
   signature: node_signature
 }
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Response Metadata
+; ─────────────────────────────────────────────────────────────────────────────
+
+response_metadata = {
+  ? processing_time_ms: uint,
+  ? cache_ttl_secs: uint,
+  from_cache: bool,
+  ? retry_after_secs: uint
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Simulate Messages (Section 9.4 - Preflight Checks)
+; ─────────────────────────────────────────────────────────────────────────────
+
+; Currency cost for cost estimation (OPTIONAL - only when stable pricing exists)
+currency_cost = {
+  amount_cents: uint,
+  currency_code: tstr
+}
+
+; Cost estimate for simulate responses
+cost_estimate = {
+  ? api_credits: uint,
+  ? estimated_duration_ms: uint,
+  ? estimated_bytes: uint,
+  ? currency: currency_cost
+}
+
+; Resource availability for simulate responses
+resource_availability = {
+  available: bool,
+  ? rate_limit_remaining: uint,
+  ? rate_limit_reset_at: uint,
+  ? details: tstr
+}
+
+; Invoke context (shared between invoke and simulate)
+invoke_context = {
+  ? locale: tstr,
+  ? pagination: any,
+  ? trace_id: tstr,
+  ? request_tags: { * tstr => tstr }
+}
+
+; Simulate request (NORMATIVE - preflight check)
+simulate_request = {
+  type: "simulate",
+  id: tstr,
+  connector_id: connector_id,
+  operation: operation_id,
+  zone_id: zone_id,
+  input: any,
+  capability_token: bstr,
+  estimate_cost: bool,
+  check_availability: bool,
+  ? context: invoke_context,
+  ? correlation_id: correlation_id
+}
+
+; Simulate response (NORMATIVE)
+simulate_response = {
+  type: "simulate_response",
+  id: tstr,
+  would_succeed: bool,
+  ? failure_reason: tstr,
+  ? denial_code: tstr,
+  missing_capabilities: [* tstr],
+  ? estimated_cost: cost_estimate,
+  ? availability: resource_availability,
+  ? response_metadata: response_metadata
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Invoke Messages (Section 9.7 - Operation Execution)
+; ─────────────────────────────────────────────────────────────────────────────
+
+; Holder proof for token binding (Ed25519 signature)
+holder_proof = {
+  signature: bstr .size 64,
+  holder_node: tstr
+}
+
+invoke_status = "ok" / "error"
+
+; Invoke request (NORMATIVE - operation execution)
+invoke_request = {
+  type: "invoke",
+  id: tstr,
+  connector_id: connector_id,
+  operation: operation_id,
+  zone_id: zone_id,
+  input: any,
+  capability_token: bstr,
+  ? holder_proof: holder_proof,
+  ? context: invoke_context,
+  ? idempotency_key: tstr,
+  ? lease_seq: uint,
+  ? deadline_ms: uint,
+  ? correlation_id: correlation_id,
+  ? provenance: provenance,
+  ? approval_tokens: [* approval_token]
+}
+
+; Invoke response (NORMATIVE)
+invoke_response = {
+  type: "response",
+  id: tstr,
+  status: invoke_status,
+  ? result: any,
+  ? error: fcp_error,
+  ? receipt_id: object_id,
+  ? audit_event_id: object_id,
+  ? decision_receipt_id: object_id,
+  resource_uris: [* tstr],
+  ? next_cursor: tstr,
+  ? response_metadata: response_metadata
+}
+
+; FCP error object
+fcp_error = {
+  code: tstr,
+  message: tstr,
+  ? category: tstr,
+  ? details: any,
+  ? ai_recovery_hint: tstr,
+  ? retry_after_ms: uint
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Subscribe Messages (Section 9.9 - Event Streaming)
+; ─────────────────────────────────────────────────────────────────────────────
+
+; Subscribe request (NORMATIVE)
+subscribe_request = {
+  type: "subscribe",
+  id: tstr,
+  topics: [* tstr],
+  ? since: tstr,
+  ? max_events_per_sec: uint,
+  ? batch_ms: uint,
+  ? window_size: uint,
+  ? capability_token: bstr
+}
+
+; Replay buffer information
+replay_buffer_info = {
+  min_events: uint,
+  overflow: tstr
+}
+
+; Subscribe result details
+subscribe_result = {
+  confirmed_topics: [* tstr],
+  cursors: { * tstr => tstr },
+  replay_supported: bool,
+  ? buffer: replay_buffer_info
+}
+
+; Subscribe response (NORMATIVE)
+subscribe_response = {
+  type: "response",
+  id: tstr,
+  result: subscribe_result
+}
+
+; Unsubscribe request
+unsubscribe_request = {
+  type: "unsubscribe",
+  id: tstr,
+  topics: [* tstr],
+  ? capability_token: bstr
+}
+
+; ─────────────────────────────────────────────────────────────────────────────
+; Shutdown Messages (Section 9.12)
+; ─────────────────────────────────────────────────────────────────────────────
+
+; Shutdown request
+shutdown_request = {
+  type: "shutdown",
+  deadline_ms: uint,
+  drain: bool,
+  ? reason: tstr
+}
+
+; Shutdown acknowledgment
+shutdown_ack = {
+  type: "shutdown_ack",
+  status: tstr,
+  ? flushed_events: uint,
+  ? pending_events: uint
+}

@@ -1446,6 +1446,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-protocol",
  "fcp-raptorq",
+ "fcp-store",
  "fcp-tailscale",
  "hex",
  "hkdf",

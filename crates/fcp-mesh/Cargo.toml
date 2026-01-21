@@ -20,6 +20,7 @@ fcp-core = { path = "../fcp-core" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-protocol = { path = "../fcp-protocol" }
 fcp-raptorq = { path = "../fcp-raptorq" }
+fcp-store = { path = "../fcp-store" }
 raptorq.workspace = true
 fcp-tailscale = { path = "../fcp-tailscale" }
 hex.workspace = true
