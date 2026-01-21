@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CapabilityToken, ConnectorId, EventEnvelope, FcpResult, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, ShutdownRequest,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 
 /// Type alias for event streams.
@@ -44,6 +44,24 @@ pub trait FcpConnector: Send + Sync {
 
     /// Invoke an operation.
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse>;
+
+    /// Simulate an operation (preflight check).
+    ///
+    /// Per FCP Specification Section 9.4:
+    /// Allows callers to check if an operation would succeed (capability check,
+    /// resource availability, cost estimation) without executing it.
+    ///
+    /// **Hard Requirements:**
+    /// - **No side effects:** simulate MUST NOT perform external writes or mutate external state.
+    /// - **Policy-aware:** simulate must reflect capability/policy gating as closely as invoke.
+    /// - **Deterministic & bounded:** checks must be bounded (timeouts, size limits).
+    ///
+    /// Connectors SHOULD implement simulate for expensive or dangerous operations.
+    /// The default implementation returns "allowed" with no cost estimate.
+    async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        // Default implementation: operation would succeed, no cost/availability info
+        Ok(SimulateResponse::allowed(req.id))
+    }
 
     /// Subscribe to event topics.
     async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse>;

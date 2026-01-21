@@ -609,6 +609,444 @@ impl InvokeResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Simulate Messages (Section 9.4 - Preflight Checks)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Simulate request for preflight checks (NORMATIVE).
+///
+/// Per FCP Specification Section 9.4:
+/// Allows callers to check if an operation would succeed (capability check,
+/// resource availability, cost estimation) without executing it.
+///
+/// **Hard Requirements:**
+/// - **No side effects:** simulate MUST NOT perform external writes or mutate external state.
+/// - **Policy-aware:** simulate must reflect capability/policy gating as closely as invoke.
+/// - **Deterministic & bounded:** cost estimation and availability checks must be bounded
+///   (timeouts, size limits) and deterministic given the same inputs.
+///
+/// Connectors SHOULD implement simulate for expensive or dangerous operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateRequest {
+    /// Message type (always "simulate")
+    pub r#type: String,
+
+    /// Unique request ID for correlation
+    pub id: RequestId,
+
+    /// Target connector for this request (NORMATIVE).
+    pub connector_id: ConnectorId,
+
+    /// Operation to simulate
+    pub operation: OperationId,
+
+    /// Zone context for the request (NORMATIVE).
+    pub zone_id: ZoneId,
+
+    /// Input parameters
+    pub input: serde_json::Value,
+
+    /// Capability token authorizing this request
+    pub capability_token: CapabilityToken,
+
+    /// Request cost estimate.
+    ///
+    /// When true, the connector SHOULD populate `estimated_cost` in the response.
+    #[serde(default)]
+    pub estimate_cost: bool,
+
+    /// Check resource availability.
+    ///
+    /// When true, the connector MAY check if the target resource exists
+    /// and return rate limit headroom information.
+    #[serde(default)]
+    pub check_availability: bool,
+
+    /// Request context (locale, pagination, `trace_id`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<InvokeContext>,
+
+    /// Correlation ID for tracing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<CorrelationId>,
+}
+
+impl SimulateRequest {
+    /// Create a new simulate request.
+    #[must_use]
+    pub fn new(
+        connector_id: ConnectorId,
+        operation: OperationId,
+        zone_id: ZoneId,
+        input: serde_json::Value,
+        capability_token: CapabilityToken,
+    ) -> Self {
+        Self {
+            r#type: "simulate".into(),
+            id: RequestId::random(),
+            connector_id,
+            operation,
+            zone_id,
+            input,
+            capability_token,
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        }
+    }
+
+    /// Enable cost estimation.
+    #[must_use]
+    pub const fn with_cost_estimate(mut self) -> Self {
+        self.estimate_cost = true;
+        self
+    }
+
+    /// Enable availability checking.
+    #[must_use]
+    pub const fn with_availability_check(mut self) -> Self {
+        self.check_availability = true;
+        self
+    }
+
+    /// Set the request context.
+    #[must_use]
+    pub fn with_context(mut self, context: InvokeContext) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    /// Set the correlation ID.
+    #[must_use]
+    pub const fn with_correlation_id(mut self, correlation_id: CorrelationId) -> Self {
+        self.correlation_id = Some(correlation_id);
+        self
+    }
+}
+
+/// Simulate response (NORMATIVE).
+///
+/// Per FCP Specification Section 9.4:
+/// Contains the result of the preflight simulation including:
+/// - Whether the operation would succeed
+/// - Missing capabilities or policy denials
+/// - Cost estimates (if requested)
+/// - Resource availability (if requested)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulateResponse {
+    /// Message type (always `simulate_response`)
+    pub r#type: String,
+
+    /// Request ID this is responding to
+    pub id: RequestId,
+
+    /// Would the operation succeed with current capabilities/state?
+    pub would_succeed: bool,
+
+    /// If `would_succeed` is false, why not?
+    ///
+    /// This is a human-readable explanation. For machine-readable codes,
+    /// use `denial_code`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+
+    /// FCP error code if denied (e.g., "FCP-3001" for capability denied).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denial_code: Option<String>,
+
+    /// Missing capabilities needed (if any).
+    ///
+    /// The list of capability IDs that would be required to execute
+    /// this operation but are not present in the capability token.
+    #[serde(default)]
+    pub missing_capabilities: Vec<String>,
+
+    /// Estimated cost (if `estimate_cost` was true in request).
+    ///
+    /// This is populated when the connector can provide usage estimates.
+    /// Note: We do NOT embed pricing tables in connectors - this contains
+    /// usage metrics (tokens, bytes, duration) not currency costs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_cost: Option<CostEstimate>,
+
+    /// Resource availability check result (if `check_availability` was true).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub availability: Option<ResourceAvailability>,
+
+    /// Response metadata (timing, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_metadata: Option<ResponseMetadata>,
+}
+
+impl SimulateResponse {
+    /// Create a successful simulation response (operation would succeed).
+    #[must_use]
+    pub fn allowed(id: RequestId) -> Self {
+        Self {
+            r#type: "simulate_response".into(),
+            id,
+            would_succeed: true,
+            failure_reason: None,
+            denial_code: None,
+            missing_capabilities: Vec::new(),
+            estimated_cost: None,
+            availability: None,
+            response_metadata: None,
+        }
+    }
+
+    /// Create a denied simulation response (operation would fail).
+    #[must_use]
+    pub fn denied(
+        id: RequestId,
+        reason: impl Into<String>,
+        denial_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            r#type: "simulate_response".into(),
+            id,
+            would_succeed: false,
+            failure_reason: Some(reason.into()),
+            denial_code: Some(denial_code.into()),
+            missing_capabilities: Vec::new(),
+            estimated_cost: None,
+            availability: None,
+            response_metadata: None,
+        }
+    }
+
+    /// Add missing capabilities.
+    #[must_use]
+    pub fn with_missing_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.missing_capabilities = capabilities;
+        self
+    }
+
+    /// Set the cost estimate.
+    #[must_use]
+    pub fn with_cost_estimate(mut self, cost: CostEstimate) -> Self {
+        self.estimated_cost = Some(cost);
+        self
+    }
+
+    /// Set the availability result.
+    #[must_use]
+    pub fn with_availability(mut self, availability: ResourceAvailability) -> Self {
+        self.availability = Some(availability);
+        self
+    }
+
+    /// Set response metadata.
+    #[must_use]
+    pub const fn with_metadata(mut self, metadata: ResponseMetadata) -> Self {
+        self.response_metadata = Some(metadata);
+        self
+    }
+}
+
+/// Cost estimate for simulation (NORMATIVE when present).
+///
+/// Per FCP Specification Section 9.4:
+/// Contains usage estimates for an operation. We do NOT embed pricing tables
+/// in connectors (pricing changes frequently). Connectors SHOULD populate
+/// usage metrics (tokens/credits/bytes/duration) when they can.
+///
+/// `CurrencyCost` is OPTIONAL and should only be populated when the connector
+/// has a stable, explicit currency basis that does not require volatile price tables.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CostEstimate {
+    /// Estimated API credits/tokens consumed.
+    ///
+    /// The unit depends on the external service (e.g., LLM tokens,
+    /// API credits, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_credits: Option<u64>,
+
+    /// Estimated execution time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_duration_ms: Option<u64>,
+
+    /// Estimated bytes transferred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_bytes: Option<u64>,
+
+    /// Currency cost estimate (if applicable).
+    ///
+    /// OPTIONAL: Only populate when the connector has explicit, stable
+    /// pricing information. Do NOT embed volatile price tables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<CurrencyCost>,
+}
+
+impl CostEstimate {
+    /// Create a new cost estimate with API credits.
+    #[must_use]
+    pub const fn with_credits(credits: u64) -> Self {
+        Self {
+            api_credits: Some(credits),
+            estimated_duration_ms: None,
+            estimated_bytes: None,
+            currency: None,
+        }
+    }
+
+    /// Create a new cost estimate with duration.
+    #[must_use]
+    pub const fn with_duration_ms(duration_ms: u64) -> Self {
+        Self {
+            api_credits: None,
+            estimated_duration_ms: Some(duration_ms),
+            estimated_bytes: None,
+            currency: None,
+        }
+    }
+
+    /// Create a new cost estimate with bytes.
+    #[must_use]
+    pub const fn with_bytes(bytes: u64) -> Self {
+        Self {
+            api_credits: None,
+            estimated_duration_ms: None,
+            estimated_bytes: Some(bytes),
+            currency: None,
+        }
+    }
+
+    /// Add API credits to the estimate.
+    #[must_use]
+    pub const fn and_credits(mut self, credits: u64) -> Self {
+        self.api_credits = Some(credits);
+        self
+    }
+
+    /// Add duration to the estimate.
+    #[must_use]
+    pub const fn and_duration_ms(mut self, duration_ms: u64) -> Self {
+        self.estimated_duration_ms = Some(duration_ms);
+        self
+    }
+
+    /// Add bytes to the estimate.
+    #[must_use]
+    pub const fn and_bytes(mut self, bytes: u64) -> Self {
+        self.estimated_bytes = Some(bytes);
+        self
+    }
+
+    /// Add currency cost to the estimate.
+    #[must_use]
+    pub fn and_currency(mut self, currency: CurrencyCost) -> Self {
+        self.currency = Some(currency);
+        self
+    }
+}
+
+/// Currency cost for cost estimation.
+///
+/// Per FCP Specification Section 9.4:
+/// Only populate when the connector has explicit, stable pricing information.
+/// Do NOT embed volatile price tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrencyCost {
+    /// Amount in smallest currency unit (e.g., cents for USD).
+    pub amount_cents: u64,
+
+    /// ISO 4217 currency code (e.g., "USD", "EUR").
+    pub currency_code: String,
+}
+
+impl CurrencyCost {
+    /// Create a new currency cost.
+    #[must_use]
+    pub fn new(amount_cents: u64, currency_code: impl Into<String>) -> Self {
+        Self {
+            amount_cents,
+            currency_code: currency_code.into(),
+        }
+    }
+
+    /// Create a USD cost.
+    #[must_use]
+    pub const fn usd(amount_cents: u64) -> Self {
+        Self {
+            amount_cents,
+            currency_code: String::new(), // Will be set in constructor
+        }
+    }
+}
+
+/// Convenience constructor for USD costs.
+impl CurrencyCost {
+    /// Create a USD currency cost.
+    #[must_use]
+    pub fn usd_cents(amount_cents: u64) -> Self {
+        Self::new(amount_cents, "USD")
+    }
+}
+
+/// Resource availability check result.
+///
+/// Per FCP Specification Section 9.4:
+/// Reports resource existence and rate limit headroom. Availability checks
+/// MUST be read-only, time-bounded, and avoid leaking secrets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceAvailability {
+    /// Is the resource available?
+    pub available: bool,
+
+    /// Rate limit headroom (remaining requests/tokens in current window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<u32>,
+
+    /// When rate limit resets (Unix timestamp in seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_at: Option<u64>,
+
+    /// Additional availability details (connector-specific).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+impl ResourceAvailability {
+    /// Create an availability result indicating the resource is available.
+    #[must_use]
+    pub const fn available() -> Self {
+        Self {
+            available: true,
+            rate_limit_remaining: None,
+            rate_limit_reset_at: None,
+            details: None,
+        }
+    }
+
+    /// Create an availability result indicating the resource is unavailable.
+    #[must_use]
+    pub fn unavailable(details: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            rate_limit_remaining: None,
+            rate_limit_reset_at: None,
+            details: Some(details.into()),
+        }
+    }
+
+    /// Add rate limit information.
+    #[must_use]
+    pub const fn with_rate_limit(mut self, remaining: u32, reset_at: Option<u64>) -> Self {
+        self.rate_limit_remaining = Some(remaining);
+        self.rate_limit_reset_at = reset_at;
+        self
+    }
+
+    /// Add details.
+    #[must_use]
+    pub fn with_details(mut self, details: impl Into<String>) -> Self {
+        self.details = Some(details.into());
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Subscribe Messages (Section 9.9)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1523,5 +1961,298 @@ mod tests {
         let id = CorrelationId::new();
         let display = id.to_string();
         assert!(!display.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Simulate Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn base_simulate_request() -> SimulateRequest {
+        SimulateRequest::new(
+            ConnectorId::from_static("gmail:fcp2:1.0"),
+            "gmail.search".parse().unwrap(),
+            ZoneId::work(),
+            serde_json::json!({"query": "from:alice"}),
+            CapabilityToken::test_token(),
+        )
+    }
+
+    #[test]
+    fn simulate_request_new() {
+        let req = base_simulate_request();
+        assert_eq!(req.r#type, "simulate");
+        assert_eq!(req.connector_id.as_str(), "gmail:fcp2:1.0");
+        assert_eq!(req.operation.as_str(), "gmail.search");
+        assert!(!req.estimate_cost);
+        assert!(!req.check_availability);
+    }
+
+    #[test]
+    fn simulate_request_with_options() {
+        let req = base_simulate_request()
+            .with_cost_estimate()
+            .with_availability_check()
+            .with_correlation_id(CorrelationId::new());
+
+        assert!(req.estimate_cost);
+        assert!(req.check_availability);
+        assert!(req.correlation_id.is_some());
+    }
+
+    #[test]
+    fn simulate_request_serialization_roundtrip() {
+        let req = SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new("sim_001"),
+            connector_id: ConnectorId::from_static("gmail:fcp2:1.0"),
+            operation: "gmail.search".parse().unwrap(),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({"query": "test"}),
+            capability_token: CapabilityToken::test_token(),
+            estimate_cost: true,
+            check_availability: true,
+            context: Some(InvokeContext {
+                locale: Some("en-US".into()),
+                pagination: None,
+                trace_id: Some("trace-123".into()),
+                request_tags: Default::default(),
+            }),
+            correlation_id: Some(CorrelationId::new()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: SimulateRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.r#type, "simulate");
+        assert_eq!(deserialized.id.0, "sim_001");
+        assert_eq!(deserialized.connector_id.as_str(), "gmail:fcp2:1.0");
+        assert!(deserialized.estimate_cost);
+        assert!(deserialized.check_availability);
+        assert!(deserialized.context.is_some());
+    }
+
+    #[test]
+    fn simulate_response_allowed() {
+        let resp = SimulateResponse::allowed(RequestId::new("sim_001"));
+
+        assert_eq!(resp.r#type, "simulate_response");
+        assert_eq!(resp.id.0, "sim_001");
+        assert!(resp.would_succeed);
+        assert!(resp.failure_reason.is_none());
+        assert!(resp.denial_code.is_none());
+        assert!(resp.missing_capabilities.is_empty());
+    }
+
+    #[test]
+    fn simulate_response_denied() {
+        let resp = SimulateResponse::denied(
+            RequestId::new("sim_002"),
+            "Insufficient permissions",
+            "FCP-3001",
+        )
+        .with_missing_capabilities(vec!["gmail.send".into()]);
+
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.failure_reason, Some("Insufficient permissions".into()));
+        assert_eq!(resp.denial_code, Some("FCP-3001".into()));
+        assert_eq!(resp.missing_capabilities, vec!["gmail.send".to_string()]);
+    }
+
+    #[test]
+    fn simulate_response_with_cost() {
+        let cost = CostEstimate::with_credits(1000)
+            .and_duration_ms(500)
+            .and_bytes(4096);
+
+        let resp = SimulateResponse::allowed(RequestId::new("sim_003")).with_cost_estimate(cost);
+
+        assert!(resp.estimated_cost.is_some());
+        let cost = resp.estimated_cost.unwrap();
+        assert_eq!(cost.api_credits, Some(1000));
+        assert_eq!(cost.estimated_duration_ms, Some(500));
+        assert_eq!(cost.estimated_bytes, Some(4096));
+    }
+
+    #[test]
+    fn simulate_response_with_availability() {
+        let availability = ResourceAvailability::available().with_rate_limit(95, Some(1700000000));
+
+        let resp =
+            SimulateResponse::allowed(RequestId::new("sim_004")).with_availability(availability);
+
+        assert!(resp.availability.is_some());
+        let avail = resp.availability.unwrap();
+        assert!(avail.available);
+        assert_eq!(avail.rate_limit_remaining, Some(95));
+        assert_eq!(avail.rate_limit_reset_at, Some(1700000000));
+    }
+
+    #[test]
+    fn simulate_response_serialization_roundtrip() {
+        let resp = SimulateResponse::allowed(RequestId::new("sim_005"))
+            .with_cost_estimate(CostEstimate::with_credits(500))
+            .with_availability(ResourceAvailability::available())
+            .with_metadata(ResponseMetadata {
+                processing_time_ms: Some(10),
+                ..Default::default()
+            });
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: SimulateResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.would_succeed);
+        assert!(deserialized.estimated_cost.is_some());
+        assert!(deserialized.availability.is_some());
+        assert!(deserialized.response_metadata.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CostEstimate Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cost_estimate_with_credits() {
+        let cost = CostEstimate::with_credits(1000);
+        assert_eq!(cost.api_credits, Some(1000));
+        assert!(cost.estimated_duration_ms.is_none());
+        assert!(cost.estimated_bytes.is_none());
+        assert!(cost.currency.is_none());
+    }
+
+    #[test]
+    fn cost_estimate_with_duration() {
+        let cost = CostEstimate::with_duration_ms(250);
+        assert!(cost.api_credits.is_none());
+        assert_eq!(cost.estimated_duration_ms, Some(250));
+    }
+
+    #[test]
+    fn cost_estimate_with_bytes() {
+        let cost = CostEstimate::with_bytes(8192);
+        assert_eq!(cost.estimated_bytes, Some(8192));
+    }
+
+    #[test]
+    fn cost_estimate_builder_chain() {
+        let cost = CostEstimate::with_credits(100)
+            .and_duration_ms(50)
+            .and_bytes(1024)
+            .and_currency(CurrencyCost::usd_cents(5));
+
+        assert_eq!(cost.api_credits, Some(100));
+        assert_eq!(cost.estimated_duration_ms, Some(50));
+        assert_eq!(cost.estimated_bytes, Some(1024));
+        assert!(cost.currency.is_some());
+        let currency = cost.currency.unwrap();
+        assert_eq!(currency.amount_cents, 5);
+        assert_eq!(currency.currency_code, "USD");
+    }
+
+    #[test]
+    fn cost_estimate_default() {
+        let cost = CostEstimate::default();
+        assert!(cost.api_credits.is_none());
+        assert!(cost.estimated_duration_ms.is_none());
+        assert!(cost.estimated_bytes.is_none());
+        assert!(cost.currency.is_none());
+    }
+
+    #[test]
+    fn cost_estimate_serialization_roundtrip() {
+        let cost = CostEstimate::with_credits(1500)
+            .and_duration_ms(300)
+            .and_bytes(2048)
+            .and_currency(CurrencyCost::new(10, "EUR"));
+
+        let json = serde_json::to_string(&cost).unwrap();
+        let deserialized: CostEstimate = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.api_credits, Some(1500));
+        assert_eq!(deserialized.estimated_duration_ms, Some(300));
+        assert_eq!(deserialized.estimated_bytes, Some(2048));
+        assert!(deserialized.currency.is_some());
+        let currency = deserialized.currency.unwrap();
+        assert_eq!(currency.amount_cents, 10);
+        assert_eq!(currency.currency_code, "EUR");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CurrencyCost Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn currency_cost_new() {
+        let cost = CurrencyCost::new(500, "USD");
+        assert_eq!(cost.amount_cents, 500);
+        assert_eq!(cost.currency_code, "USD");
+    }
+
+    #[test]
+    fn currency_cost_usd_cents() {
+        let cost = CurrencyCost::usd_cents(1234);
+        assert_eq!(cost.amount_cents, 1234);
+        assert_eq!(cost.currency_code, "USD");
+    }
+
+    #[test]
+    fn currency_cost_serialization_roundtrip() {
+        let cost = CurrencyCost::new(9999, "GBP");
+
+        let json = serde_json::to_string(&cost).unwrap();
+        let deserialized: CurrencyCost = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.amount_cents, 9999);
+        assert_eq!(deserialized.currency_code, "GBP");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ResourceAvailability Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resource_availability_available() {
+        let avail = ResourceAvailability::available();
+        assert!(avail.available);
+        assert!(avail.rate_limit_remaining.is_none());
+        assert!(avail.rate_limit_reset_at.is_none());
+        assert!(avail.details.is_none());
+    }
+
+    #[test]
+    fn resource_availability_unavailable() {
+        let avail = ResourceAvailability::unavailable("Resource deleted");
+        assert!(!avail.available);
+        assert_eq!(avail.details, Some("Resource deleted".into()));
+    }
+
+    #[test]
+    fn resource_availability_with_rate_limit() {
+        let avail = ResourceAvailability::available().with_rate_limit(50, Some(1700000000));
+
+        assert!(avail.available);
+        assert_eq!(avail.rate_limit_remaining, Some(50));
+        assert_eq!(avail.rate_limit_reset_at, Some(1700000000));
+    }
+
+    #[test]
+    fn resource_availability_with_details() {
+        let avail = ResourceAvailability::available().with_details("Full access granted");
+
+        assert_eq!(avail.details, Some("Full access granted".into()));
+    }
+
+    #[test]
+    fn resource_availability_serialization_roundtrip() {
+        let avail = ResourceAvailability::available()
+            .with_rate_limit(100, Some(1700000000))
+            .with_details("Healthy");
+
+        let json = serde_json::to_string(&avail).unwrap();
+        let deserialized: ResourceAvailability = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.available);
+        assert_eq!(deserialized.rate_limit_remaining, Some(100));
+        assert_eq!(deserialized.rate_limit_reset_at, Some(1700000000));
+        assert_eq!(deserialized.details, Some("Healthy".into()));
     }
 }

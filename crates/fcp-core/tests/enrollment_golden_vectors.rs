@@ -22,11 +22,11 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceId, DeviceMetadata, EnrollmentStatus,
-    FcpError, KeyRotationSchedule, KeyType, NodeId, NodeSignature, ObjectHeader, ObjectId,
-    ObjectIdKeyId, Provenance, RevocationObject, RevocationRegistry, RevocationScope, ZoneId,
-    ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest, DEFAULT_ENROLLMENT_VALIDITY_HOURS,
-    DEFAULT_KEY_ROTATION_HOURS,
+    DEFAULT_ENROLLMENT_VALIDITY_HOURS, DEFAULT_KEY_ROTATION_HOURS, DeviceEnrollmentApproval,
+    DeviceEnrollmentRequest, DeviceId, DeviceMetadata, EnrollmentStatus, FcpError,
+    KeyRotationSchedule, KeyType, NodeId, NodeSignature, ObjectHeader, ObjectId, ObjectIdKeyId,
+    Provenance, RevocationObject, RevocationRegistry, RevocationScope, ZoneId, ZoneKeyAlgorithm,
+    ZoneKeyId, ZoneKeyManifest,
 };
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
 use serde::{Deserialize, Serialize};
@@ -55,11 +55,11 @@ fn log_test_event(test_name: &str, event: &str, details: &serde_json::Value) {
 
 /// Create test keys for enrollment scenarios.
 fn create_test_keys() -> (
-    Ed25519SigningKey,                             // device signing secret
-    fcp_crypto::Ed25519VerifyingKey,               // device signing pubkey
-    fcp_crypto::X25519PublicKey,                   // device encryption pubkey
-    fcp_crypto::Ed25519VerifyingKey,               // device issuance pubkey
-    Ed25519SigningKey,                             // owner key
+    Ed25519SigningKey,               // device signing secret
+    fcp_crypto::Ed25519VerifyingKey, // device signing pubkey
+    fcp_crypto::X25519PublicKey,     // device encryption pubkey
+    fcp_crypto::Ed25519VerifyingKey, // device issuance pubkey
+    Ed25519SigningKey,               // owner key
 ) {
     let signing_key = Ed25519SigningKey::generate();
     let encryption_key = X25519SecretKey::generate();
@@ -322,7 +322,9 @@ fn generate_enrollment_approval_vectors() {
         zone_id: approval_multi_tag.zone_id.as_str().to_string(),
         approved_tags: approval_multi_tag.approved_tags.clone(),
         validity_hours: 720,
-        is_valid: approval_multi_tag.verify(&owner_key.verifying_key()).is_ok(),
+        is_valid: approval_multi_tag
+            .verify(&owner_key.verifying_key())
+            .is_ok(),
         error_type: None,
     });
 
@@ -642,7 +644,8 @@ mod adversarial {
             }),
         );
 
-        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) = create_test_keys();
+        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) =
+            create_test_keys();
 
         // Create a legitimate request
         let mut request = DeviceEnrollmentRequest::new(
@@ -656,7 +659,10 @@ mod adversarial {
         .expect("request creation should succeed");
 
         // Verify original request is valid
-        assert!(request.verify_proof().is_ok(), "Original request should be valid");
+        assert!(
+            request.verify_proof().is_ok(),
+            "Original request should be valid"
+        );
 
         // Attacker tampers with device_id
         request.device_id = DeviceId::new("stolen-device-id");
@@ -816,7 +822,8 @@ mod adversarial {
             }),
         );
 
-        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) = create_test_keys();
+        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) =
+            create_test_keys();
 
         let mut request = DeviceEnrollmentRequest::new(
             "device-tamper-test",
@@ -895,11 +902,19 @@ mod adversarial {
 
         // Device is approved for community zone
         assert_eq!(approval.zone_id, ZoneId::community());
-        assert!(approval.approved_tags.contains(&"fcp:zone:community".to_string()));
+        assert!(
+            approval
+                .approved_tags
+                .contains(&"fcp:zone:community".to_string())
+        );
 
         // Device is NOT approved for private zone
         assert_ne!(approval.zone_id, ZoneId::private());
-        assert!(!approval.approved_tags.contains(&"fcp:zone:private".to_string()));
+        assert!(
+            !approval
+                .approved_tags
+                .contains(&"fcp:zone:private".to_string())
+        );
 
         // Zone enforcement should reject access to private zone
         let can_access_private = approval.approved_tags.iter().any(|t| t.contains("private"));
@@ -1097,7 +1112,8 @@ mod enrollment_flow {
             &serde_json::json!({"purpose": "Verify enrollment request proof of possession"}),
         );
 
-        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) = create_test_keys();
+        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) =
+            create_test_keys();
 
         let request = DeviceEnrollmentRequest::new(
             "verify-test-device",
@@ -1232,16 +1248,19 @@ mod key_rotation {
 
         let schedule = KeyRotationSchedule::default();
 
-        assert_eq!(schedule.signing_key_rotation_hours, DEFAULT_KEY_ROTATION_HOURS);
-        assert_eq!(schedule.encryption_key_rotation_hours, DEFAULT_KEY_ROTATION_HOURS);
+        assert_eq!(
+            schedule.signing_key_rotation_hours,
+            DEFAULT_KEY_ROTATION_HOURS
+        );
+        assert_eq!(
+            schedule.encryption_key_rotation_hours,
+            DEFAULT_KEY_ROTATION_HOURS
+        );
         assert_eq!(
             schedule.issuance_key_rotation_hours,
             DEFAULT_KEY_ROTATION_HOURS * 7
         );
-        assert_eq!(
-            schedule.max_key_age_hours,
-            DEFAULT_KEY_ROTATION_HOURS * 30
-        );
+        assert_eq!(schedule.max_key_age_hours, DEFAULT_KEY_ROTATION_HOURS * 30);
         assert!(schedule.allow_overlap);
         assert_eq!(schedule.overlap_hours, 1);
 
@@ -1475,7 +1494,8 @@ mod device_removal {
             &serde_json::json!({"purpose": "Verify revoked device cannot re-enroll"}),
         );
 
-        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) = create_test_keys();
+        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) =
+            create_test_keys();
 
         // Create revocation registry with device's key revoked
         let mut registry = RevocationRegistry::new();
@@ -1600,9 +1620,7 @@ mod device_removal {
         let mut registry = RevocationRegistry::new();
 
         // Create multiple device IDs to revoke
-        let device_ids: Vec<ObjectId> = (0..5u8)
-            .map(|i| ObjectId::from_bytes([i; 32]))
-            .collect();
+        let device_ids: Vec<ObjectId> = (0..5u8).map(|i| ObjectId::from_bytes([i; 32])).collect();
 
         // Create single revocation for all devices
         let revocation = RevocationObject {
@@ -1667,8 +1685,10 @@ mod deterministic_keys {
         );
 
         // Create deterministic keys from known seed
-        let signing_key1 = Ed25519SigningKey::from_bytes(&[1u8; 32]).expect("key creation should succeed");
-        let signing_key2 = Ed25519SigningKey::from_bytes(&[1u8; 32]).expect("key creation should succeed");
+        let signing_key1 =
+            Ed25519SigningKey::from_bytes(&[1u8; 32]).expect("key creation should succeed");
+        let signing_key2 =
+            Ed25519SigningKey::from_bytes(&[1u8; 32]).expect("key creation should succeed");
 
         // Same seed should produce same key ID
         assert_eq!(
@@ -1677,7 +1697,8 @@ mod deterministic_keys {
         );
 
         // Different seed should produce different key ID
-        let signing_key3 = Ed25519SigningKey::from_bytes(&[2u8; 32]).expect("key creation should succeed");
+        let signing_key3 =
+            Ed25519SigningKey::from_bytes(&[2u8; 32]).expect("key creation should succeed");
         assert_ne!(
             signing_key1.verifying_key().key_id(),
             signing_key3.verifying_key().key_id()
