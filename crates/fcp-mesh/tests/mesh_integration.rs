@@ -42,6 +42,98 @@ struct TestEvent {
     error: Option<String>,
 }
 
+// ============================================================================
+// MESHNODE ORCHESTRATION SMOKE TESTS
+// ============================================================================
+
+mod meshnode {
+    use super::*;
+
+    use bytes::Bytes;
+    use fcp_cbor::SchemaId;
+    use fcp_core::{ObjectHeader, Provenance, ZoneKeyId};
+    use fcp_mesh::{MeshNode, MeshNodeConfig};
+    use fcp_store::{
+        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
+        StoredSymbol, SymbolMeta,
+    };
+    use raptorq::ObjectTransmissionInformation;
+    use semver::Version;
+    use std::sync::Arc;
+
+    fn test_header(zone_id: &ZoneId) -> ObjectHeader {
+        ObjectHeader {
+            schema: SchemaId::new("fcp.mesh", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 0,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_smoke() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-symbols");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi as u8; 16]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        )
+        .with_missing_hint(vec![1, 2]);
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert!(!response.symbol_esis.is_empty());
+        assert!(response.symbol_esis.len() <= 2);
+    }
+}
+
 impl TestEvent {
     fn emit(&self) {
         println!("{}", serde_json::to_string(self).unwrap());
