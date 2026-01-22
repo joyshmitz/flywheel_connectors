@@ -339,8 +339,7 @@ mod state_schema_tests {
 
         assert!(
             json_str.contains("singleton_writer") || json_str.contains("SingletonWriter"),
-            "Got: {}",
-            json_str
+            "Got: {json_str}"
         );
     }
 
@@ -518,14 +517,14 @@ mod schema_validation_tests {
         let items = valid_array.as_array().unwrap();
 
         // Check array constraints
-        let min_items = schema["minItems"].as_u64().unwrap() as usize;
-        let max_items = schema["maxItems"].as_u64().unwrap() as usize;
+        let min_items = usize::try_from(schema["minItems"].as_u64().unwrap()).unwrap();
+        let max_items = usize::try_from(schema["maxItems"].as_u64().unwrap()).unwrap();
 
         assert!(items.len() >= min_items);
         assert!(items.len() <= max_items);
 
         // Check all items are strings
-        assert!(items.iter().all(|item| item.is_string()));
+        assert!(items.iter().all(serde_json::Value::is_string));
     }
 }
 
@@ -612,6 +611,14 @@ mod schema_evolution_tests {
         assert_ne!(v1_str, v2_str, "Schema strings should differ for detection");
     }
 
+    fn migrate_v1_to_v2(v1: ObjectV1) -> ObjectV2 {
+        ObjectV2 {
+            id: v1.id,
+            name: v1.name,
+            description: None, // New field gets default
+        }
+    }
+
     #[test]
     fn explicit_migration_pattern() {
         // Demonstrate explicit migration from V1 to V2
@@ -619,15 +626,6 @@ mod schema_evolution_tests {
             id: "123".to_string(),
             name: "Test".to_string(),
         };
-
-        // Explicit migration function
-        fn migrate_v1_to_v2(v1: ObjectV1) -> ObjectV2 {
-            ObjectV2 {
-                id: v1.id,
-                name: v1.name,
-                description: None, // New field gets default
-            }
-        }
 
         let v2_object = migrate_v1_to_v2(v1_object);
         assert_eq!(v2_object.id, "123");
@@ -751,12 +749,12 @@ mod introspection_tests {
 
             // Match patterns to verify equality
             match (&archetype, &deserialized) {
-                (ConnectorArchetype::Bidirectional, ConnectorArchetype::Bidirectional) => {}
-                (ConnectorArchetype::Streaming, ConnectorArchetype::Streaming) => {}
-                (ConnectorArchetype::Operational, ConnectorArchetype::Operational) => {}
-                (ConnectorArchetype::Storage, ConnectorArchetype::Storage) => {}
-                (ConnectorArchetype::Knowledge, ConnectorArchetype::Knowledge) => {}
-                _ => panic!("Archetype roundtrip failed for {:?}", archetype),
+                (ConnectorArchetype::Bidirectional, ConnectorArchetype::Bidirectional)
+                | (ConnectorArchetype::Streaming, ConnectorArchetype::Streaming)
+                | (ConnectorArchetype::Operational, ConnectorArchetype::Operational)
+                | (ConnectorArchetype::Storage, ConnectorArchetype::Storage)
+                | (ConnectorArchetype::Knowledge, ConnectorArchetype::Knowledge) => {}
+                _ => panic!("Archetype roundtrip failed for {archetype:?}"),
             }
         }
     }
@@ -906,7 +904,7 @@ mod connector_id_tests {
     #[test]
     fn connector_id_display() {
         let id = ConnectorId::from_static("fcp.telegram:v1");
-        let display = format!("{}", id);
+        let display = format!("{id}");
         assert!(display.contains("fcp.telegram:v1"));
     }
 

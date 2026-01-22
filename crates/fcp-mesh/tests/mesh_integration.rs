@@ -207,7 +207,7 @@ mod meshnode {
         );
 
         let _ = node
-            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), false, 0)
+            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), true, 0)
             .await
             .expect("symbol request should succeed");
 
@@ -227,7 +227,7 @@ mod meshnode {
         node.handle_decode_status(&status);
 
         let err = node
-            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
             .await
             .expect_err("should stop after decode status complete");
 
@@ -287,7 +287,7 @@ mod meshnode {
         );
 
         let _ = node
-            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), false, 0)
+            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), true, 0)
             .await
             .expect("symbol request should succeed");
 
@@ -304,7 +304,7 @@ mod meshnode {
         node.handle_symbol_ack(&ack);
 
         let err = node
-            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
             .await
             .expect_err("should stop after ack");
 

@@ -94,7 +94,7 @@ fn test_crdt_type_variants() {
 #[test]
 fn test_state_model_serialize_stateless() {
     let model = ConnectorStateModel::Stateless;
-    let json = serde_json::to_value(&model).expect("serialize should work");
+    let json = serde_json::to_value(model).expect("serialize should work");
 
     assert_eq!(json["type"], "stateless");
 }
@@ -102,7 +102,7 @@ fn test_state_model_serialize_stateless() {
 #[test]
 fn test_state_model_serialize_singleton_writer() {
     let model = ConnectorStateModel::SingletonWriter;
-    let json = serde_json::to_value(&model).expect("serialize should work");
+    let json = serde_json::to_value(model).expect("serialize should work");
 
     assert_eq!(json["type"], "singleton_writer");
 }
@@ -112,7 +112,7 @@ fn test_state_model_serialize_crdt() {
     let model = ConnectorStateModel::Crdt {
         crdt_type: ConnectorCrdtType::LwwMap,
     };
-    let json = serde_json::to_value(&model).expect("serialize should work");
+    let json = serde_json::to_value(model).expect("serialize should work");
 
     assert_eq!(json["type"], "crdt");
     assert_eq!(json["crdt_type"], "lww_map");
@@ -224,35 +224,35 @@ fn test_crdt_type_roundtrip() {
 #[test]
 fn test_archetype_bidirectional() {
     let archetype = ConnectorArchetype::Bidirectional;
-    let json = serde_json::to_value(&archetype).expect("serialize should work");
+    let json = serde_json::to_value(archetype).expect("serialize should work");
     assert_eq!(json, "bidirectional");
 }
 
 #[test]
 fn test_archetype_streaming() {
     let archetype = ConnectorArchetype::Streaming;
-    let json = serde_json::to_value(&archetype).expect("serialize should work");
+    let json = serde_json::to_value(archetype).expect("serialize should work");
     assert_eq!(json, "streaming");
 }
 
 #[test]
 fn test_archetype_operational() {
     let archetype = ConnectorArchetype::Operational;
-    let json = serde_json::to_value(&archetype).expect("serialize should work");
+    let json = serde_json::to_value(archetype).expect("serialize should work");
     assert_eq!(json, "operational");
 }
 
 #[test]
 fn test_archetype_storage() {
     let archetype = ConnectorArchetype::Storage;
-    let json = serde_json::to_value(&archetype).expect("serialize should work");
+    let json = serde_json::to_value(archetype).expect("serialize should work");
     assert_eq!(json, "storage");
 }
 
 #[test]
 fn test_archetype_knowledge() {
     let archetype = ConnectorArchetype::Knowledge;
-    let json = serde_json::to_value(&archetype).expect("serialize should work");
+    let json = serde_json::to_value(archetype).expect("serialize should work");
     assert_eq!(json, "knowledge");
 }
 
@@ -298,14 +298,14 @@ fn test_archetype_roundtrip() {
 #[test]
 fn test_runtime_format_native() {
     let format = ConnectorRuntimeFormat::Native;
-    let json = serde_json::to_value(&format).expect("serialize should work");
+    let json = serde_json::to_value(format).expect("serialize should work");
     assert_eq!(json, "native");
 }
 
 #[test]
 fn test_runtime_format_wasi() {
     let format = ConnectorRuntimeFormat::Wasi;
-    let json = serde_json::to_value(&format).expect("serialize should work");
+    let json = serde_json::to_value(format).expect("serialize should work");
     assert_eq!(json, "wasi");
 }
 
