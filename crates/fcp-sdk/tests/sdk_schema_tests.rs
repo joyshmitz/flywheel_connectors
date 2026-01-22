@@ -282,7 +282,7 @@ mod state_schema_tests {
     fn state_serialization_roundtrip() {
         let state = ConnectorState {
             cursor: "abc123".to_string(),
-            last_sync_timestamp: 1705000000,
+            last_sync_timestamp: 1_705_000_000,
             sync_count: 42,
         };
 
@@ -296,7 +296,7 @@ mod state_schema_tests {
     fn state_json_deterministic() {
         let state = ConnectorState {
             cursor: "test_cursor".to_string(),
-            last_sync_timestamp: 1705000000,
+            last_sync_timestamp: 1_705_000_000,
             sync_count: 100,
         };
 
@@ -827,7 +827,7 @@ mod golden_vector_tests {
             "version": 1,
             "data": {
                 "cursor": "abc123",
-                "last_sync": 1705000000
+                "last_sync": 1_705_000_000
             },
             "created_at": "2025-01-15T00:00:00Z"
         });
@@ -1047,7 +1047,7 @@ mod cost_estimate_tests {
         let availability = ResourceAvailability {
             available: true,
             rate_limit_remaining: Some(95),
-            rate_limit_reset_at: Some(1700000000), // Unix timestamp
+            rate_limit_reset_at: Some(1_700_000_000), // Unix timestamp
             details: Some("Service is healthy".to_string()),
         };
 

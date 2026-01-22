@@ -1,7 +1,7 @@
 //! SDK State Model Tests
 //!
 //! Tests for connector state model types including:
-//! - State model discriminants (Stateless, SingletonWriter, Crdt)
+//! - State model discriminants (Stateless, `SingletonWriter`, Crdt)
 //! - CRDT type handling
 //! - State model serialization
 //! - Archetype associations
@@ -167,19 +167,19 @@ fn test_state_model_roundtrip() {
 #[test]
 fn test_crdt_type_serialize() {
     assert_eq!(
-        serde_json::to_value(&ConnectorCrdtType::LwwMap).unwrap(),
+        serde_json::to_value(ConnectorCrdtType::LwwMap).unwrap(),
         "lww_map"
     );
     assert_eq!(
-        serde_json::to_value(&ConnectorCrdtType::OrSet).unwrap(),
+        serde_json::to_value(ConnectorCrdtType::OrSet).unwrap(),
         "or_set"
     );
     assert_eq!(
-        serde_json::to_value(&ConnectorCrdtType::GCounter).unwrap(),
+        serde_json::to_value(ConnectorCrdtType::GCounter).unwrap(),
         "g_counter"
     );
     assert_eq!(
-        serde_json::to_value(&ConnectorCrdtType::PnCounter).unwrap(),
+        serde_json::to_value(ConnectorCrdtType::PnCounter).unwrap(),
         "pn_counter"
     );
 }

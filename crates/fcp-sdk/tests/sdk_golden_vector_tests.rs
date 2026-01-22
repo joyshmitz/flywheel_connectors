@@ -17,9 +17,9 @@ fn load_vector_file(name: &str) -> Value {
         name
     );
     let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Failed to read vector file {}: {}", path, e));
+        .unwrap_or_else(|e| panic!("Failed to read vector file {path}: {e}"));
     serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse vector file {}: {}", path, e))
+        .unwrap_or_else(|e| panic!("Failed to parse vector file {path}: {e}"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,7 +81,7 @@ mod state_model_vectors {
     fn state_model_stateless_matches_vector() {
         let vectors = load_vector_file("state_models");
         let expected = &vectors["vectors"][0]["data"];
-        let actual: Value = serde_json::to_value(&ConnectorStateModel::Stateless).unwrap();
+        let actual: Value = serde_json::to_value(ConnectorStateModel::Stateless).unwrap();
         assert_eq!(actual["type"], expected["type"]);
     }
 
@@ -89,7 +89,7 @@ mod state_model_vectors {
     fn state_model_singleton_matches_vector() {
         let vectors = load_vector_file("state_models");
         let expected = &vectors["vectors"][1]["data"];
-        let actual: Value = serde_json::to_value(&ConnectorStateModel::SingletonWriter).unwrap();
+        let actual: Value = serde_json::to_value(ConnectorStateModel::SingletonWriter).unwrap();
         assert_eq!(actual["type"], expected["type"]);
     }
 
@@ -100,7 +100,7 @@ mod state_model_vectors {
         let model = ConnectorStateModel::Crdt {
             crdt_type: ConnectorCrdtType::LwwMap,
         };
-        let actual: Value = serde_json::to_value(&model).unwrap();
+        let actual: Value = serde_json::to_value(model).unwrap();
         assert_eq!(actual["type"], expected["type"]);
         assert_eq!(actual["crdt_type"], expected["crdt_type"]);
     }
@@ -386,7 +386,7 @@ mod cost_estimate_vectors {
         let estimate = CostEstimate {
             api_credits: Some(50),
             estimated_duration_ms: Some(10000),
-            estimated_bytes: Some(2097152),
+            estimated_bytes: Some(2_097_152),
             currency: Some(CurrencyCost {
                 amount_cents: 100,
                 currency_code: "USD".to_string(),
@@ -425,18 +425,15 @@ mod vector_file_integrity {
             let vectors = load_vector_file(file_name);
             assert!(
                 vectors.is_object(),
-                "Vector file {} should be a JSON object",
-                file_name
+                "Vector file {file_name} should be a JSON object"
             );
             assert!(
                 vectors.get("description").is_some(),
-                "Vector file {} should have description",
-                file_name
+                "Vector file {file_name} should have description"
             );
             assert!(
                 vectors.get("vectors").is_some(),
-                "Vector file {} should have vectors array",
-                file_name
+                "Vector file {file_name} should have vectors array"
             );
         }
     }
@@ -458,15 +455,11 @@ mod vector_file_integrity {
             for (i, vector) in vector_array.iter().enumerate() {
                 assert!(
                     vector.get("name").is_some(),
-                    "Vector {} in {} should have name",
-                    i,
-                    file_name
+                    "Vector {i} in {file_name} should have name"
                 );
                 assert!(
                     vector.get("description").is_some(),
-                    "Vector {} in {} should have description",
-                    i,
-                    file_name
+                    "Vector {i} in {file_name} should have description"
                 );
             }
         }

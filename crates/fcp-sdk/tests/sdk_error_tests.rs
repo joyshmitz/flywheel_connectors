@@ -1,11 +1,11 @@
 //! SDK Error Tests
 //!
 //! Tests for FCP error taxonomy, error categories, retry semantics,
-//! ai_recovery_hints, and error handling patterns.
+//! `ai_recovery_hints`, and error handling patterns.
 //!
 //! These tests verify:
 //! - SDK errors use error taxonomy correctly
-//! - Errors include appropriate ai_recovery_hint
+//! - Errors include appropriate `ai_recovery_hint`
 //! - Error categorization is correct
 //! - Serialization/deserialization works
 
@@ -194,7 +194,7 @@ fn test_error_json_has_category_tag() {
         message: "test".to_string(),
     };
 
-    let json: serde_json::Value = serde_json::to_value(&err).expect("serialize should work");
+    let json: serde_json::Value = serde_json::to_value(err).expect("serialize should work");
 
     // FcpError uses #[serde(tag = "category")] so should have category field
     assert!(json.is_object());
@@ -386,6 +386,7 @@ fn test_resource_not_allowed() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+#[allow(clippy::unnecessary_literal_unwrap)]
 fn test_fcp_result_ok() {
     let result: FcpResult<i32> = Ok(42);
     assert!(result.is_ok());
@@ -393,6 +394,16 @@ fn test_fcp_result_ok() {
 }
 
 #[test]
+#[allow(clippy::unnecessary_literal_unwrap)]
+fn test_fcp_result_expect_ok_value() {
+    // Testing FcpResult with a computed value
+    let value = 21 * 2;
+    let result: FcpResult<i32> = Ok(value);
+    assert_eq!(result.unwrap(), 42);
+}
+
+#[test]
+#[allow(clippy::unnecessary_literal_unwrap)]
 fn test_fcp_result_err() {
     let result: FcpResult<i32> = Err(FcpError::NotConfigured);
     assert!(result.is_err());

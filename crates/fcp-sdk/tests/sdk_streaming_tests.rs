@@ -1,6 +1,6 @@
 //! SDK Streaming Tests
 //!
-//! Comprehensive tests for EventStreamManager, subscriptions, replay, and acks.
+//! Comprehensive tests for `EventStreamManager`, subscriptions, replay, and acks.
 //! These tests verify:
 //! - Cursor monotonicity
 //! - Ack required/optional behavior
@@ -31,7 +31,7 @@ fn sample_event_data() -> EventData {
     )
 }
 
-fn event_caps(replay: bool, requires_ack: bool, min_buffer_events: u32) -> EventCaps {
+const fn event_caps(replay: bool, requires_ack: bool, min_buffer_events: u32) -> EventCaps {
     EventCaps {
         streaming: true,
         replay,
