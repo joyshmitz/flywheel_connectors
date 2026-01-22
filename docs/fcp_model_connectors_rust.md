@@ -1847,7 +1847,7 @@ id = "fcp.telegram"
 name = "Telegram Connector"
 version = "2026.1.0"
 description = "Secure Telegram Bot API integration"
-archetypes = ["bidirectional", "streaming"]
+archetypes = ["bidirectional", "streaming", "operational"]
 format = "native"  # "native" | "wasi"
 
 [zones]
@@ -1860,7 +1860,7 @@ forbidden = ["z:public"]
 required = [
   "ipc.gateway",
   "network.dns",
-  "network.outbound:api.telegram.org:443",
+  "network.outbound",
   "network.tls.sni",
   "network.tls.spki_pin",
   "storage.persistent:encrypted",
@@ -1868,26 +1868,50 @@ required = [
 optional = ["media.download", "media.upload"]
 forbidden = ["system.exec", "network.inbound"]
 
-[provides.operations.telegram_send_message]
+[provides.operations."telegram.send_message"]
 description = "Send a message to a Telegram chat"
-capability = "telegram.send_message"
+capability = "telegram.messages.send"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 rate_limit = "60/min"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["chat_id", "text"] }
-output_schema = { type = "object", required = ["message_id"] }
-network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true, spki_pins = ["base64:..."] }
+input_schema = { type = "object", required = ["chat_id", "text"], properties = { chat_id = { type = "string" }, text = { type = "string" }, parse_mode = { type = "string" }, reply_to_message_id = { type = "integer" } } }
+output_schema = { type = "object", required = ["message_id", "chat_id"], properties = { message_id = { type = "integer" }, chat_id = { type = "string" } } }
+network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true, deny_ip_literals = true, max_redirects = 0, connect_timeout_ms = 5000, total_timeout_ms = 60000, max_response_bytes = 1048576 }
 
-[provides.operations.telegram_send_message.ai_hints]
+[provides.operations."telegram.send_message".ai_hints]
 when_to_use = "Use to post updates to approved chats."
 common_mistakes = ["Sending secrets", "Responding to tainted inputs"]
 
+[provides.operations."telegram.get_file"]
+description = "Fetch Telegram file metadata and download URL"
+capability = "telegram.media.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "120/min"
+idempotency = "idempotent"
+input_schema = { type = "object", required = ["file_id"], properties = { file_id = { type = "string" } } }
+output_schema = { type = "object", required = ["file_id"], properties = { file_id = { type = "string" }, file_unique_id = { type = "string" }, file_size = { type = "integer" }, file_path = { type = "string" }, download_url = { type = "string" } } }
+network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true, deny_ip_literals = true, max_redirects = 0, connect_timeout_ms = 5000, total_timeout_ms = 60000, max_response_bytes = 1048576 }
+
+[provides.operations."telegram.answer_callback_query"]
+description = "Acknowledge a callback query (button press)"
+capability = "telegram.messages.send"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "120/min"
+idempotency = "idempotent"
+input_schema = { type = "object", required = ["callback_query_id"], properties = { callback_query_id = { type = "string" }, text = { type = "string" } } }
+output_schema = { type = "object", required = ["success"], properties = { success = { type = "boolean" } } }
+network_constraints = { host_allow = ["api.telegram.org"], port_allow = [443], require_sni = true, deny_ip_literals = true, max_redirects = 0, connect_timeout_ms = 5000, total_timeout_ms = 60000, max_response_bytes = 1048576 }
+
 [event_caps]
 streaming = true
-replay = true
-min_buffer_events = 10000
+replay = false
+min_buffer_events = 1000
 
 [sandbox]
 profile = "strict"            # "strict", "strict_plus", "moderate", or "permissive"
@@ -1908,6 +1932,57 @@ publisher_threshold = "2-of-3"
 registry_signature = { kid = "registry1", sig = "base64:..." }
 transparency_log_entry = "objectid:..."
 ```
+
+**Telegram manifest contract (accepted):** the example above is the canonical "good" manifest.
+
+**Rejected examples (should fail validation):**
+
+```toml
+# BAD: network capability encodes host:port (must use network_constraints)
+[capabilities]
+required = ["network.outbound:api.telegram.org:443"]
+```
+
+```toml
+# BAD: streaming enabled but min_buffer_events = 0
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 0
+```
+
+```toml
+# BAD: IP literal allowed and redirect policy too loose for Telegram
+[provides.operations."telegram.send_message"]
+network_constraints = { host_allow = ["1.2.3.4"], port_allow = [443], deny_ip_literals = false, max_redirects = 10 }
+```
+
+**Telegram event topics (contract):**
+- `telegram.message.new`
+- `telegram.message.edited`
+- `telegram.channel_post.new`
+- `telegram.channel_post.edited`
+- `telegram.callback_query`
+
+**Telegram event payload schema (JSON shape):**
+- `telegram.message.*` / `telegram.channel_post.*` payload:
+  - `message_id` (integer), `chat` (object), `from` (object), `date` (integer epoch seconds)
+  - `text` (string, optional), `caption` (string, optional)
+  - `has_photo` / `has_document` / `has_audio` / `has_video` / `has_voice` (boolean)
+  - `reply_to_message_id` (integer, optional), `message_thread_id` (integer, optional)
+- `telegram.callback_query` payload:
+  - `id` (string), `from` (object), `data` (string, optional), `chat_instance` (string)
+
+**Cursor semantics:** `update_id` is the monotonic cursor/seq source; replay is currently `false` and acks are not required.
+
+**Telegram capability families (contract):**
+- `telegram.messages.read` (Safe) — inbound updates / polling
+- `telegram.messages.send` (Risky) — send messages, answer callback queries
+- `telegram.media.read` (Safe) — fetch file metadata / download URL
+- `telegram.media.send` (Risky) — upload/send media
+- `telegram.chats.read` (Safe) — chat metadata
+- `telegram.members.read` (Safe) — member lists
+- `telegram.webhooks.manage` (Dangerous) — webhook configuration
 
 ### 11.2 Manifest Embedding (NORMATIVE)
 

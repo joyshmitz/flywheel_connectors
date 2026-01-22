@@ -31,6 +31,15 @@ impl BufferLimits {
     }
 }
 
+impl Default for BufferLimits {
+    fn default() -> Self {
+        Self {
+            min_events: 10,
+            max_events: 100,
+        }
+    }
+}
+
 /// Errors returned by replay helpers.
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum ReplayError {
@@ -39,27 +48,38 @@ pub enum ReplayError {
     #[error("invalid cursor '{cursor}'")]
     InvalidCursor { cursor: String },
     #[error("cursor {cursor_seq} is older than oldest buffered seq {oldest_seq}")]
-    CursorStale { cursor_seq: u64, oldest_seq: u64 },
+    CursorStale {
+        /// The sequence number from the cursor.
+        cursor_seq: u64,
+        /// The oldest sequence number in the buffer.
+        oldest_seq: u64,
+    },
 }
 
 /// Result of applying an EventAck.
 #[derive(Debug, Clone)]
 pub struct AckResult {
+    /// Sequence numbers that were successfully acknowledged.
     pub acked: Vec<u64>,
+    /// Sequence numbers that were not found in pending acks.
     pub missing: Vec<u64>,
 }
 
 /// Result of applying an EventNack.
 #[derive(Debug, Clone)]
 pub struct NackResult {
+    /// Events to redeliver from the buffer.
     pub redeliver: Vec<EventEnvelope>,
+    /// Sequence numbers that were not found in the buffer.
     pub missing: Vec<u64>,
 }
 
 /// Outcome of handling a SubscribeRequest.
 #[derive(Debug, Clone)]
 pub struct SubscribeOutcome {
+    /// The subscribe response to send to the client.
     pub response: SubscribeResponse,
+    /// Events to replay per topic (if replay was requested).
     pub replay_events: HashMap<String, Vec<EventEnvelope>>,
 }
 

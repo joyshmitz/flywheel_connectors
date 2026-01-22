@@ -28,23 +28,31 @@ pub use crate::{
 pub use crate::{CostEstimate, CurrencyCost, ResourceAvailability};
 
 // Events
-pub use crate::{EventAck, EventData, EventEnvelope, EventNack, EventStream};
+pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
 
 // Health
 pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState};
 
 // Identifiers
-pub use crate::{ConnectorId, InstanceId, ObjectId, ZoneId};
+pub use crate::{ConnectorId, InstanceId, ObjectId, RequestId, ZoneId};
 
 // Capability tokens
 pub use crate::CapabilityToken;
 
 // Provenance
-pub use crate::{Provenance, TaintFlag, TaintLevel};
+pub use crate::{Provenance, TaintFlag, TaintLevel, TrustLevel};
+
+// Principal
+pub use crate::Principal;
 
 // Archetypes and state models
 pub use crate::{
     ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel,
+};
+
+// Streaming helpers
+pub use crate::streaming::{
+    AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SubscribeOutcome,
 };
 
 // External crates commonly needed

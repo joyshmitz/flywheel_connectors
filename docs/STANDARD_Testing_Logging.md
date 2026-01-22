@@ -518,6 +518,66 @@ jobs:
 Every CI run MUST preserve:
 - `test.log` - Full test output with structured logs
 - `tests/vectors/` - Golden vectors for reproduction
+
+---
+
+## 9. Connector-Specific Testing Requirements (NORMATIVE)
+
+> **Bead Reference**: `flywheel_connectors-h32`
+
+These requirements apply to **every connector** in addition to the platform-wide rules above.
+
+### 9.1 Required Connector Test Categories
+
+Each connector MUST include unit/integration tests for:
+- **Standard methods**: `--manifest`, `configure`, `handshake`, `health`, `introspect`,
+  `invoke`, `subscribe`/`unsubscribe` (if supported), `shutdown`.
+- **Configuration validation**: valid/invalid config payloads, missing fields, type errors.
+- **Capability token validation**: expired tokens, wrong zone, missing operation grant.
+- **Operation coverage**: each operation's success path + common failure paths + edge cases.
+- **Rate limiting + timeouts**: enforce limits and retry/backoff where defined.
+- **Event lifecycle**: streaming/polling connectors must test subscribe → emit → ack (if required).
+
+### 9.2 Mocking + Isolation (MANDATORY)
+
+- **No real API calls** in unit tests.
+- Use `wiremock` for HTTP mocks; use local in-process mock servers for WebSocket/SSE.
+- Deterministic fixtures only (no wall-clock or random data without fixed seeds).
+
+### 9.3 Property + Fuzz Targets (Connector Scope)
+
+Required property tests:
+- **Config parsing** never panics on arbitrary input.
+- **Serde round-trip** for connector config and operation input/output schemas.
+
+Required fuzz targets (per connector):
+- Configuration parsing
+- Protocol message parsing
+- Credential/token handling
+- Event payload parsing (where applicable)
+
+### 9.4 Security Regression Tests
+
+Each connector MUST include:
+- **No-secrets-in-logs** tests (deny raw tokens, API keys, auth headers).
+- **Credential zeroization** tests where credentials are stored in memory types.
+- **Network constraints enforcement** tests (deny-by-default egress).
+
+### 9.5 Connector Release Quality Gates
+
+In addition to Section 1 quality gates, connector releases MUST pass:
+- **Coverage**: >80% overall, >95% critical paths, >98% security-sensitive code.
+- **Mutation testing**: `cargo mutants` score >70%.
+- **Security audit**: `cargo audit --deny warnings`.
+- **E2E compliance harness**: mechanical compliance runner (static + dynamic).
+
+### 9.6 Mechanical Compliance (E2E)
+
+Every connector MUST pass the platform E2E/compliance harness:
+- Default deny (no capability token → denial + DecisionReceipt)
+- Zone binding enforcement
+- Sandbox/network constraints enforced
+- Tool descriptor validation (SEP-1382 compliance)
 - `lcov.info` - Coverage report
 - `fuzz/corpus/` - Fuzz corpus updates (on failure)
 

@@ -23,6 +23,7 @@ use serde_json::json;
 struct WriteDetectingConnector {
     base: BaseConnector,
     write_called: Arc<AtomicBool>,
+    #[allow(dead_code)]
     simulate_count: Arc<AtomicU64>,
 }
 
@@ -357,7 +358,7 @@ impl FcpConnector for CapabilityCheckingConnector {
         if !missing.is_empty() {
             Ok(SimulateResponse::denied(
                 req.id,
-                format!("Missing required capabilities: {:?}", missing),
+                format!("Missing required capabilities: {missing:?}"),
                 "FCP-3001",
             )
             .with_missing_capabilities(missing))
@@ -556,7 +557,7 @@ async fn test_simulate_timeout_no_secret_leak() {
     let result = connector.simulate(req).await.unwrap();
 
     // Response should not contain the secret
-    let response_str = format!("{:?}", result);
+    let response_str = format!("{result:?}");
     assert!(
         !response_str.contains(secret_api_key),
         "Response contains secret API key - security violation!"

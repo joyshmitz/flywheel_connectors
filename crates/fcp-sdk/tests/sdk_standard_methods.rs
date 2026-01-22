@@ -35,7 +35,7 @@ impl MockConnector {
         }
     }
 
-    fn with_failure(mut self) -> Self {
+    const fn with_failure(mut self) -> Self {
         self.should_fail = true;
         self
     }
