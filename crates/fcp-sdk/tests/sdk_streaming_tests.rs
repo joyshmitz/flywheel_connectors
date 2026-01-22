@@ -9,9 +9,7 @@
 //! - Subscribe → receive events → ack → replay flow
 
 use fcp_sdk::prelude::*;
-use fcp_sdk::streaming::{
-    AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SubscribeOutcome,
-};
+use fcp_sdk::streaming::{BufferLimits, EventStreamManager, ReplayError};
 use serde_json::json;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -175,7 +173,7 @@ fn test_pending_ack_tracking() {
 
     // Ack remaining
     let ack2 = EventAck::new("events.pending", vec![e2.seq, e3.seq])
-        .with_cursors(vec![e2.cursor.clone(), e3.cursor.clone()]);
+        .with_cursors(vec![e2.cursor, e3.cursor]);
     let result2 = manager.handle_ack(&ack2);
 
     assert_eq!(result2.acked.len(), 2);
@@ -217,7 +215,7 @@ fn test_nack_redelivery() {
     let mut manager = EventStreamManager::new(event_caps(true, true, 5));
 
     let e1 = manager.emit("events.nack", sample_event_data());
-    let e2 = manager.emit("events.nack", sample_event_data());
+    let _e2 = manager.emit("events.nack", sample_event_data());
 
     // Request redelivery of e1
     let nack = EventNack::new("events.nack", vec![e1.seq], "processing_failed".to_string());
@@ -320,7 +318,13 @@ fn test_subscribe_creates_topic() {
     let req = subscribe_request(vec!["events.new"]);
     let outcome = manager.handle_subscribe(&req).unwrap();
 
-    assert!(outcome.response.result.confirmed_topics.contains(&"events.new".to_string()));
+    assert!(
+        outcome
+            .response
+            .result
+            .confirmed_topics
+            .contains(&"events.new".to_string())
+    );
     assert!(outcome.response.result.replay_supported);
 }
 
@@ -399,15 +403,15 @@ fn test_buffer_trimming_respects_pending_acks() {
 
     // Emit events that require acks
     let e1 = manager.emit("events.trim", sample_event_data());
-    let e2 = manager.emit("events.trim", sample_event_data());
-    let e3 = manager.emit("events.trim", sample_event_data());
-    let e4 = manager.emit("events.trim", sample_event_data());
+    let _e2 = manager.emit("events.trim", sample_event_data());
+    let _e3 = manager.emit("events.trim", sample_event_data());
+    let _e4 = manager.emit("events.trim", sample_event_data());
 
     // All should be in buffer because they have pending acks
     assert_eq!(manager.pending_acks("events.trim"), 4);
 
     // Ack oldest event
-    let ack = EventAck::new("events.trim", vec![e1.seq]).with_cursors(vec![e1.cursor.clone()]);
+    let ack = EventAck::new("events.trim", vec![e1.seq]).with_cursors(vec![e1.cursor]);
     manager.handle_ack(&ack);
 
     // Now buffer can trim e1
@@ -448,7 +452,7 @@ fn test_full_streaming_flow() {
 
     // 6. Ack remaining
     let ack2 = EventAck::new("events.flow", vec![e2.seq, e3.seq])
-        .with_cursors(vec![e2.cursor.clone(), e3.cursor.clone()]);
+        .with_cursors(vec![e2.cursor, e3.cursor]);
     manager.handle_ack(&ack2);
     assert_eq!(manager.pending_acks("events.flow"), 0);
 }

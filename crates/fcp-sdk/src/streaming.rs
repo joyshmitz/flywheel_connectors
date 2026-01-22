@@ -43,20 +43,29 @@ impl Default for BufferLimits {
 /// Errors returned by replay helpers.
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum ReplayError {
+    /// The requested topic does not exist or has no buffer.
     #[error("unknown topic '{topic}'")]
-    UnknownTopic { topic: String },
+    UnknownTopic {
+        /// The topic that was not found.
+        topic: String,
+    },
+    /// The cursor string could not be parsed as a sequence number.
     #[error("invalid cursor '{cursor}'")]
-    InvalidCursor { cursor: String },
+    InvalidCursor {
+        /// The invalid cursor string.
+        cursor: String,
+    },
+    /// The cursor points to an event that has been trimmed from the buffer.
     #[error("cursor {cursor_seq} is older than oldest buffered seq {oldest_seq}")]
     CursorStale {
         /// The sequence number from the cursor.
         cursor_seq: u64,
-        /// The oldest sequence number in the buffer.
+        /// The oldest sequence number still in the buffer.
         oldest_seq: u64,
     },
 }
 
-/// Result of applying an EventAck.
+/// Result of applying an [`EventAck`].
 #[derive(Debug, Clone)]
 pub struct AckResult {
     /// Sequence numbers that were successfully acknowledged.
@@ -65,7 +74,7 @@ pub struct AckResult {
     pub missing: Vec<u64>,
 }
 
-/// Result of applying an EventNack.
+/// Result of applying an [`EventNack`].
 #[derive(Debug, Clone)]
 pub struct NackResult {
     /// Events to redeliver from the buffer.
@@ -74,7 +83,7 @@ pub struct NackResult {
     pub missing: Vec<u64>,
 }
 
-/// Outcome of handling a SubscribeRequest.
+/// Outcome of handling a [`SubscribeRequest`].
 #[derive(Debug, Clone)]
 pub struct SubscribeOutcome {
     /// The subscribe response to send to the client.
@@ -237,7 +246,9 @@ impl EventStreamManager {
 
     /// Emit a new event with a caller-provided seq.
     pub fn emit_with_seq(&mut self, topic: &str, seq: u64, data: EventData) -> EventEnvelope {
-        let envelope = EventEnvelope::new(topic, data).with_seq(seq).with_cursor_seq(seq);
+        let envelope = EventEnvelope::new(topic, data)
+            .with_seq(seq)
+            .with_cursor_seq(seq);
         self.record(envelope)
     }
 
@@ -248,7 +259,12 @@ impl EventStreamManager {
         state.record_event(envelope, &self.caps, self.limits)
     }
 
-    /// Handle a SubscribeRequest and compute replay responses if requested.
+    /// Handle a [`SubscribeRequest`] and compute replay responses if requested.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError::CursorStale`] if the `since` cursor is no longer in the buffer.
+    /// Returns [`ReplayError::InvalidCursor`] if the cursor cannot be parsed.
     pub fn handle_subscribe(
         &mut self,
         req: &SubscribeRequest,
@@ -268,7 +284,7 @@ impl EventStreamManager {
 
         let buffer = if self.caps.replay {
             Some(ReplayBufferInfo {
-                min_events: self.limits.min_events as u32,
+                min_events: u32::try_from(self.limits.min_events).unwrap_or(u32::MAX),
                 overflow: "drop_oldest".to_string(),
             })
         } else {
@@ -316,16 +332,28 @@ impl EventStreamManager {
     }
 
     /// Replay buffered events for a topic from a cursor.
-    pub fn replay_from(&self, topic: &str, cursor: &str) -> Result<Vec<EventEnvelope>, ReplayError> {
-        match self.topics.get(topic) {
-            Some(state) => state.replay_from_cursor(cursor),
-            None => Err(ReplayError::UnknownTopic {
-                topic: topic.to_string(),
-            }),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplayError::UnknownTopic`] if the topic does not exist.
+    /// Returns [`ReplayError::CursorStale`] if the cursor is no longer in the buffer.
+    /// Returns [`ReplayError::InvalidCursor`] if the cursor cannot be parsed.
+    pub fn replay_from(
+        &self,
+        topic: &str,
+        cursor: &str,
+    ) -> Result<Vec<EventEnvelope>, ReplayError> {
+        self.topics.get(topic).map_or_else(
+            || {
+                Err(ReplayError::UnknownTopic {
+                    topic: topic.to_string(),
+                })
+            },
+            |state| state.replay_from_cursor(cursor),
+        )
     }
 
-    /// Apply an EventAck to update pending-ack state.
+    /// Apply an [`EventAck`] to update pending-ack state.
     pub fn handle_ack(&mut self, ack: &EventAck) -> AckResult {
         match self.topics.get_mut(&ack.topic) {
             Some(state) => state.apply_ack(ack, self.limits),
@@ -336,15 +364,16 @@ impl EventStreamManager {
         }
     }
 
-    /// Apply an EventNack and return events to redeliver.
+    /// Apply an [`EventNack`] and return events to redeliver.
+    #[must_use]
     pub fn handle_nack(&self, nack: &EventNack) -> NackResult {
-        match self.topics.get(&nack.topic) {
-            Some(state) => state.apply_nack(nack),
-            None => NackResult {
+        self.topics.get(&nack.topic).map_or_else(
+            || NackResult {
                 redeliver: Vec::new(),
                 missing: nack.seqs.clone(),
             },
-        }
+            |state| state.apply_nack(nack),
+        )
     }
 
     /// Pending ack count for a topic.
@@ -352,8 +381,7 @@ impl EventStreamManager {
     pub fn pending_acks(&self, topic: &str) -> usize {
         self.topics
             .get(topic)
-            .map(|state| state.pending_acks.len())
-            .unwrap_or(0)
+            .map_or(0, |state| state.pending_acks.len())
     }
 }
 

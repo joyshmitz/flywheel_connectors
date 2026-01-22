@@ -16,12 +16,16 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 semver.workspace = true
+chrono.workspace = true
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }
 fcp-protocol = { path = "../fcp-protocol" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-mesh = { path = "../fcp-mesh" }
+fcp-store = { path = "../fcp-store" }
+fcp-tailscale = { path = "../fcp-tailscale" }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

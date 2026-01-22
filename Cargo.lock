@@ -1325,10 +1325,14 @@ dependencies = [
 name = "fcp-conformance"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-mesh",
  "fcp-protocol",
+ "fcp-store",
+ "fcp-tailscale",
  "hex",
  "jsonschema",
  "pretty_assertions",

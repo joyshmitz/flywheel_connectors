@@ -1,0 +1,25 @@
+{
+  "description": "CRDT type serialization golden vectors",
+  "vectors": [
+    {
+      "name": "lww_map",
+      "description": "Last-Writer-Wins Map CRDT",
+      "serialized": "\"lww_map\""
+    },
+    {
+      "name": "or_set",
+      "description": "Observed-Remove Set CRDT",
+      "serialized": "\"or_set\""
+    },
+    {
+      "name": "g_counter",
+      "description": "Grow-only Counter CRDT",
+      "serialized": "\"g_counter\""
+    },
+    {
+      "name": "pn_counter",
+      "description": "Positive-Negative Counter CRDT",
+      "serialized": "\"pn_counter\""
+    }
+  ]
+}

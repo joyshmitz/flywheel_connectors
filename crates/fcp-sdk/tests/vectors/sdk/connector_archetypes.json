@@ -1,0 +1,30 @@
+{
+  "description": "Connector archetype serialization golden vectors",
+  "vectors": [
+    {
+      "name": "bidirectional_archetype",
+      "description": "Bidirectional connector archetype (e.g., chat, messaging)",
+      "serialized": "\"bidirectional\""
+    },
+    {
+      "name": "streaming_archetype",
+      "description": "Streaming connector archetype (e.g., SSE, websocket)",
+      "serialized": "\"streaming\""
+    },
+    {
+      "name": "operational_archetype",
+      "description": "Operational connector archetype (e.g., file ops, API calls)",
+      "serialized": "\"operational\""
+    },
+    {
+      "name": "storage_archetype",
+      "description": "Storage connector archetype (e.g., database, blob storage)",
+      "serialized": "\"storage\""
+    },
+    {
+      "name": "knowledge_archetype",
+      "description": "Knowledge connector archetype (e.g., search, RAG)",
+      "serialized": "\"knowledge\""
+    }
+  ]
+}

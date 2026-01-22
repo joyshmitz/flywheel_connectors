@@ -1,0 +1,44 @@
+{
+  "description": "Cost estimate serialization golden vectors",
+  "vectors": [
+    {
+      "name": "empty_estimate",
+      "description": "Empty cost estimate with no costs",
+      "data": {}
+    },
+    {
+      "name": "api_credits_only",
+      "description": "Cost estimate with only API credits",
+      "data": {
+        "api_credits": 10
+      }
+    },
+    {
+      "name": "duration_only",
+      "description": "Cost estimate with only duration",
+      "data": {
+        "estimated_duration_ms": 5000
+      }
+    },
+    {
+      "name": "bytes_only",
+      "description": "Cost estimate with only bytes",
+      "data": {
+        "estimated_bytes": 1048576
+      }
+    },
+    {
+      "name": "full_estimate",
+      "description": "Full cost estimate with all fields",
+      "data": {
+        "api_credits": 50,
+        "estimated_duration_ms": 10000,
+        "estimated_bytes": 2097152,
+        "currency": {
+          "amount_cents": 100,
+          "currency_code": "USD"
+        }
+      }
+    }
+  ]
+}

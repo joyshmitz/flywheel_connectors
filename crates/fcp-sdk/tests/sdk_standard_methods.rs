@@ -3,8 +3,8 @@
 //! Validates the connector SDK standard-method surface is correct and ergonomic.
 //! This includes: invoke, simulate, subscribe, introspect, and lifecycle methods.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use fcp_sdk::prelude::*;
@@ -611,9 +611,11 @@ fn test_simulate_response_with_missing_capabilities() {
 
     assert!(!response.would_succeed);
     assert_eq!(response.missing_capabilities.len(), 2);
-    assert!(response
-        .missing_capabilities
-        .contains(&"email.send".to_string()));
+    assert!(
+        response
+            .missing_capabilities
+            .contains(&"email.send".to_string())
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

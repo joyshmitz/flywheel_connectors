@@ -146,7 +146,7 @@ mod meshnode {
         .with_missing_hint(vec![1, 2]);
 
         let response = node
-            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
             .await
             .expect("symbol request should succeed");
 

@@ -10,9 +10,10 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityToken, ConnectorId, EventEnvelope, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    UnsubscribeRequest,
 };
 
 /// Type alias for event streams.
@@ -68,6 +69,21 @@ pub trait FcpConnector: Send + Sync {
 
     /// Unsubscribe from event topics.
     async fn unsubscribe(&self, req: UnsubscribeRequest) -> FcpResult<()>;
+
+    /// Acknowledge delivery of events (when `requires_ack=true`).
+    ///
+    /// Connectors that track delivery state should override this to
+    /// update their replay buffers and pending-ack sets.
+    async fn ack(&self, _ack: EventAck) -> FcpResult<()> {
+        Ok(())
+    }
+
+    /// Negative acknowledgment (request redelivery).
+    ///
+    /// Connectors that support redelivery should override this.
+    async fn nack(&self, _nack: EventNack) -> FcpResult<()> {
+        Ok(())
+    }
 }
 
 /// Connector metrics for monitoring.

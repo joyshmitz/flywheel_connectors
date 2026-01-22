@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use crate::{
     ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, CorrelationId,
-    FcpError, IdempotencyClass, InstanceId, ObjectId, OperationId, Provenance, RiskLevel,
-    SafetyTier, SessionId, TailscaleNodeId, ZoneId,
+    EventAck, EventNack, FcpError, IdempotencyClass, InstanceId, ObjectId, OperationId, Provenance,
+    RiskLevel, SafetyTier, SessionId, TailscaleNodeId, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1153,6 +1153,42 @@ pub struct UnsubscribeRequest {
     /// Optional capability token
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability_token: Option<CapabilityToken>,
+}
+
+/// Request to acknowledge delivered events.
+///
+/// Per FCP Specification Section 9.9:
+/// - `type`: Always "ack"
+/// - `id`: Unique request ID
+/// - `ack`: Event acknowledgment payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventAckRequest {
+    /// Message type (always "ack")
+    pub r#type: String,
+
+    /// Unique request ID
+    pub id: RequestId,
+
+    /// Acknowledgment payload
+    pub ack: EventAck,
+}
+
+/// Request to negatively acknowledge events (request redelivery).
+///
+/// Per FCP Specification Section 9.9:
+/// - `type`: Always "nack"
+/// - `id`: Unique request ID
+/// - `nack`: Event negative acknowledgment payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventNackRequest {
+    /// Message type (always "nack")
+    pub r#type: String,
+
+    /// Unique request ID
+    pub id: RequestId,
+
+    /// Negative acknowledgment payload
+    pub nack: EventNack,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

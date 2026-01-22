@@ -1,0 +1,15 @@
+{
+  "description": "Connector runtime format serialization golden vectors",
+  "vectors": [
+    {
+      "name": "native_format",
+      "description": "Native runtime format - direct execution",
+      "serialized": "\"native\""
+    },
+    {
+      "name": "wasi_format",
+      "description": "WASI runtime format - WebAssembly System Interface",
+      "serialized": "\"wasi\""
+    }
+  ]
+}

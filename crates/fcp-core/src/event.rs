@@ -577,8 +577,8 @@ mod tests {
             .requiring_ack();
 
         // Client receives envelope and sends ack
-        let ack = EventAck::new(&envelope.topic, vec![envelope.seq])
-            .with_cursors(vec![envelope.cursor.clone()]);
+        let ack =
+            EventAck::new(&envelope.topic, vec![envelope.seq]).with_cursors(vec![envelope.cursor]);
 
         assert_eq!(ack.topic, "events.flow");
         assert_eq!(ack.seqs, vec![42]);

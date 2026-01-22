@@ -756,14 +756,17 @@ impl ConnectorSection {
 
         state.validate()?;
 
-        if legacy_singleton && state.model != ConnectorStateModel::SingletonWriter {
+        if legacy_singleton && state.model != StateModelKind::SingletonWriter {
             return Err(ManifestError::Invalid {
                 field: "connector.singleton_writer",
                 message: "conflicts with connector.state.model (must be singleton_writer)".into(),
             });
         }
 
-        Ok(match state.model {
+        // Convert TOML model + crdt_type to rich ConnectorStateModel
+        let model = state.to_state_model()?;
+
+        Ok(match model {
             ConnectorStateModel::Stateless => EffectiveStateModel::Stateless,
             ConnectorStateModel::SingletonWriter => EffectiveStateModel::SingletonWriter {
                 state_schema_version: Some(state.state_schema_version.as_str()),
@@ -772,19 +775,10 @@ impl ConnectorSection {
                 snapshot_every_updates: None,
                 snapshot_every_bytes: None,
             },
-            ConnectorStateModel::Crdt => EffectiveStateModel::Crdt {
+            ConnectorStateModel::Crdt { crdt_type } => EffectiveStateModel::Crdt {
                 state_schema_version: Some(state.state_schema_version.as_str()),
                 migration_hint: state.migration_hint.as_deref(),
-                crdt_type: Some(
-                    state
-                        .crdt_type
-                        .as_ref()
-                        .ok_or_else(|| ManifestError::Invalid {
-                            field: "connector.state.crdt_type",
-                            message: "required when model = \"crdt\"".into(),
-                        })?
-                        .as_str(),
-                ),
+                crdt_type: Some(crdt_type.as_str()),
                 snapshot_every_updates: state.snapshot_every_updates,
                 snapshot_every_bytes: state.snapshot_every_bytes,
             },
@@ -822,11 +816,20 @@ pub enum ConnectorRuntimeFormat {
     Wasi,
 }
 
+/// Simple state model kind for TOML parsing (unit variants only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StateModelKind {
+    Stateless,
+    SingletonWriter,
+    Crdt,
+}
+
 /// Connector state section `[connector.state]` (model-guide aligned).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectorStateSection {
-    pub model: ConnectorStateModel,
+    model: StateModelKind,
     pub state_schema_version: String,
     #[serde(default)]
     pub migration_hint: Option<String>,
@@ -848,22 +851,91 @@ impl ConnectorStateSection {
         }
         Ok(())
     }
+
+    /// Convert to the public `ConnectorStateModel` enum.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ManifestError::Invalid` if `model` is `Crdt` but `crdt_type` is `None`.
+    pub fn to_state_model(&self) -> Result<ConnectorStateModel, ManifestError> {
+        match self.model {
+            StateModelKind::Stateless => Ok(ConnectorStateModel::Stateless),
+            StateModelKind::SingletonWriter => Ok(ConnectorStateModel::SingletonWriter),
+            StateModelKind::Crdt => {
+                let crdt_type = self.crdt_type.ok_or_else(|| ManifestError::Invalid {
+                    field: "connector.state.crdt_type",
+                    message: "required when model = \"crdt\"".into(),
+                })?;
+                Ok(ConnectorStateModel::Crdt { crdt_type })
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConnectorStateModel {
+    /// No persistent state.
+    #[default]
     Stateless,
+    /// Single-writer with lease-based fencing.
     SingletonWriter,
-    Crdt,
+    /// CRDT-based collaborative state.
+    Crdt {
+        /// The CRDT type determining merge semantics.
+        crdt_type: ConnectorCrdtType,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl ConnectorStateModel {
+    /// Returns `true` if this is the stateless model.
+    #[must_use]
+    pub const fn is_stateless(&self) -> bool {
+        matches!(self, Self::Stateless)
+    }
+
+    /// Returns `true` if this is the singleton-writer model.
+    #[must_use]
+    pub const fn is_singleton_writer(&self) -> bool {
+        matches!(self, Self::SingletonWriter)
+    }
+
+    /// Returns `true` if this is a CRDT model.
+    #[must_use]
+    pub const fn is_crdt(&self) -> bool {
+        matches!(self, Self::Crdt { .. })
+    }
+
+    /// Returns the CRDT type if this is a CRDT model.
+    #[must_use]
+    pub const fn crdt_type(&self) -> Option<ConnectorCrdtType> {
+        match self {
+            Self::Crdt { crdt_type } => Some(*crdt_type),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectorStateModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stateless => write!(f, "stateless"),
+            Self::SingletonWriter => write!(f, "singleton_writer"),
+            Self::Crdt { crdt_type } => write!(f, "crdt({})", crdt_type.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorCrdtType {
+    /// Last-writer-wins map.
     LwwMap,
+    /// Observed-remove set.
     OrSet,
+    /// Grow-only counter.
     GCounter,
+    /// Positive-negative counter.
     PnCounter,
 }
 

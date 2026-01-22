@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod harness;
 pub mod interop;
 pub mod schemas;
 pub mod vectors;
@@ -29,6 +30,11 @@ pub use vectors::core::{CanonicalPayloadGoldenVector, ObjectIdGoldenVector};
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;
 pub use vectors::session::SessionGoldenVector;
+
+// Re-export harness types for convenience
+pub use harness::{
+    LogCollector, LogEntry, MockClock, SharedMockClock, SimulatedNetwork, TestHarness, TestMeshNode,
+};
 
 // Re-export interop types for convenience
 pub use interop::{

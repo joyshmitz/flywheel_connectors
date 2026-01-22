@@ -7,8 +7,8 @@
 //! - Handle capability checks correctly
 //! - Never leak secrets in error messages
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use fcp_sdk::prelude::*;
@@ -355,15 +355,15 @@ impl FcpConnector for CapabilityCheckingConnector {
         // For test purposes, we simulate missing capabilities
         let missing = self.required_capabilities.clone();
 
-        if !missing.is_empty() {
+        if missing.is_empty() {
+            Ok(SimulateResponse::allowed(req.id))
+        } else {
             Ok(SimulateResponse::denied(
                 req.id,
                 format!("Missing required capabilities: {missing:?}"),
                 "FCP-3001",
             )
             .with_missing_capabilities(missing))
-        } else {
-            Ok(SimulateResponse::allowed(req.id))
         }
     }
 
@@ -407,12 +407,16 @@ async fn test_simulate_reports_missing_capabilities() {
 
     assert!(!result.would_succeed);
     assert_eq!(result.missing_capabilities.len(), 2);
-    assert!(result
-        .missing_capabilities
-        .contains(&"email.send".to_string()));
-    assert!(result
-        .missing_capabilities
-        .contains(&"email.read".to_string()));
+    assert!(
+        result
+            .missing_capabilities
+            .contains(&"email.send".to_string())
+    );
+    assert!(
+        result
+            .missing_capabilities
+            .contains(&"email.read".to_string())
+    );
 }
 
 #[tokio::test]

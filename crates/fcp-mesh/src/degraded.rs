@@ -562,7 +562,6 @@ impl ControlPlaneHandler for InMemoryControlPlaneHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::ZoneIdHash;
 
     fn test_config() -> RaptorQConfig {
         RaptorQConfig {
@@ -656,7 +655,9 @@ mod tests {
         let config = test_config();
         let mut decoder = DegradedModeDecoder::new(config);
 
-        // Create a frame without CONTROL_PLANE flag
+        let zone_id = test_zone_id();
+
+        // Create a frame without CONTROL_PLANE flag (but with matching zone hash)
         let frame = FcpsFrame {
             header: FcpsFrameHeader {
                 version: FCPS_VERSION,
@@ -666,7 +667,7 @@ mod tests {
                 object_id: ObjectId::from_bytes([0; 32]),
                 symbol_size: 64,
                 zone_key_id: ZoneKeyId::from_bytes([0; 8]),
-                zone_id_hash: ZoneIdHash::from_bytes([0; 32]),
+                zone_id_hash: zone_id.hash(),
                 epoch_id: 0,
                 sender_instance_id: 0,
                 frame_seq: 0,
@@ -674,7 +675,7 @@ mod tests {
             symbols: vec![],
         };
 
-        let result = decoder.process_frame(&frame, &test_zone_id(), RetentionClass::Required);
+        let result = decoder.process_frame(&frame, &zone_id, RetentionClass::Required);
         assert!(matches!(
             result,
             Err(DegradedTransportError::MissingControlPlaneFlag)

@@ -1188,8 +1188,9 @@ fn parses_singleton_writer_state_model() {
     let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
 
     let state = parsed.connector.state.expect("state section present");
+    let model = state.to_state_model().expect("valid state model");
     assert!(matches!(
-        state.model,
+        model,
         fcp_manifest::ConnectorStateModel::SingletonWriter
     ));
 }

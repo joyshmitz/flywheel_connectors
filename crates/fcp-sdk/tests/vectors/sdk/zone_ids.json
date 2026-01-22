@@ -1,0 +1,30 @@
+{
+  "description": "Zone ID serialization golden vectors (FCP zone hierarchy)",
+  "vectors": [
+    {
+      "name": "owner_zone",
+      "description": "Owner zone - highest trust level (tier 1)",
+      "serialized": "\"owner\""
+    },
+    {
+      "name": "private_zone",
+      "description": "Private zone - user personal space (tier 2)",
+      "serialized": "\"private\""
+    },
+    {
+      "name": "work_zone",
+      "description": "Work zone - organizational scope (tier 3)",
+      "serialized": "\"work\""
+    },
+    {
+      "name": "community_zone",
+      "description": "Community zone - shared community space (tier 4)",
+      "serialized": "\"community\""
+    },
+    {
+      "name": "public_zone",
+      "description": "Public zone - lowest trust level (tier 5)",
+      "serialized": "\"public\""
+    }
+  ]
+}

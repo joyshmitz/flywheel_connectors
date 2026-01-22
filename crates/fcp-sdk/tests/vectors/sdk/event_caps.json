@@ -1,0 +1,35 @@
+{
+  "description": "Event capability flags serialization golden vectors",
+  "vectors": [
+    {
+      "name": "default_caps",
+      "description": "Default event capabilities (all false)",
+      "data": {
+        "streaming": false,
+        "replay": false,
+        "min_buffer_events": 0,
+        "requires_ack": false
+      }
+    },
+    {
+      "name": "streaming_enabled",
+      "description": "Event caps with streaming enabled",
+      "data": {
+        "streaming": true,
+        "replay": false,
+        "min_buffer_events": 10,
+        "requires_ack": false
+      }
+    },
+    {
+      "name": "full_caps",
+      "description": "All event capabilities enabled",
+      "data": {
+        "streaming": true,
+        "replay": true,
+        "min_buffer_events": 100,
+        "requires_ack": true
+      }
+    }
+  ]
+}
