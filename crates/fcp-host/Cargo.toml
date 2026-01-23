@@ -1,0 +1,39 @@
+[package]
+name = "fcp-host"
+version = "0.1.0"
+edition = "2024"
+description = "FCP Host - Node Gateway/Orchestrator for the Flywheel Connector Protocol"
+license = "Apache-2.0"
+repository = "https://github.com/flywheel-ai/flywheel_connectors"
+keywords = ["fcp", "host", "gateway", "orchestrator"]
+categories = ["network-programming", "asynchronous"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[dependencies]
+# Core FCP types
+fcp-core = { path = "../fcp-core" }
+
+# Async runtime
+tokio = { version = "1.44", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2"
+
+# Tracing
+tracing = "0.1"
+
+# Semver for version comparison
+semver = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "test-util"] }
