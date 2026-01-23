@@ -75,6 +75,8 @@ pub enum DenyReason {
     SpkiPinMismatch,
     /// Credential not authorized for this operation.
     CredentialNotAuthorized,
+    /// Credential host binding does not allow the requested host.
+    CredentialHostNotAllowed,
     /// Hostname not canonicalized.
     HostnameNotCanonical,
     /// Too many DNS responses.
@@ -163,6 +165,13 @@ pub struct EgressDecision {
     pub spki_pins: Vec<Vec<u8>>,
     /// Injected credential (if any, already applied to request).
     pub credential_injected: bool,
+}
+
+/// TCP authorization decision with optional connection auth bytes.
+#[derive(Debug, Clone)]
+pub struct EgressTcpDecision {
+    pub decision: EgressDecision,
+    pub tcp_auth: Option<Vec<u8>>,
 }
 
 // ============================================================================
@@ -341,6 +350,103 @@ impl EgressGuard {
             EgressRequest::Http(http) => self.evaluate_http(http, constraints),
             EgressRequest::TcpConnect(tcp) => self.evaluate_tcp(tcp, constraints),
         }
+    }
+
+    /// Evaluate an HTTP request and perform credential authorization/injection.
+    ///
+    /// This is the integrated "secretless egress" path: policy check + credential gating.
+    ///
+    /// # Errors
+    /// Returns `EgressError::Denied` for policy or credential violations.
+    pub fn authorize_http(
+        &self,
+        request: &mut EgressHttpRequest,
+        constraints: &NetworkConstraints,
+        injector: &dyn CredentialInjector,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> Result<EgressDecision, EgressError> {
+        let mut decision = self.evaluate(&EgressRequest::Http(request.clone()), constraints)?;
+
+        let Some(credential_id) = request.credential_id.as_deref() else {
+            return Ok(decision);
+        };
+
+        let authorized = injector.is_authorized(credential_id, operation_id, credential_allow)?;
+        if !authorized {
+            return Err(EgressError::Denied {
+                reason: format!(
+                    "credential `{credential_id}` not authorized for operation `{operation_id}`"
+                ),
+                code: DenyReason::CredentialNotAuthorized,
+            });
+        }
+
+        let host_allowed = injector.is_host_allowed(credential_id, &decision.canonical_host)?;
+        if !host_allowed {
+            return Err(EgressError::Denied {
+                reason: format!(
+                    "credential `{credential_id}` not allowed for host `{}`",
+                    decision.canonical_host
+                ),
+                code: DenyReason::CredentialHostNotAllowed,
+            });
+        }
+
+        injector.inject_http(credential_id, &mut request.headers)?;
+        decision.credential_injected = true;
+
+        Ok(decision)
+    }
+
+    /// Evaluate a TCP connect request and perform credential authorization.
+    ///
+    /// Returns optional auth bytes to send after connection establishment.
+    pub fn authorize_tcp(
+        &self,
+        request: &EgressTcpConnectRequest,
+        constraints: &NetworkConstraints,
+        injector: &dyn CredentialInjector,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> Result<EgressTcpDecision, EgressError> {
+        let mut decision =
+            self.evaluate(&EgressRequest::TcpConnect(request.clone()), constraints)?;
+
+        let Some(credential_id) = request.credential_id.as_deref() else {
+            return Ok(EgressTcpDecision {
+                decision,
+                tcp_auth: None,
+            });
+        };
+
+        let authorized = injector.is_authorized(credential_id, operation_id, credential_allow)?;
+        if !authorized {
+            return Err(EgressError::Denied {
+                reason: format!(
+                    "credential `{credential_id}` not authorized for operation `{operation_id}`"
+                ),
+                code: DenyReason::CredentialNotAuthorized,
+            });
+        }
+
+        let host_allowed = injector.is_host_allowed(credential_id, &decision.canonical_host)?;
+        if !host_allowed {
+            return Err(EgressError::Denied {
+                reason: format!(
+                    "credential `{credential_id}` not allowed for host `{}`",
+                    decision.canonical_host
+                ),
+                code: DenyReason::CredentialHostNotAllowed,
+            });
+        }
+
+        let tcp_auth = injector.get_tcp_auth(credential_id)?;
+        if tcp_auth.is_some() {
+            decision.credential_injected = true;
+        }
+
+        Ok(EgressTcpDecision { decision, tcp_auth })
     }
 
     /// Evaluate an HTTP request.
@@ -609,6 +715,13 @@ pub trait CredentialInjector: Send + Sync {
         operation_id: &str,
         credential_allow: &[String],
     ) -> Result<bool, EgressError>;
+
+    /// Check if a credential is allowed for the given destination host.
+    ///
+    /// Default: allow all hosts. Override when credentials are host-bound.
+    fn is_host_allowed(&self, _credential_id: &str, _host: &str) -> Result<bool, EgressError> {
+        Ok(true)
+    }
 
     /// Inject a credential into an HTTP request.
     ///

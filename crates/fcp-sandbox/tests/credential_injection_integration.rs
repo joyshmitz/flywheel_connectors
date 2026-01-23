@@ -114,6 +114,14 @@ impl CredentialInjector for MockCredentialInjector {
         Ok(credential_allow.iter().any(|c| c == credential_id))
     }
 
+    fn is_host_allowed(&self, credential_id: &str, host: &str) -> Result<bool, EgressError> {
+        Ok(MockCredentialInjector::is_host_allowed(
+            self,
+            credential_id,
+            host,
+        ))
+    }
+
     fn inject_http(
         &self,
         credential_id: &str,
@@ -560,27 +568,20 @@ mod integration {
             credential_id: Some("cred-api-bearer".into()),
         };
 
-        // Step 2: Evaluate egress policy
+        // Step 2: Evaluate + authorize + inject
         let decision = guard
-            .evaluate(&EgressRequest::Http(request.clone()), &constraints)
+            .authorize_http(
+                &mut request,
+                &constraints,
+                &injector,
+                "op.fetch",
+                &credential_allow,
+            )
             .expect("request should be allowed");
 
         assert!(decision.allowed);
         assert_eq!(decision.canonical_host, "api.example.com");
-
-        // Step 3: Check credential authorization
-        let authorized = injector
-            .is_authorized("cred-api-bearer", "op.fetch", &credential_allow)
-            .expect("auth check should succeed");
-        assert!(authorized);
-
-        // Step 4: Check host binding
-        assert!(injector.is_host_allowed("cred-api-bearer", &decision.canonical_host));
-
-        // Step 5: Inject credential
-        injector
-            .inject_http("cred-api-bearer", &mut request.headers)
-            .expect("injection should succeed");
+        assert!(decision.credential_injected);
 
         // Verify final state
         assert_eq!(request.headers.len(), 1);
@@ -592,16 +593,31 @@ mod integration {
     #[test]
     fn full_flow_denied_credential_not_in_allow_list() {
         let injector = test_injector();
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
         let credential_allow = vec!["cred-other".into()]; // Different credential allowed
+        let mut request = EgressHttpRequest {
+            url: "https://api.example.com/v1/data".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-api-bearer".into()),
+        };
 
-        let authorized = injector
-            .is_authorized("cred-api-bearer", "op.fetch", &credential_allow)
-            .expect("auth check should succeed");
+        let result = guard.authorize_http(
+            &mut request,
+            &constraints,
+            &injector,
+            "op.fetch",
+            &credential_allow,
+        );
 
-        assert!(!authorized);
-        // In production, this would generate a DecisionReceipt with:
-        // - reason_code: CredentialNotAuthorized
-        // - evidence: credential_id, operation_id, capability's credential_allow list
+        match result {
+            Err(EgressError::Denied { code, .. }) => {
+                assert_eq!(code, DenyReason::CredentialNotAuthorized);
+            }
+            _ => panic!("expected CredentialNotAuthorized"),
+        }
     }
 
     /// Simulates denial when host doesn't match credential's `host_allow`.
@@ -613,7 +629,7 @@ mod integration {
         // Allow evil.com in network constraints (but credential only allows api.example.com)
         constraints.host_allow.push("evil.com".into());
 
-        let request = EgressHttpRequest {
+        let mut request = EgressHttpRequest {
             url: "https://evil.com/steal-data".into(),
             method: "GET".into(),
             headers: vec![],
@@ -621,19 +637,21 @@ mod integration {
             credential_id: Some("cred-api-bearer".into()),
         };
 
-        // Network policy allows the request
-        let decision = guard
-            .evaluate(&EgressRequest::Http(request), &constraints)
-            .expect("network policy allows evil.com");
-        assert!(decision.allowed);
+        // Network policy allows, but credential host binding denies.
+        let result = guard.authorize_http(
+            &mut request,
+            &constraints,
+            &injector,
+            "op.fetch",
+            &["cred-api-bearer".into()],
+        );
 
-        // But credential's host binding denies it
-        let host_allowed = injector.is_host_allowed("cred-api-bearer", &decision.canonical_host);
-        assert!(!host_allowed);
-
-        // In production, this generates a DecisionReceipt with:
-        // - reason_code: CredentialHostBindingViolation
-        // - evidence: credential_id, requested_host, allowed_hosts
+        match result {
+            Err(EgressError::Denied { code, .. }) => {
+                assert_eq!(code, DenyReason::CredentialHostNotAllowed);
+            }
+            _ => panic!("expected CredentialHostNotAllowed"),
+        }
     }
 
     /// Proves that requests without credentials still work.
@@ -641,8 +659,9 @@ mod integration {
     fn full_flow_request_without_credential() {
         let guard = EgressGuard::new();
         let constraints = test_constraints();
+        let injector = test_injector();
 
-        let request = EgressHttpRequest {
+        let mut request = EgressHttpRequest {
             url: "https://api.example.com/public".into(),
             method: "GET".into(),
             headers: vec![],
@@ -651,7 +670,7 @@ mod integration {
         };
 
         let decision = guard
-            .evaluate(&EgressRequest::Http(request), &constraints)
+            .authorize_http(&mut request, &constraints, &injector, "op.fetch", &[])
             .expect("request should be allowed");
 
         assert!(decision.allowed);

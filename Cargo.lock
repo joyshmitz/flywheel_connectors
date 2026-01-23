@@ -2039,6 +2039,7 @@ dependencies = [
  "fcp-core",
  "fcp-manifest",
  "futures-util",
+ "jsonschema",
  "serde",
  "serde_json",
  "thiserror 2.0.17",

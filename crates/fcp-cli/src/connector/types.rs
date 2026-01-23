@@ -2,6 +2,7 @@
 //!
 //! These types represent the structured output of connector discovery commands.
 
+use fcp_core::{ConnectorHealth, SafetyTier};
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,56 +34,66 @@ pub struct ConnectorSummary {
     pub id: String,
     /// Human-readable name
     pub name: String,
+    /// Optional description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Version
     pub version: String,
-    /// Archetype (bidirectional, streaming, operational, polling, hybrid)
-    pub archetype: String,
+    /// Categories (e.g., "messaging", "llm")
+    #[serde(default)]
+    pub categories: Vec<String>,
+    /// Number of tools/operations
+    pub tool_count: u32,
+    /// Maximum safety tier across all operations
+    pub max_safety_tier: SafetyTier,
+    /// Whether the connector is enabled
+    pub enabled: bool,
     /// Health status
-    pub status: ConnectorStatus,
-    /// Number of operations provided
-    pub operation_count: usize,
-    /// Whether the connector is sandboxed
-    pub sandboxed: bool,
+    pub health: ConnectorHealth,
 }
 
-/// Connector health status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ConnectorStatus {
-    /// Healthy and operational
-    Healthy,
-    /// Operational but with warnings
-    Degraded,
-    /// Not responding or erroring
-    Unhealthy,
-    /// Not yet started
-    Stopped,
-    /// Unknown state
-    Unknown,
+/// Display helpers for connector health.
+pub trait ConnectorHealthDisplay {
+    /// ANSI color for health status.
+    fn ansi_color(&self) -> &'static str;
+    /// Symbol for health status.
+    fn symbol(&self) -> &'static str;
+    /// Lowercase label for health status.
+    fn label(&self) -> &'static str;
+    /// Optional reason for degraded/unavailable.
+    fn reason(&self) -> Option<&str>;
 }
 
-impl ConnectorStatus {
-    /// Get ANSI color code for status.
-    #[must_use]
-    pub fn ansi_color(&self) -> &'static str {
+impl ConnectorHealthDisplay for ConnectorHealth {
+    fn ansi_color(&self) -> &'static str {
         match self {
-            Self::Healthy => "\x1b[32m",   // green
-            Self::Degraded => "\x1b[33m",  // yellow
-            Self::Unhealthy => "\x1b[31m", // red
-            Self::Stopped => "\x1b[90m",   // gray
-            Self::Unknown => "\x1b[90m",   // gray
+            Self::Healthy => "\x1b[32m",               // green
+            Self::Degraded { .. } => "\x1b[33m",       // yellow
+            Self::Unavailable { .. } => "\x1b[31m",    // red
         }
     }
 
-    /// Get status symbol.
-    #[must_use]
-    pub fn symbol(&self) -> &'static str {
+    fn symbol(&self) -> &'static str {
         match self {
             Self::Healthy => "●",
-            Self::Degraded => "◐",
-            Self::Unhealthy => "○",
-            Self::Stopped => "◌",
-            Self::Unknown => "?",
+            Self::Degraded { .. } => "◐",
+            Self::Unavailable { .. } => "○",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Degraded { .. } => "degraded",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Healthy => None,
+            Self::Degraded { reason } => Some(reason.as_str()),
+            Self::Unavailable { reason, .. } => Some(reason.as_str()),
         }
     }
 }
@@ -122,7 +133,7 @@ pub struct ConnectorInfo {
     pub sandbox: SandboxInfo,
 
     /// Health and metrics
-    pub status: ConnectorStatus,
+    pub status: ConnectorHealth,
     pub metrics: Option<ConnectorMetricsInfo>,
 
     /// Supply chain info
@@ -330,17 +341,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn connector_status_colors() {
-        assert_eq!(ConnectorStatus::Healthy.ansi_color(), "\x1b[32m");
-        assert_eq!(ConnectorStatus::Degraded.ansi_color(), "\x1b[33m");
-        assert_eq!(ConnectorStatus::Unhealthy.ansi_color(), "\x1b[31m");
+    fn connector_health_colors() {
+        assert_eq!(ConnectorHealth::healthy().ansi_color(), "\x1b[32m");
+        assert_eq!(
+            ConnectorHealth::degraded("slow").ansi_color(),
+            "\x1b[33m"
+        );
+        assert_eq!(
+            ConnectorHealth::unavailable("down").ansi_color(),
+            "\x1b[31m"
+        );
     }
 
     #[test]
-    fn connector_status_symbols() {
-        assert_eq!(ConnectorStatus::Healthy.symbol(), "●");
-        assert_eq!(ConnectorStatus::Degraded.symbol(), "◐");
-        assert_eq!(ConnectorStatus::Unhealthy.symbol(), "○");
+    fn connector_health_symbols() {
+        assert_eq!(ConnectorHealth::healthy().symbol(), "●");
+        assert_eq!(ConnectorHealth::degraded("slow").symbol(), "◐");
+        assert_eq!(ConnectorHealth::unavailable("down").symbol(), "○");
     }
 
     #[test]
@@ -348,11 +365,13 @@ mod tests {
         let summary = ConnectorSummary {
             id: "fcp.twitter:social:v1".to_string(),
             name: "Twitter Connector".to_string(),
+            description: Some("Twitter/X connector".to_string()),
             version: "1.0.0".to_string(),
-            archetype: "bidirectional".to_string(),
-            status: ConnectorStatus::Healthy,
-            operation_count: 12,
-            sandboxed: true,
+            categories: vec!["messaging".to_string()],
+            tool_count: 12,
+            max_safety_tier: SafetyTier::Risky,
+            enabled: true,
+            health: ConnectorHealth::healthy(),
         };
 
         let json = serde_json::to_string(&summary).unwrap();
@@ -361,7 +380,7 @@ mod tests {
 
         let deserialized: ConnectorSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, summary.id);
-        assert_eq!(deserialized.status, ConnectorStatus::Healthy);
+        assert!(matches!(deserialized.health, ConnectorHealth::Healthy));
     }
 
     #[test]
@@ -373,11 +392,13 @@ mod tests {
                 connectors: vec![ConnectorSummary {
                     id: "fcp.twitter:social:v1".to_string(),
                     name: "Twitter".to_string(),
+                    description: None,
                     version: "1.0.0".to_string(),
-                    archetype: "bidirectional".to_string(),
-                    status: ConnectorStatus::Healthy,
-                    operation_count: 12,
-                    sandboxed: true,
+                    categories: vec!["messaging".to_string()],
+                    tool_count: 12,
+                    max_safety_tier: SafetyTier::Risky,
+                    enabled: true,
+                    health: ConnectorHealth::healthy(),
                 }],
             }],
         };
@@ -496,7 +517,7 @@ mod tests {
                 network_access: true,
                 allowed_hosts: vec!["api.twitter.com".to_string()],
             },
-            status: ConnectorStatus::Healthy,
+            status: ConnectorHealth::healthy(),
             metrics: Some(ConnectorMetricsInfo {
                 requests_total: 1000,
                 requests_success: 990,
@@ -514,7 +535,7 @@ mod tests {
         let deserialized: ConnectorInfo = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.id, info.id);
-        assert_eq!(deserialized.status, ConnectorStatus::Healthy);
+        assert!(matches!(deserialized.status, ConnectorHealth::Healthy));
         assert!(deserialized.metrics.is_some());
     }
 }

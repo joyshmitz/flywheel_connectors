@@ -157,6 +157,82 @@ pub mod prelude;
 pub mod streaming;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Schema validation helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// JSON Schema validation errors produced by the SDK.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SchemaValidationError {
+    /// The provided schema is invalid and could not be compiled.
+    #[error("invalid JSON Schema: {message}")]
+    InvalidSchema {
+        /// Human-readable error message.
+        message: String,
+    },
+
+    /// The value failed schema validation.
+    #[error("schema validation failed: {message}")]
+    ValidationFailed {
+        /// Human-readable summary message.
+        message: String,
+        /// Individual validation errors (formatted strings).
+        errors: Vec<String>,
+    },
+}
+
+/// Compiled JSON Schema validator for repeated use.
+#[derive(Debug, Clone)]
+pub struct SchemaValidator {
+    validator: std::sync::Arc<jsonschema::Validator>,
+}
+
+impl SchemaValidator {
+    /// Compile a JSON Schema into a reusable validator.
+    ///
+    /// # Errors
+    /// Returns [`SchemaValidationError::InvalidSchema`] if the schema is invalid.
+    pub fn compile(schema: &serde_json::Value) -> Result<Self, SchemaValidationError> {
+        let validator = jsonschema::Validator::new(schema).map_err(|e| {
+            SchemaValidationError::InvalidSchema {
+                message: e.to_string(),
+            }
+        })?;
+        Ok(Self {
+            validator: std::sync::Arc::new(validator),
+        })
+    }
+
+    /// Validate a JSON value against the compiled schema.
+    ///
+    /// # Errors
+    /// Returns [`SchemaValidationError::ValidationFailed`] if validation fails.
+    pub fn validate(&self, value: &serde_json::Value) -> Result<(), SchemaValidationError> {
+        match self.validator.validate(value) {
+            Ok(()) => Ok(()),
+            Err(errors) => {
+                let details: Vec<String> = errors.map(|e| e.to_string()).collect();
+                let message = details.join("; ");
+                Err(SchemaValidationError::ValidationFailed {
+                    message,
+                    errors: details,
+                })
+            }
+        }
+    }
+}
+
+/// Compile and validate a JSON value against a JSON Schema in one step.
+///
+/// # Errors
+/// Returns [`SchemaValidationError`] if the schema is invalid or validation fails.
+pub fn validate_json_schema(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), SchemaValidationError> {
+    SchemaValidator::compile(schema)?.validate(value)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Re-export commonly used external crates
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -164,3 +240,30 @@ pub use serde;
 pub use serde_json;
 pub use thiserror;
 pub use tracing;
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaValidator, validate_json_schema};
+    use serde_json::json;
+
+    #[test]
+    fn validate_schema_success_and_failure() {
+        let schema = json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+
+        let ok_value = json!({ "name": "fcp" });
+        let bad_value = json!({});
+
+        assert!(validate_json_schema(&schema, &ok_value).is_ok());
+        assert!(validate_json_schema(&schema, &bad_value).is_err());
+
+        let validator = SchemaValidator::compile(&schema).expect("schema compiles");
+        assert!(validator.validate(&ok_value).is_ok());
+        assert!(validator.validate(&bad_value).is_err());
+    }
+}

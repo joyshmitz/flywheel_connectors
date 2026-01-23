@@ -3,7 +3,7 @@
 //! These tests provide deterministic vectors for interoperability testing
 //! and regression detection of the FCPS wire format.
 
-use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
+use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::AeadKey;
 use fcp_protocol::{
     FCPS_HEADER_LEN,
@@ -234,12 +234,17 @@ fn golden_symbol_record_decode() {
 
 #[test]
 fn golden_nonce12_derivation() {
-    // Vector 1: Simple values
+    // Nonce12 layout:
+    // - Bytes 0-7: frame_seq (u64 LE)
+    // - Bytes 8-11: ESI (u32 LE)
+
+    // Vector 1: Simple values (frame_seq=1, esi=0)
     let nonce = derive_nonce12(1, 0);
     assert_eq!(
         nonce.as_bytes(),
         &[
-            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // frame_seq = 1 (LE)
+            0x00, 0x00, 0x00, 0x00 // esi = 0 (LE)
         ]
     );
 
@@ -248,16 +253,18 @@ fn golden_nonce12_derivation() {
     assert_eq!(
         nonce.as_bytes(),
         &[
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // frame_seq = MAX
+            0xFF, 0xFF, 0xFF, 0xFF // esi = MAX
         ]
     );
 
-    // Vector 3: Specific test case
+    // Vector 3: Specific test case (frame_seq=0x0102_0304_0506_0708, esi=0x0A0B_0C0D)
     let nonce = derive_nonce12(0x0102_0304_0506_0708, 0x0A0B_0C0D);
     assert_eq!(
         nonce.as_bytes(),
         &[
-            0x0D, 0x0C, 0x0B, 0x0A, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01
+            0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, // frame_seq (LE)
+            0x0D, 0x0C, 0x0B, 0x0A // esi (LE)
         ]
     );
 }
@@ -304,16 +311,20 @@ fn golden_subkey_derivation() {
         0x1E, 0x1F,
     ]);
 
+    let zone_key_id = ZoneKeyId::from_bytes([0x44; 8]);
+    let sender_node_id = TailscaleNodeId::new("node-golden");
     let sender_instance_id: u64 = 0x1234_5678_9ABC_DEF0;
 
-    let subkey = derive_sender_subkey(&zone_key, sender_instance_id);
+    let subkey =
+        derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, sender_instance_id);
 
     // The subkey should be deterministic
-    let subkey2 = derive_sender_subkey(&zone_key, sender_instance_id);
+    let subkey2 =
+        derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, sender_instance_id);
     assert_eq!(subkey.as_bytes(), subkey2.as_bytes());
 
     // Different sender_instance_id should yield different subkey
-    let subkey_other = derive_sender_subkey(&zone_key, 0);
+    let subkey_other = derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, 0);
     assert_ne!(subkey.as_bytes(), subkey_other.as_bytes());
 
     // Log the derived subkey for reference (HKDF output is deterministic)
@@ -334,6 +345,7 @@ fn golden_aad_construction() {
         zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
         zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
         epoch_id: 1000,
+        sender_node_id: TailscaleNodeId::new("node-test"),
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq: 123,
     };
@@ -427,6 +439,7 @@ fn golden_symbol_encryption_chacha20() {
         zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
         zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
         epoch_id: 1000,
+        sender_node_id: TailscaleNodeId::new("node-test"),
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq: 1,
     };
@@ -470,6 +483,7 @@ fn golden_symbol_encryption_xchacha20() {
         zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
         zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
         epoch_id: 1000,
+        sender_node_id: TailscaleNodeId::new("node-test"),
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq: 1,
     };
@@ -519,6 +533,7 @@ fn algorithm_selection_produces_different_ciphertexts() {
         zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
         zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
         epoch_id: 1000,
+        sender_node_id: TailscaleNodeId::new("node-test"),
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq: 1,
     };
@@ -579,6 +594,7 @@ fn cross_algorithm_decrypt_fails() {
         zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
         zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
         epoch_id: 1000,
+        sender_node_id: TailscaleNodeId::new("node-test"),
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq: 1,
     };
@@ -617,6 +633,7 @@ fn symbol_decrypt_wrong_key_fails() {
         zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
         zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
         epoch_id: 1000,
+        sender_node_id: TailscaleNodeId::new("node-test"),
         sender_instance_id: 0xDEAD_BEEF,
         frame_seq: 1,
     };

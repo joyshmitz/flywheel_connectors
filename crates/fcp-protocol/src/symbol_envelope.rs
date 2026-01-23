@@ -19,7 +19,7 @@
 //!
 //! The nonce is NOT transmitted; it's derived deterministically from frame fields.
 
-use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
+use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::{
     AeadKey, ChaCha20Nonce, ChaCha20Poly1305Cipher, XChaCha20Nonce, XChaCha20Poly1305Cipher,
     hkdf_sha256_array,
@@ -72,6 +72,8 @@ pub struct SymbolContext {
     pub zone_key_id: ZoneKeyId,
     /// Epoch ID for replay protection.
     pub epoch_id: u64,
+    /// Sender node ID (Tailscale node ID).
+    pub sender_node_id: TailscaleNodeId,
     /// Sender instance ID (random u64 at process startup).
     pub sender_instance_id: u64,
     /// Per-sender monotonic frame sequence number.
@@ -81,24 +83,37 @@ pub struct SymbolContext {
 /// Derive a per-sender subkey from the zone key (NORMATIVE).
 ///
 /// Uses HKDF-SHA256 with:
-/// - Salt: "FCP2-SENDER-SUBKEY-V1"
+/// - Salt: `zone_key_id` (8 bytes)
 /// - IKM: `zone_key` bytes
-/// - Info: `sender_instance_id` (8 bytes LE)
+/// - Info: "FCP2-SENDER-KEY-V1" || sender_node_id || sender_instance_id_le
 ///
 /// # Arguments
 ///
 /// * `zone_key` - The zone encryption key
+/// * `zone_key_id` - Zone key identifier (8 bytes)
+/// * `sender_node_id` - Sender node identifier
 /// * `sender_instance_id` - Unique sender instance identifier
 ///
 /// # Panics
 ///
 /// Panics if HKDF expansion fails (should never happen for 32-byte output).
 #[must_use]
-pub fn derive_sender_subkey(zone_key: &AeadKey, sender_instance_id: u64) -> AeadKey {
-    let salt = b"FCP2-SENDER-SUBKEY-V1";
-    let info = sender_instance_id.to_le_bytes();
+pub fn derive_sender_subkey(
+    zone_key: &AeadKey,
+    zone_key_id: &ZoneKeyId,
+    sender_node_id: &TailscaleNodeId,
+    sender_instance_id: u64,
+) -> AeadKey {
+    let mut info = Vec::with_capacity(22 + sender_node_id.as_str().len() + 8);
+    info.extend_from_slice(b"FCP2-SENDER-KEY-V1");
+    info.extend_from_slice(sender_node_id.as_str().as_bytes());
+    info.extend_from_slice(&sender_instance_id.to_le_bytes());
 
-    let subkey_bytes: [u8; 32] = hkdf_sha256_array(Some(salt), zone_key.as_bytes(), &info)
+    let subkey_bytes: [u8; 32] = hkdf_sha256_array(
+        Some(zone_key_id.as_bytes()),
+        zone_key.as_bytes(),
+        &info,
+    )
         .expect("HKDF expansion for 32 bytes should never fail");
     AeadKey::from_bytes(subkey_bytes)
 }
@@ -106,8 +121,8 @@ pub fn derive_sender_subkey(zone_key: &AeadKey, sender_instance_id: u64) -> Aead
 /// Derive a 12-byte `ChaCha20` nonce (NORMATIVE for ChaCha20-Poly1305).
 ///
 /// Layout:
-/// - Bytes 0-3: ESI (u32 LE)
-/// - Bytes 4-11: `frame_seq` (u64 LE)
+/// - Bytes 0-7: `frame_seq` (u64 LE)
+/// - Bytes 8-11: ESI (u32 LE)
 ///
 /// # Arguments
 ///
@@ -116,8 +131,8 @@ pub fn derive_sender_subkey(zone_key: &AeadKey, sender_instance_id: u64) -> Aead
 #[must_use]
 pub fn derive_nonce12(frame_seq: u64, esi: u32) -> ChaCha20Nonce {
     let mut nonce = [0u8; 12];
-    nonce[0..4].copy_from_slice(&esi.to_le_bytes());
-    nonce[4..12].copy_from_slice(&frame_seq.to_le_bytes());
+    nonce[0..8].copy_from_slice(&frame_seq.to_le_bytes());
+    nonce[8..12].copy_from_slice(&esi.to_le_bytes());
     ChaCha20Nonce::from_bytes(nonce)
 }
 
@@ -191,7 +206,12 @@ pub fn encrypt_symbol(
     ctx: &SymbolContext,
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, [u8; AUTH_TAG_SIZE]), SymbolEnvelopeError> {
-    let sender_key = derive_sender_subkey(zone_key, ctx.sender_instance_id);
+    let sender_key = derive_sender_subkey(
+        zone_key,
+        &ctx.zone_key_id,
+        &ctx.sender_node_id,
+        ctx.sender_instance_id,
+    );
     let aad = build_symbol_aad(ctx);
 
     let ciphertext_with_tag = match algorithm {
@@ -245,7 +265,12 @@ pub fn decrypt_symbol(
     ciphertext: &[u8],
     auth_tag: &[u8; AUTH_TAG_SIZE],
 ) -> Result<Vec<u8>, SymbolEnvelopeError> {
-    let sender_key = derive_sender_subkey(zone_key, ctx.sender_instance_id);
+    let sender_key = derive_sender_subkey(
+        zone_key,
+        &ctx.zone_key_id,
+        &ctx.sender_node_id,
+        ctx.sender_instance_id,
+    );
     let aad = build_symbol_aad(ctx);
 
     // Reconstruct ciphertext || tag for the AEAD crate
@@ -283,6 +308,7 @@ mod tests {
             zone_id_hash: ZoneIdHash::from_bytes([0x22; 32]),
             zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
             epoch_id: 1000,
+            sender_node_id: TailscaleNodeId::new("node-test"),
             sender_instance_id: 0xDEAD_BEEF_CAFE_BABE,
             frame_seq: 123,
         }
@@ -291,10 +317,14 @@ mod tests {
     #[test]
     fn subkey_derivation_deterministic() {
         let zone_key = AeadKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
+        let sender_node_id = TailscaleNodeId::new("node-a");
         let sender_instance_id = 12345u64;
 
-        let subkey1 = derive_sender_subkey(&zone_key, sender_instance_id);
-        let subkey2 = derive_sender_subkey(&zone_key, sender_instance_id);
+        let subkey1 =
+            derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, sender_instance_id);
+        let subkey2 =
+            derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, sender_instance_id);
 
         assert_eq!(subkey1.as_bytes(), subkey2.as_bytes());
     }
@@ -302,9 +332,11 @@ mod tests {
     #[test]
     fn subkey_derivation_unique_per_sender() {
         let zone_key = AeadKey::from_bytes([0xAA; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x10; 8]);
+        let sender_node_id = TailscaleNodeId::new("node-a");
 
-        let subkey1 = derive_sender_subkey(&zone_key, 1);
-        let subkey2 = derive_sender_subkey(&zone_key, 2);
+        let subkey1 = derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, 1);
+        let subkey2 = derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, 2);
 
         assert_ne!(subkey1.as_bytes(), subkey2.as_bytes());
     }
@@ -314,13 +346,13 @@ mod tests {
         let nonce = derive_nonce12(0x0102_0304_0506_0708, 0x0A0B_0C0D);
         let bytes = nonce.as_bytes();
 
-        // ESI in first 4 bytes (LE)
-        assert_eq!(&bytes[0..4], &[0x0D, 0x0C, 0x0B, 0x0A]);
-        // frame_seq in next 8 bytes (LE)
+        // frame_seq in first 8 bytes (LE)
         assert_eq!(
-            &bytes[4..12],
+            &bytes[0..8],
             &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
         );
+        // ESI in last 4 bytes (LE)
+        assert_eq!(&bytes[8..12], &[0x0D, 0x0C, 0x0B, 0x0A]);
     }
 
     #[test]

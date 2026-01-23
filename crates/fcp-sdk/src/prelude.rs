@@ -61,6 +61,9 @@ pub use crate::streaming::{
     AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SubscribeOutcome,
 };
 
+// Schema validation helpers
+pub use crate::{SchemaValidationError, SchemaValidator, validate_json_schema};
+
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};
 pub use serde_json::json;

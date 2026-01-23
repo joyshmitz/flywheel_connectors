@@ -6,6 +6,7 @@
 //! - `fcp connector` - Connector discovery and introspection
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
+//! - `fcp repair` - Coverage status and repair planning
 
 #![forbid(unsafe_code)]
 
@@ -15,8 +16,13 @@ mod connector;
 mod doctor;
 mod explain;
 mod install;
+mod repair;
 
-use clap::{Parser, Subcommand};
+use std::io::{IsTerminal, Read, Write};
+use std::process::Stdio;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// FCP2 developer/operator CLI.
 #[derive(Parser)]
@@ -25,6 +31,22 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// Read input from stdin (for piping).
+    #[arg(long, global = true, default_value_t = false)]
+    input_stdin: bool,
+
+    /// Input format for stdin (json, toml, raw).
+    #[arg(long, global = true, value_enum, default_value_t = InputFormat::Json)]
+    input_format: InputFormat,
+
+    /// Disable pager for long human-readable output.
+    #[arg(long, global = true, default_value_t = false)]
+    no_pager: bool,
+
+    /// Force pager even for short output.
+    #[arg(long, global = true, default_value_t = false, conflicts_with = "no_pager")]
+    pager: bool,
 }
 
 #[derive(Subcommand)]
@@ -61,9 +83,109 @@ enum Commands {
     /// Verify manifest signatures, binary checksums, and supply chain policy,
     /// then mirror the connector to the mesh store.
     Install(install::InstallArgs),
+
+    /// Coverage status and repair planning.
+    Repair(repair::RepairArgs),
 }
 
-fn main() -> anyhow::Result<()> {
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum InputFormat {
+    Json,
+    Toml,
+    Raw,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PagerConfig {
+    command: String,
+    args: Vec<String>,
+    threshold: usize,
+    disabled: bool,
+    force: bool,
+}
+
+impl PagerConfig {
+    fn from_cli(cli: &Cli) -> Self {
+        let command = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+        Self {
+            command,
+            args: vec!["-R".to_string()],
+            threshold: 50,
+            disabled: cli.no_pager,
+            force: cli.pager,
+        }
+    }
+}
+
+pub(crate) fn output_with_pager(
+    content: &str,
+    config: &PagerConfig,
+    json_output: bool,
+) -> Result<()> {
+    if json_output {
+        print!("{content}");
+        return Ok(());
+    }
+
+    let should_page = if config.disabled {
+        false
+    } else if config.force {
+        true
+    } else if !std::io::stdout().is_terminal() {
+        false
+    } else {
+        content.lines().count() >= config.threshold
+    };
+
+    if !should_page {
+        print!("{content}");
+        return Ok(());
+    }
+
+    let mut child = match std::process::Command::new(&config.command)
+        .args(&config.args)
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            print!("{content}");
+            return Ok(());
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(content.as_bytes())
+            .context("failed to write to pager stdin")?;
+    }
+
+    let _ = child.wait();
+    Ok(())
+}
+
+fn read_stdin_input(format: InputFormat) -> Result<serde_json::Value> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .context("failed to read stdin")?;
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("stdin input is empty");
+    }
+
+    match format {
+        InputFormat::Json => Ok(serde_json::from_str(trimmed)?),
+        InputFormat::Toml => {
+            let toml_value: toml::Value = toml::from_str(trimmed)?;
+            Ok(serde_json::to_value(toml_value)?)
+        }
+        InputFormat::Raw => Ok(serde_json::json!({ "raw": trimmed })),
+    }
+}
+
+fn main() -> Result<()> {
     // Initialize tracing subscriber for structured logging.
     // Write logs to stderr so stdout is clean for JSON output.
     tracing_subscriber::fmt()
@@ -75,13 +197,36 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let pager = PagerConfig::from_cli(&cli);
+
+    let stdin_input = if cli.input_stdin {
+        Some(read_stdin_input(cli.input_format)?)
+    } else {
+        None
+    };
 
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
         Commands::Connector(args) => connector::run(&args),
-        Commands::Doctor(args) => doctor::run(&args),
-        Commands::Explain(args) => explain::run(&args),
-        Commands::Install(args) => install::run(args),
+        Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref(), &pager),
+        Commands::Explain(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            explain::run(&args)
+        }
+        Commands::Install(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            install::run(args)
+        }
+        Commands::Repair(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            repair::run(args)
+        }
     }
 }
