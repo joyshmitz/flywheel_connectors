@@ -2,11 +2,13 @@
 resolver = "2"
 members = [
     "crates/fcp-audit",
+    "crates/fcp-bootstrap",
     "crates/fcp-cbor",
     "crates/fcp-core",
     "crates/fcp-cli",
     "crates/fcp-conformance",
     "crates/fcp-crypto",
+    "crates/fcp-host",
     "crates/fcp-manifest",
     "crates/fcp-mesh",
     "crates/fcp-oauth",
@@ -32,9 +34,11 @@ members = [
 # Default to the FCP2 platform core crates (connectors are explicitly targeted).
 default-members = [
     "crates/fcp-audit",
+    "crates/fcp-bootstrap",
     "crates/fcp-cbor",
     "crates/fcp-core",
     "crates/fcp-crypto",
+    "crates/fcp-host",
     "crates/fcp-manifest",
     "crates/fcp-mesh",
     "crates/fcp-protocol",
@@ -106,6 +110,10 @@ percent-encoding = "2.3"
 # Fountain codes
 raptorq = "2.0"
 
+# WASI runtime
+wasmtime = { version = "29.0", features = ["component-model"] }
+wasmtime-wasi = "29.0"
+
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
@@ -128,9 +136,11 @@ url = "2.5"
 
 # Internal crates
 fcp-audit = { path = "crates/fcp-audit" }
+fcp-bootstrap = { path = "crates/fcp-bootstrap" }
 fcp-cbor = { path = "crates/fcp-cbor" }
 fcp-core = { path = "crates/fcp-core" }
 fcp-crypto = { path = "crates/fcp-crypto" }
+fcp-host = { path = "crates/fcp-host" }
 fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }
 fcp-oauth = { path = "crates/fcp-oauth" }
