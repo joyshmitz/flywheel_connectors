@@ -1,0 +1,274 @@
+//! Cold recovery (zero-peer disaster recovery).
+//!
+//! When ALL peers are gone and only the recovery phrase exists, this module
+//! enables recreating the genesis state and starting fresh.
+
+use crate::genesis::GenesisState;
+use crate::recovery_phrase::{OwnerKeypair, RecoveryPhrase};
+use thiserror::Error;
+
+/// Warnings generated during cold recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColdRecoveryWarning {
+    /// No audit history available (starting fresh).
+    NoAuditHistory,
+
+    /// Cannot verify revocation state (no peers to query).
+    RevocationStateUnknown,
+
+    /// Starting with a single node (no quorum possible).
+    SingleNodeStart,
+
+    /// Objects created after the original genesis will be lost.
+    DataLoss,
+
+    /// Fingerprint verification was skipped (no expected fingerprint provided).
+    FingerprintNotVerified,
+}
+
+impl std::fmt::Display for ColdRecoveryWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoAuditHistory => write!(f, "No audit history available - starting fresh"),
+            Self::RevocationStateUnknown => {
+                write!(f, "Cannot verify revocation state without peers")
+            }
+            Self::SingleNodeStart => write!(f, "Starting with single node - no quorum possible"),
+            Self::DataLoss => {
+                write!(f, "Objects created after original genesis will be lost")
+            }
+            Self::FingerprintNotVerified => {
+                write!(f, "Fingerprint verification was skipped")
+            }
+        }
+    }
+}
+
+/// Errors during cold recovery.
+#[derive(Debug, Error)]
+pub enum ColdRecoveryError {
+    /// Genesis fingerprint does not match expected.
+    #[error("fingerprint mismatch: expected {expected}, actual {actual}")]
+    FingerprintMismatch {
+        /// Expected fingerprint.
+        expected: String,
+        /// Actual fingerprint computed.
+        actual: String,
+    },
+
+    /// Invalid recovery phrase.
+    #[error("invalid recovery phrase: {0}")]
+    InvalidPhrase(#[from] crate::recovery_phrase::RecoveryPhraseError),
+
+    /// Genesis validation failed.
+    #[error("genesis validation failed: {0}")]
+    ValidationFailed(#[from] crate::genesis::GenesisValidationError),
+}
+
+/// Result of a cold recovery operation.
+#[derive(Debug)]
+pub struct ColdRecovery {
+    /// The derived owner keypair from the recovery phrase.
+    pub owner_keypair: OwnerKeypair,
+
+    /// The recreated genesis state.
+    ///
+    /// **CRITICAL:** This creates a fresh genesis with the same owner key.
+    /// Any objects/zones created after the original genesis are LOST.
+    pub genesis: GenesisState,
+
+    /// Warnings about the limitations of cold recovery.
+    pub warnings: Vec<ColdRecoveryWarning>,
+}
+
+impl ColdRecovery {
+    /// Recover from a recovery phrase when no peers exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `phrase` - The BIP39 recovery phrase.
+    /// * `expected_fingerprint` - Optional expected genesis fingerprint for verification.
+    ///
+    /// # Returns
+    ///
+    /// A `ColdRecovery` struct containing the recreated genesis and warnings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The expected fingerprint doesn't match the computed fingerprint.
+    /// - The genesis validation fails.
+    ///
+    /// # Security
+    ///
+    /// Cold recovery should only be used as a last resort when no peers are
+    /// reachable. The recovered genesis will not have:
+    /// - Audit history
+    /// - Revocation state
+    /// - Objects created after the original bootstrap
+    pub fn from_phrase(
+        phrase: &RecoveryPhrase,
+        expected_fingerprint: Option<&str>,
+    ) -> Result<Self, ColdRecoveryError> {
+        // 1. Derive owner keypair from the recovery phrase
+        let owner_keypair = phrase.derive_owner_keypair();
+
+        // 2. Recreate genesis (deterministic from owner pubkey)
+        let genesis = GenesisState::create_deterministic(&owner_keypair.public());
+
+        // 3. Validate the genesis
+        genesis.validate()?;
+
+        // 4. Verify fingerprint if provided
+        let fingerprint = genesis.fingerprint();
+        let mut warnings = Vec::new();
+
+        if let Some(expected) = expected_fingerprint {
+            if fingerprint != expected {
+                return Err(ColdRecoveryError::FingerprintMismatch {
+                    expected: expected.to_string(),
+                    actual: fingerprint,
+                });
+            }
+        } else {
+            warnings.push(ColdRecoveryWarning::FingerprintNotVerified);
+        }
+
+        // 5. Add standard cold recovery warnings
+        warnings.push(ColdRecoveryWarning::NoAuditHistory);
+        warnings.push(ColdRecoveryWarning::RevocationStateUnknown);
+        warnings.push(ColdRecoveryWarning::SingleNodeStart);
+        warnings.push(ColdRecoveryWarning::DataLoss);
+
+        Ok(Self {
+            owner_keypair,
+            genesis,
+            warnings,
+        })
+    }
+
+    /// Check if verification was performed.
+    pub fn was_verified(&self) -> bool {
+        !self
+            .warnings
+            .contains(&ColdRecoveryWarning::FingerprintNotVerified)
+    }
+
+    /// Get the genesis fingerprint.
+    pub fn fingerprint(&self) -> String {
+        self.genesis.fingerprint()
+    }
+}
+
+/// Interactive prompts for CLI cold recovery flow.
+pub mod cli {
+    use super::*;
+
+    /// Prompts and responses for the cold recovery CLI flow.
+    #[derive(Debug, Clone)]
+    pub struct ColdRecoveryPrompts {
+        /// Whether the user confirmed they have no backup.
+        pub confirmed_no_backup: bool,
+
+        /// Whether the user confirmed they understand data loss.
+        pub confirmed_data_loss: bool,
+
+        /// Optional expected fingerprint provided by user.
+        pub expected_fingerprint: Option<String>,
+    }
+
+    /// Format a warning message for CLI display.
+    pub fn format_warning(warning: &ColdRecoveryWarning) -> String {
+        match warning {
+            ColdRecoveryWarning::NoAuditHistory => {
+                "\u{26A0}\u{FE0F}  No audit history will be available".to_string()
+            }
+            ColdRecoveryWarning::RevocationStateUnknown => {
+                "\u{26A0}\u{FE0F}  Cannot verify if any keys/tokens were revoked".to_string()
+            }
+            ColdRecoveryWarning::SingleNodeStart => {
+                "\u{26A0}\u{FE0F}  Starting as single node (threshold signing unavailable)"
+                    .to_string()
+            }
+            ColdRecoveryWarning::DataLoss => {
+                "\u{26A0}\u{FE0F}  Objects created after original bootstrap will be LOST"
+                    .to_string()
+            }
+            ColdRecoveryWarning::FingerprintNotVerified => {
+                "\u{26A0}\u{FE0F}  Fingerprint was not verified (consider providing expected fingerprint)"
+                    .to_string()
+            }
+        }
+    }
+
+    /// Format the cold recovery confirmation message.
+    pub fn format_confirmation_message() -> &'static str {
+        r#"
+⚠️  COLD START RECOVERY
+No existing mesh peers found. This will:
+- Create fresh genesis from owner key
+- Lose any objects created after original bootstrap
+- Lose audit history
+- Start with single node (no quorum)
+
+If you have a backup of your .fcp directory, restore it instead.
+"#
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_phrase() -> RecoveryPhrase {
+        RecoveryPhrase::from_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+        ).unwrap()
+    }
+
+    #[test]
+    fn test_cold_recovery_basic() {
+        let phrase = test_phrase();
+        let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
+
+        assert!(recovery.genesis.validate().is_ok());
+        assert!(!recovery.was_verified());
+        assert!(recovery
+            .warnings
+            .contains(&ColdRecoveryWarning::FingerprintNotVerified));
+    }
+
+    #[test]
+    fn test_cold_recovery_with_fingerprint_verification() {
+        let phrase = test_phrase();
+
+        // First, get the expected fingerprint
+        let recovery1 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let expected = recovery1.fingerprint();
+
+        // Now recover with verification
+        let recovery2 = ColdRecovery::from_phrase(&phrase, Some(&expected)).unwrap();
+        assert!(recovery2.was_verified());
+    }
+
+    #[test]
+    fn test_cold_recovery_fingerprint_mismatch() {
+        let phrase = test_phrase();
+        let result = ColdRecovery::from_phrase(&phrase, Some("SHA256:wrongfingerprint"));
+
+        assert!(matches!(
+            result,
+            Err(ColdRecoveryError::FingerprintMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_cold_recovery_deterministic() {
+        let phrase = test_phrase();
+
+        let recovery1 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+        let recovery2 = ColdRecovery::from_phrase(&phrase, None).unwrap();
+
+        assert_eq!(recovery1.fingerprint(), recovery2.fingerprint());
+    }
+}

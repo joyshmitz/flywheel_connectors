@@ -55,6 +55,23 @@
 //! // Apply sandbox early in connector startup (irreversible!)
 //! sandbox.apply(&policy)?;
 //! ```
+//!
+//! # WASI Runtime Example
+//!
+//! ```rust,ignore
+//! use fcp_sandbox::{CompiledPolicy, WasiConfig, WasiRuntime};
+//!
+//! // 1. Compile policy from manifest
+//! let policy = CompiledPolicy::from_manifest(&manifest.sandbox, Some(state_dir))?;
+//!
+//! // 2. Create WASI runtime with policy
+//! let config = WasiConfig::from_policy(&policy)?;
+//! let runtime = WasiRuntime::new(config)?;
+//!
+//! // 3. Load and run connector component
+//! let component = runtime.load_component(&wasm_bytes)?;
+//! let mut store = runtime.create_store()?;
+//! ```
 
 // Note: unsafe code allowed via Cargo.toml lints for OS sandbox syscalls
 // Allow FFI-related patterns common in OS sandbox implementations
@@ -64,6 +81,7 @@
 
 mod egress;
 mod sandbox;
+mod wasi;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -76,3 +94,4 @@ mod windows;
 
 pub use egress::*;
 pub use sandbox::*;
+pub use wasi::*;
