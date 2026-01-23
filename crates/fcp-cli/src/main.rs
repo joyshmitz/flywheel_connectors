@@ -3,6 +3,7 @@
 //! This CLI provides tooling for FCP2 operators and developers:
 //! - `fcp audit` - Audit chain operations for incident response
 //! - `fcp bench` - Performance benchmarking suite
+//! - `fcp connector` - Connector discovery and introspection
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
 
@@ -10,6 +11,7 @@
 
 mod audit;
 mod bench;
+mod connector;
 mod doctor;
 mod explain;
 mod install;
@@ -37,6 +39,12 @@ enum Commands {
     /// Run benchmarks to measure and track FCP2 performance characteristics.
     /// Outputs machine-readable JSON with environment metadata for regression tracking.
     Bench(bench::BenchArgs),
+
+    /// Connector discovery and introspection.
+    ///
+    /// List, inspect, and introspect registered connectors. The introspect
+    /// subcommand provides tool schemas optimized for AI agent consumption.
+    Connector(connector::ConnectorArgs),
 
     /// Diagnose zone health and freshness.
     ///
@@ -71,6 +79,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
+        Commands::Connector(args) => connector::run(&args),
         Commands::Doctor(args) => doctor::run(&args),
         Commands::Explain(args) => explain::run(&args),
         Commands::Install(args) => install::run(args),

@@ -1,0 +1,888 @@
+//! `fcp connector` command implementation.
+//!
+//! Agent-visible connector discovery for AI agents and operators.
+//!
+//! # Usage
+//!
+//! ```text
+//! # List all connectors
+//! fcp connector list
+//! fcp connector list --zone z:private
+//! fcp connector list --json
+//!
+//! # Get detailed connector info
+//! fcp connector info fcp.twitter:social:v1
+//! fcp connector info fcp.twitter:social:v1 --json
+//!
+//! # Get introspection data (tool schemas for AI agents)
+//! fcp connector introspect fcp.twitter:social:v1
+//! fcp connector introspect fcp.twitter:social:v1 --json
+//! ```
+
+pub mod types;
+
+use anyhow::Result;
+use clap::{Args, Subcommand};
+
+use types::{
+    AgentHintsDescriptor, AuthCapsDescriptor, ConnectorInfo, ConnectorIntrospection,
+    ConnectorListOutput, ConnectorMetricsInfo, ConnectorStatus, ConnectorSummary,
+    EventCapsDescriptor, EventDescriptor, EventSummary, OperationDescriptor, OperationSummary,
+    RateLimitDescriptor, ResourceTypeDescriptor, SandboxInfo, ZoneConnectors,
+};
+
+/// Arguments for the `fcp connector` command.
+#[derive(Args, Debug)]
+pub struct ConnectorArgs {
+    #[command(subcommand)]
+    pub command: ConnectorCommand,
+}
+
+/// Connector subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ConnectorCommand {
+    /// List all registered connectors.
+    ///
+    /// Shows a summary of connectors with their status and operation counts.
+    List(ListArgs),
+
+    /// Show detailed information about a connector.
+    ///
+    /// Displays configuration, capabilities, operations, and health status.
+    Info(InfoArgs),
+
+    /// Get introspection data for AI agent consumption.
+    ///
+    /// Returns full tool schemas, AI hints, and capability requirements
+    /// in a format designed for AI agent tool discovery.
+    Introspect(IntrospectArgs),
+}
+
+/// Arguments for `fcp connector list`.
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Filter by zone (e.g., "z:private").
+    #[arg(long, short = 'z')]
+    pub zone: Option<String>,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp connector info`.
+#[derive(Args, Debug)]
+pub struct InfoArgs {
+    /// Connector ID (e.g., "fcp.twitter:social:v1").
+    pub connector_id: String,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for `fcp connector introspect`.
+#[derive(Args, Debug)]
+pub struct IntrospectArgs {
+    /// Connector ID (e.g., "fcp.twitter:social:v1").
+    pub connector_id: String,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+
+    /// Only show specific operations (comma-separated).
+    #[arg(long)]
+    pub operations: Option<String>,
+}
+
+/// Run the connector command.
+pub fn run(args: &ConnectorArgs) -> Result<()> {
+    match &args.command {
+        ConnectorCommand::List(list_args) => run_list(list_args),
+        ConnectorCommand::Info(info_args) => run_info(info_args),
+        ConnectorCommand::Introspect(introspect_args) => run_introspect(introspect_args),
+    }
+}
+
+fn run_list(args: &ListArgs) -> Result<()> {
+    // TODO: Connect to mesh node and query registry.
+    // For now, we simulate output for demonstration.
+    let output = simulate_list_output(args.zone.as_deref());
+
+    if args.json {
+        let json = serde_json::to_string_pretty(&output)?;
+        println!("{json}");
+    } else {
+        print_list_human_readable(&output);
+    }
+
+    Ok(())
+}
+
+fn run_info(args: &InfoArgs) -> Result<()> {
+    // TODO: Connect to mesh node and query registry.
+    let info = simulate_connector_info(&args.connector_id)?;
+
+    if args.json {
+        let json = serde_json::to_string_pretty(&info)?;
+        println!("{json}");
+    } else {
+        print_info_human_readable(&info);
+    }
+
+    Ok(())
+}
+
+fn run_introspect(args: &IntrospectArgs) -> Result<()> {
+    // TODO: Connect to mesh node and query registry.
+    let introspection = simulate_introspection(&args.connector_id, args.operations.as_deref())?;
+
+    if args.json {
+        let json = serde_json::to_string_pretty(&introspection)?;
+        println!("{json}");
+    } else {
+        print_introspection_human_readable(&introspection);
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Simulated data (to be replaced with real registry queries)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn simulate_list_output(zone_filter: Option<&str>) -> ConnectorListOutput {
+    let all_connectors = vec![
+        ZoneConnectors {
+            zone_id: "z:private".to_string(),
+            connectors: vec![
+                ConnectorSummary {
+                    id: "fcp.twitter:social:v1".to_string(),
+                    name: "Twitter/X".to_string(),
+                    version: "1.2.0".to_string(),
+                    archetype: "bidirectional".to_string(),
+                    status: ConnectorStatus::Healthy,
+                    operation_count: 12,
+                    sandboxed: true,
+                },
+                ConnectorSummary {
+                    id: "fcp.discord:social:v1".to_string(),
+                    name: "Discord".to_string(),
+                    version: "1.1.0".to_string(),
+                    archetype: "bidirectional".to_string(),
+                    status: ConnectorStatus::Healthy,
+                    operation_count: 18,
+                    sandboxed: true,
+                },
+                ConnectorSummary {
+                    id: "fcp.telegram:messaging:v1".to_string(),
+                    name: "Telegram".to_string(),
+                    version: "1.0.0".to_string(),
+                    archetype: "bidirectional".to_string(),
+                    status: ConnectorStatus::Degraded,
+                    operation_count: 15,
+                    sandboxed: true,
+                },
+            ],
+        },
+        ZoneConnectors {
+            zone_id: "z:work".to_string(),
+            connectors: vec![
+                ConnectorSummary {
+                    id: "fcp.openai:ai:v1".to_string(),
+                    name: "OpenAI".to_string(),
+                    version: "2.0.0".to_string(),
+                    archetype: "operational".to_string(),
+                    status: ConnectorStatus::Healthy,
+                    operation_count: 8,
+                    sandboxed: true,
+                },
+                ConnectorSummary {
+                    id: "fcp.anthropic:ai:v1".to_string(),
+                    name: "Anthropic".to_string(),
+                    version: "1.5.0".to_string(),
+                    archetype: "operational".to_string(),
+                    status: ConnectorStatus::Healthy,
+                    operation_count: 6,
+                    sandboxed: true,
+                },
+            ],
+        },
+    ];
+
+    let filtered: Vec<ZoneConnectors> = if let Some(zone) = zone_filter {
+        all_connectors
+            .into_iter()
+            .filter(|z| z.zone_id == zone)
+            .collect()
+    } else {
+        all_connectors
+    };
+
+    let total: usize = filtered.iter().map(|z| z.connectors.len()).sum();
+
+    ConnectorListOutput {
+        total,
+        by_zone: filtered,
+    }
+}
+
+fn simulate_connector_info(connector_id: &str) -> Result<ConnectorInfo> {
+    // Simulate looking up the connector
+    match connector_id {
+        "fcp.twitter:social:v1" => Ok(ConnectorInfo {
+            id: "fcp.twitter:social:v1".to_string(),
+            name: "Twitter/X Connector".to_string(),
+            version: "1.2.0".to_string(),
+            description: "Bidirectional connector for Twitter/X social platform. Supports reading timelines, posting tweets, direct messages, and real-time streaming.".to_string(),
+            archetype: "bidirectional".to_string(),
+            runtime_format: "wasi".to_string(),
+            home_zone: "z:private".to_string(),
+            allowed_source_zones: vec!["z:private".to_string(), "z:work".to_string()],
+            required_capabilities: vec![
+                "twitter:read:tweets".to_string(),
+                "twitter:read:profile".to_string(),
+            ],
+            optional_capabilities: vec![
+                "twitter:write:tweets".to_string(),
+                "twitter:write:dms".to_string(),
+                "twitter:read:dms".to_string(),
+            ],
+            operations: vec![
+                OperationSummary {
+                    id: "twitter.get_timeline".to_string(),
+                    summary: "Get home timeline".to_string(),
+                    capability: "twitter:read:tweets".to_string(),
+                    risk_level: "low".to_string(),
+                    safety_tier: "T0".to_string(),
+                },
+                OperationSummary {
+                    id: "twitter.post_tweet".to_string(),
+                    summary: "Post a tweet".to_string(),
+                    capability: "twitter:write:tweets".to_string(),
+                    risk_level: "medium".to_string(),
+                    safety_tier: "T2".to_string(),
+                },
+                OperationSummary {
+                    id: "twitter.send_dm".to_string(),
+                    summary: "Send a direct message".to_string(),
+                    capability: "twitter:write:dms".to_string(),
+                    risk_level: "medium".to_string(),
+                    safety_tier: "T2".to_string(),
+                },
+            ],
+            events: vec![
+                EventSummary {
+                    topic: "tweets.new".to_string(),
+                    requires_ack: true,
+                },
+                EventSummary {
+                    topic: "dms.new".to_string(),
+                    requires_ack: true,
+                },
+            ],
+            sandbox: SandboxInfo {
+                profile: "strict".to_string(),
+                memory_mb: 64,
+                cpu_percent: 25,
+                network_access: true,
+                allowed_hosts: vec!["api.twitter.com".to_string(), "api.x.com".to_string()],
+            },
+            status: ConnectorStatus::Healthy,
+            metrics: Some(ConnectorMetricsInfo {
+                requests_total: 15234,
+                requests_success: 15100,
+                requests_error: 134,
+                events_emitted: 8923,
+                latency_p50_ms: 42,
+                latency_p99_ms: 187,
+            }),
+            publisher: Some("Flywheel Labs".to_string()),
+            signed: true,
+            attestations: vec!["in-toto".to_string(), "reproducible-build".to_string()],
+        }),
+        _ => anyhow::bail!("Connector not found: {connector_id}"),
+    }
+}
+
+fn simulate_introspection(
+    connector_id: &str,
+    operations_filter: Option<&str>,
+) -> Result<ConnectorIntrospection> {
+    match connector_id {
+        "fcp.twitter:social:v1" => {
+            let mut operations = vec![
+                OperationDescriptor {
+                    id: "twitter.get_timeline".to_string(),
+                    summary: "Get the authenticated user's home timeline".to_string(),
+                    description: Some("Retrieves recent tweets from the user's home timeline, including tweets from followed accounts and algorithmically recommended content.".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "count": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 200,
+                                "default": 20,
+                                "description": "Number of tweets to retrieve"
+                            },
+                            "since_id": {
+                                "type": "string",
+                                "description": "Returns tweets newer than this ID"
+                            },
+                            "max_id": {
+                                "type": "string",
+                                "description": "Returns tweets older than this ID"
+                            }
+                        }
+                    }),
+                    output_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "tweets": {
+                                "type": "array",
+                                "items": {"$ref": "#/definitions/Tweet"}
+                            },
+                            "next_cursor": {"type": "string"}
+                        }
+                    }),
+                    capability: "twitter:read:tweets".to_string(),
+                    risk_level: "low".to_string(),
+                    safety_tier: "T0".to_string(),
+                    idempotency: "read_only".to_string(),
+                    ai_hints: AgentHintsDescriptor {
+                        when_to_use: "When the user wants to see recent tweets or catch up on their timeline".to_string(),
+                        common_mistakes: vec![
+                            "Requesting too many tweets at once (use pagination)".to_string(),
+                            "Not handling rate limits gracefully".to_string(),
+                        ],
+                        examples: vec![
+                            r#"{"count": 20}"#.to_string(),
+                            r#"{"count": 50, "since_id": "1234567890"}"#.to_string(),
+                        ],
+                        related: vec!["twitter.get_user_tweets".to_string()],
+                    },
+                    rate_limit: Some(RateLimitDescriptor {
+                        requests: 180,
+                        period_secs: 900,
+                        formatted: "180/15min".to_string(),
+                    }),
+                    requires_approval: None,
+                },
+                OperationDescriptor {
+                    id: "twitter.post_tweet".to_string(),
+                    summary: "Post a new tweet".to_string(),
+                    description: Some("Posts a new tweet to the authenticated user's timeline. Supports text, media attachments, and reply threading.".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "maxLength": 280,
+                                "description": "Tweet text content"
+                            },
+                            "reply_to_id": {
+                                "type": "string",
+                                "description": "Tweet ID to reply to"
+                            },
+                            "media_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 4,
+                                "description": "Media attachment IDs"
+                            }
+                        },
+                        "required": ["text"]
+                    }),
+                    output_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "tweet_id": {"type": "string"},
+                            "created_at": {"type": "string", "format": "date-time"},
+                            "text": {"type": "string"}
+                        }
+                    }),
+                    capability: "twitter:write:tweets".to_string(),
+                    risk_level: "medium".to_string(),
+                    safety_tier: "T2".to_string(),
+                    idempotency: "non_idempotent".to_string(),
+                    ai_hints: AgentHintsDescriptor {
+                        when_to_use: "Only when the user explicitly requests to post a tweet. Always confirm content before posting.".to_string(),
+                        common_mistakes: vec![
+                            "Posting without explicit user confirmation".to_string(),
+                            "Exceeding character limit".to_string(),
+                            "Not handling duplicate tweet errors".to_string(),
+                        ],
+                        examples: vec![
+                            r#"{"text": "Hello world!"}"#.to_string(),
+                            r#"{"text": "Replying to your tweet", "reply_to_id": "1234567890"}"#.to_string(),
+                        ],
+                        related: vec!["twitter.delete_tweet".to_string()],
+                    },
+                    rate_limit: Some(RateLimitDescriptor {
+                        requests: 300,
+                        period_secs: 10800,
+                        formatted: "300/3hr".to_string(),
+                    }),
+                    requires_approval: Some("interactive".to_string()),
+                },
+                OperationDescriptor {
+                    id: "twitter.send_dm".to_string(),
+                    summary: "Send a direct message".to_string(),
+                    description: Some("Sends a direct message to another user. The recipient must allow DMs from the sender.".to_string()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "recipient_id": {
+                                "type": "string",
+                                "description": "User ID of the recipient"
+                            },
+                            "text": {
+                                "type": "string",
+                                "maxLength": 10000,
+                                "description": "Message text"
+                            }
+                        },
+                        "required": ["recipient_id", "text"]
+                    }),
+                    output_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message_id": {"type": "string"},
+                            "created_at": {"type": "string", "format": "date-time"}
+                        }
+                    }),
+                    capability: "twitter:write:dms".to_string(),
+                    risk_level: "medium".to_string(),
+                    safety_tier: "T2".to_string(),
+                    idempotency: "non_idempotent".to_string(),
+                    ai_hints: AgentHintsDescriptor {
+                        when_to_use: "When the user wants to send a private message to someone on Twitter".to_string(),
+                        common_mistakes: vec![
+                            "Sending without user confirmation".to_string(),
+                            "Messaging users who have DMs disabled".to_string(),
+                        ],
+                        examples: vec![
+                            r#"{"recipient_id": "12345", "text": "Hello!"}"#.to_string(),
+                        ],
+                        related: vec!["twitter.get_dms".to_string()],
+                    },
+                    rate_limit: Some(RateLimitDescriptor {
+                        requests: 1000,
+                        period_secs: 86400,
+                        formatted: "1000/day".to_string(),
+                    }),
+                    requires_approval: Some("interactive".to_string()),
+                },
+            ];
+
+            // Apply operation filter if specified
+            if let Some(filter) = operations_filter {
+                let filter_ops: Vec<&str> = filter.split(',').map(str::trim).collect();
+                operations.retain(|op| filter_ops.iter().any(|f| op.id.contains(f)));
+            }
+
+            Ok(ConnectorIntrospection {
+                connector_id: "fcp.twitter:social:v1".to_string(),
+                version: "1.2.0".to_string(),
+                operations,
+                events: vec![
+                    EventDescriptor {
+                        topic: "tweets.new".to_string(),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "tweet_id": {"type": "string"},
+                                "author_id": {"type": "string"},
+                                "text": {"type": "string"},
+                                "created_at": {"type": "string", "format": "date-time"}
+                            }
+                        }),
+                        requires_ack: true,
+                    },
+                    EventDescriptor {
+                        topic: "dms.new".to_string(),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "message_id": {"type": "string"},
+                                "sender_id": {"type": "string"},
+                                "text": {"type": "string"},
+                                "created_at": {"type": "string", "format": "date-time"}
+                            }
+                        }),
+                        requires_ack: true,
+                    },
+                ],
+                resource_types: vec![
+                    ResourceTypeDescriptor {
+                        name: "Tweet".to_string(),
+                        uri_pattern: "fcp://fcp.twitter/tweet/{id}".to_string(),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "text": {"type": "string"},
+                                "author_id": {"type": "string"},
+                                "created_at": {"type": "string", "format": "date-time"},
+                                "metrics": {
+                                    "type": "object",
+                                    "properties": {
+                                        "likes": {"type": "integer"},
+                                        "retweets": {"type": "integer"},
+                                        "replies": {"type": "integer"}
+                                    }
+                                }
+                            }
+                        }),
+                    },
+                    ResourceTypeDescriptor {
+                        name: "User".to_string(),
+                        uri_pattern: "fcp://fcp.twitter/user/{id}".to_string(),
+                        schema: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string"},
+                                "username": {"type": "string"},
+                                "display_name": {"type": "string"},
+                                "verified": {"type": "boolean"},
+                                "followers_count": {"type": "integer"}
+                            }
+                        }),
+                    },
+                ],
+                auth_caps: Some(AuthCapsDescriptor {
+                    methods: vec!["oauth2".to_string()],
+                    supports_refresh: true,
+                }),
+                event_caps: Some(EventCapsDescriptor {
+                    streaming: true,
+                    replay: true,
+                    min_buffer_events: 1000,
+                    max_replay_window_secs: 3600,
+                }),
+            })
+        }
+        _ => anyhow::bail!("Connector not found: {connector_id}"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Human-readable output formatting
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn print_list_human_readable(output: &ConnectorListOutput) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let dim = "\x1b[2m";
+
+    println!();
+    println!("{bold}Registered Connectors{reset}");
+    println!("=====================");
+    println!();
+    println!("Total: {}", output.total);
+    println!();
+
+    for zone in &output.by_zone {
+        println!("{bold}{}{reset}", zone.zone_id);
+        println!("{}", "-".repeat(zone.zone_id.len()));
+
+        for conn in &zone.connectors {
+            let color = conn.status.ansi_color();
+            let symbol = conn.status.symbol();
+            let sandboxed = if conn.sandboxed { "sandboxed" } else { "native" };
+
+            println!(
+                "  {color}{symbol}{reset} {bold}{}{reset} v{} {dim}({}){reset}",
+                conn.name, conn.version, conn.archetype
+            );
+            println!(
+                "    {dim}ID:{reset} {}  {dim}Ops:{reset} {}  {dim}[{}]{reset}",
+                conn.id, conn.operation_count, sandboxed
+            );
+        }
+        println!();
+    }
+}
+
+fn print_info_human_readable(info: &ConnectorInfo) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let dim = "\x1b[2m";
+    let color = info.status.ansi_color();
+    let symbol = info.status.symbol();
+
+    println!();
+    println!("{bold}{}{reset}", info.name);
+    println!("{}", "=".repeat(info.name.len()));
+    println!();
+    println!("{}", info.description);
+    println!();
+
+    println!("{bold}Identity{reset}");
+    println!("  ID:       {}", info.id);
+    println!("  Version:  {}", info.version);
+    println!("  Type:     {} ({})", info.archetype, info.runtime_format);
+    println!(
+        "  Status:   {color}{symbol} {:?}{reset}",
+        info.status
+    );
+    println!();
+
+    println!("{bold}Zone Configuration{reset}");
+    println!("  Home Zone:      {}", info.home_zone);
+    println!(
+        "  Source Zones:   {}",
+        info.allowed_source_zones.join(", ")
+    );
+    println!();
+
+    println!("{bold}Capabilities{reset}");
+    println!("  Required:");
+    for cap in &info.required_capabilities {
+        println!("    - {cap}");
+    }
+    if !info.optional_capabilities.is_empty() {
+        println!("  Optional:");
+        for cap in &info.optional_capabilities {
+            println!("    - {cap}");
+        }
+    }
+    println!();
+
+    println!("{bold}Operations{reset} ({})", info.operations.len());
+    for op in &info.operations {
+        let risk_color = match op.risk_level.as_str() {
+            "low" => "\x1b[32m",
+            "medium" => "\x1b[33m",
+            "high" | "critical" => "\x1b[31m",
+            _ => "",
+        };
+        println!(
+            "  {dim}{}{reset}: {} {risk_color}[{} / {}]{reset}",
+            op.id, op.summary, op.risk_level, op.safety_tier
+        );
+    }
+    println!();
+
+    if !info.events.is_empty() {
+        println!("{bold}Events{reset}");
+        for event in &info.events {
+            let ack = if event.requires_ack { " (ack)" } else { "" };
+            println!("  - {}{ack}", event.topic);
+        }
+        println!();
+    }
+
+    println!("{bold}Sandbox{reset}");
+    println!("  Profile:    {}", info.sandbox.profile);
+    println!("  Memory:     {} MB", info.sandbox.memory_mb);
+    println!("  CPU:        {}%", info.sandbox.cpu_percent);
+    if info.sandbox.network_access {
+        println!("  Network:    {}", info.sandbox.allowed_hosts.join(", "));
+    } else {
+        println!("  Network:    disabled");
+    }
+    println!();
+
+    if let Some(metrics) = &info.metrics {
+        println!("{bold}Metrics{reset}");
+        println!(
+            "  Requests:   {} total ({} success, {} error)",
+            metrics.requests_total, metrics.requests_success, metrics.requests_error
+        );
+        println!("  Events:     {} emitted", metrics.events_emitted);
+        println!(
+            "  Latency:    p50={}ms, p99={}ms",
+            metrics.latency_p50_ms, metrics.latency_p99_ms
+        );
+        println!();
+    }
+
+    if info.signed {
+        println!("{bold}Supply Chain{reset}");
+        if let Some(publisher) = &info.publisher {
+            println!("  Publisher:    {publisher}");
+        }
+        println!("  Signed:       yes");
+        if !info.attestations.is_empty() {
+            println!("  Attestations: {}", info.attestations.join(", "));
+        }
+        println!();
+    }
+}
+
+fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let dim = "\x1b[2m";
+    let cyan = "\x1b[36m";
+
+    println!();
+    println!(
+        "{bold}Introspection: {}{reset} v{}",
+        intro.connector_id, intro.version
+    );
+    println!("{}", "=".repeat(50));
+    println!();
+
+    println!("{bold}Operations{reset} ({})", intro.operations.len());
+    println!();
+
+    for op in &intro.operations {
+        let risk_color = match op.risk_level.as_str() {
+            "low" => "\x1b[32m",
+            "medium" => "\x1b[33m",
+            "high" | "critical" => "\x1b[31m",
+            _ => "",
+        };
+
+        println!("{cyan}{bold}{}{reset}", op.id);
+        println!("  {}", op.summary);
+        if let Some(desc) = &op.description {
+            println!("  {dim}{desc}{reset}");
+        }
+        println!();
+        println!(
+            "  {dim}Capability:{reset} {}  {risk_color}Risk: {} / {}{reset}",
+            op.capability, op.risk_level, op.safety_tier
+        );
+        println!(
+            "  {dim}Idempotency:{reset} {}",
+            op.idempotency
+        );
+
+        if let Some(approval) = &op.requires_approval {
+            println!("  {dim}Approval:{reset} {approval}");
+        }
+
+        if let Some(rate) = &op.rate_limit {
+            println!("  {dim}Rate Limit:{reset} {}", rate.formatted);
+        }
+
+        println!();
+        println!("  {dim}Input Schema:{reset}");
+        let schema_str = serde_json::to_string_pretty(&op.input_schema).unwrap_or_default();
+        for line in schema_str.lines() {
+            println!("    {line}");
+        }
+
+        println!();
+        println!("  {dim}AI Hints:{reset}");
+        println!("    When to use: {}", op.ai_hints.when_to_use);
+        if !op.ai_hints.common_mistakes.is_empty() {
+            println!("    Common mistakes:");
+            for mistake in &op.ai_hints.common_mistakes {
+                println!("      - {mistake}");
+            }
+        }
+        if !op.ai_hints.examples.is_empty() {
+            println!("    Examples:");
+            for example in &op.ai_hints.examples {
+                println!("      {example}");
+            }
+        }
+
+        println!();
+        println!("  {}", "-".repeat(40));
+        println!();
+    }
+
+    if !intro.events.is_empty() {
+        println!("{bold}Event Topics{reset}");
+        for event in &intro.events {
+            let ack = if event.requires_ack {
+                " (ack required)"
+            } else {
+                ""
+            };
+            println!("  {cyan}{}{reset}{ack}", event.topic);
+        }
+        println!();
+    }
+
+    if !intro.resource_types.is_empty() {
+        println!("{bold}Resource Types{reset}");
+        for res in &intro.resource_types {
+            println!("  {cyan}{}{reset}: {}", res.name, res.uri_pattern);
+        }
+        println!();
+    }
+
+    if let Some(event_caps) = &intro.event_caps {
+        println!("{bold}Event Capabilities{reset}");
+        println!(
+            "  Streaming: {}  Replay: {}",
+            if event_caps.streaming { "yes" } else { "no" },
+            if event_caps.replay { "yes" } else { "no" }
+        );
+        println!(
+            "  Buffer: {} events, Replay window: {}s",
+            event_caps.min_buffer_events, event_caps.max_replay_window_secs
+        );
+        println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_all_connectors() {
+        let output = simulate_list_output(None);
+        assert_eq!(output.total, 5);
+        assert_eq!(output.by_zone.len(), 2);
+    }
+
+    #[test]
+    fn list_filtered_by_zone() {
+        let output = simulate_list_output(Some("z:private"));
+        assert_eq!(output.total, 3);
+        assert_eq!(output.by_zone.len(), 1);
+        assert_eq!(output.by_zone[0].zone_id, "z:private");
+    }
+
+    #[test]
+    fn list_empty_zone_filter() {
+        let output = simulate_list_output(Some("z:nonexistent"));
+        assert_eq!(output.total, 0);
+        assert!(output.by_zone.is_empty());
+    }
+
+    #[test]
+    fn info_known_connector() {
+        let info = simulate_connector_info("fcp.twitter:social:v1").unwrap();
+        assert_eq!(info.id, "fcp.twitter:social:v1");
+        assert_eq!(info.archetype, "bidirectional");
+        assert!(!info.operations.is_empty());
+    }
+
+    #[test]
+    fn info_unknown_connector() {
+        let result = simulate_connector_info("fcp.unknown:test:v1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn introspect_known_connector() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", None).unwrap();
+        assert_eq!(intro.connector_id, "fcp.twitter:social:v1");
+        assert_eq!(intro.operations.len(), 3);
+        assert!(intro.event_caps.is_some());
+    }
+
+    #[test]
+    fn introspect_with_filter() {
+        let intro = simulate_introspection("fcp.twitter:social:v1", Some("post_tweet")).unwrap();
+        assert_eq!(intro.operations.len(), 1);
+        assert_eq!(intro.operations[0].id, "twitter.post_tweet");
+    }
+
+    #[test]
+    fn introspect_unknown_connector() {
+        let result = simulate_introspection("fcp.unknown:test:v1", None);
+        assert!(result.is_err());
+    }
+}
