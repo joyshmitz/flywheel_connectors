@@ -31,12 +31,16 @@ pub struct DetectedToken {
 impl DetectedToken {
     /// Check if this token supports Ed25519.
     pub fn supports_ed25519(&self) -> bool {
-        self.mechanisms.iter().any(|m| m.contains("ED25519") || m.contains("EDDSA"))
+        self.mechanisms
+            .iter()
+            .any(|m| m.contains("ED25519") || m.contains("EDDSA"))
     }
 
     /// Check if this token supports ECDH for X25519.
     pub fn supports_x25519(&self) -> bool {
-        self.mechanisms.iter().any(|m| m.contains("X25519") || m.contains("ECDH"))
+        self.mechanisms
+            .iter()
+            .any(|m| m.contains("X25519") || m.contains("ECDH"))
     }
 }
 

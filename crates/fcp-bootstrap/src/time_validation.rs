@@ -31,7 +31,10 @@ pub enum TimeValidationResult {
 impl TimeValidationResult {
     /// Check if bootstrap should proceed.
     pub const fn should_proceed(&self) -> bool {
-        matches!(self, Self::Valid | Self::DriftWarning { .. } | Self::CannotValidate)
+        matches!(
+            self,
+            Self::Valid | Self::DriftWarning { .. } | Self::CannotValidate
+        )
     }
 
     /// Check if this is an error that should block bootstrap.
@@ -234,15 +237,19 @@ mod tests {
     #[test]
     fn test_should_proceed() {
         assert!(TimeValidationResult::Valid.should_proceed());
-        assert!(TimeValidationResult::DriftWarning {
-            drift: Duration::from_secs(60)
-        }
-        .should_proceed());
+        assert!(
+            TimeValidationResult::DriftWarning {
+                drift: Duration::from_secs(60)
+            }
+            .should_proceed()
+        );
         assert!(TimeValidationResult::CannotValidate.should_proceed());
-        assert!(!TimeValidationResult::DriftError {
-            drift: Duration::from_secs(600)
-        }
-        .should_proceed());
+        assert!(
+            !TimeValidationResult::DriftError {
+                drift: Duration::from_secs(600)
+            }
+            .should_proceed()
+        );
     }
 
     #[test]

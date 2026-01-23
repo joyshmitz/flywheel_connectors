@@ -315,8 +315,7 @@ fn golden_subkey_derivation() {
     let sender_node_id = TailscaleNodeId::new("node-golden");
     let sender_instance_id: u64 = 0x1234_5678_9ABC_DEF0;
 
-    let subkey =
-        derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, sender_instance_id);
+    let subkey = derive_sender_subkey(&zone_key, &zone_key_id, &sender_node_id, sender_instance_id);
 
     // The subkey should be deterministic
     let subkey2 =

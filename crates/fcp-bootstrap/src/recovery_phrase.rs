@@ -67,8 +67,8 @@ impl RecoveryPhrase {
         let mut entropy = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut entropy);
 
-        let mnemonic =
-            Mnemonic::from_entropy(&entropy).map_err(|e| RecoveryPhraseError::InvalidMnemonic(e.to_string()))?;
+        let mnemonic = Mnemonic::from_entropy(&entropy)
+            .map_err(|e| RecoveryPhraseError::InvalidMnemonic(e.to_string()))?;
 
         // Zeroize the local entropy copy
         entropy.zeroize();

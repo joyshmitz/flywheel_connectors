@@ -119,7 +119,11 @@ fn test_recovery_phrase_has_24_words() {
         .with_fingerprint(format!("word_count={}", words.len()));
     log.emit();
 
-    assert_eq!(words.len(), 24, "recovery phrase must have exactly 24 words");
+    assert_eq!(
+        words.len(),
+        24,
+        "recovery phrase must have exactly 24 words"
+    );
 }
 
 #[test]
@@ -143,10 +147,7 @@ fn test_public_key_fingerprint_is_stable() {
         .with_result(if pk1_hex == pk2_hex { "pass" } else { "fail" });
     log.emit();
 
-    assert_eq!(
-        pk1_hex, pk2_hex,
-        "same phrase must derive same public key"
-    );
+    assert_eq!(pk1_hex, pk2_hex, "same phrase must derive same public key");
 }
 
 #[test]
@@ -219,10 +220,7 @@ fn test_genesis_fingerprint_is_deterministic() {
         .with_result(if fp1 == fp2 { "pass" } else { "fail" });
     log.emit();
 
-    assert_eq!(
-        fp1, fp2,
-        "deterministic genesis must have same fingerprint"
-    );
+    assert_eq!(fp1, fp2, "deterministic genesis must have same fingerprint");
 }
 
 #[test]
@@ -239,8 +237,8 @@ fn test_genesis_cbor_serialization_roundtrip() {
     // Deserialize back
     let restored = GenesisState::from_cbor(&cbor_bytes).expect("deserialize from CBOR");
 
-    let matches =
-        genesis.fingerprint() == restored.fingerprint() && genesis.owner_public_key == restored.owner_public_key;
+    let matches = genesis.fingerprint() == restored.fingerprint()
+        && genesis.owner_public_key == restored.owner_public_key;
 
     log = log
         .with_genesis_objects(vec!["genesis_state"])
@@ -272,10 +270,7 @@ fn test_genesis_validation_rejects_missing_zone() {
 
     let result = genesis.validate();
 
-    let is_correct_error = matches!(
-        result,
-        Err(GenesisValidationError::MissingRequiredZone(_))
-    );
+    let is_correct_error = matches!(result, Err(GenesisValidationError::MissingRequiredZone(_)));
 
     log = log.with_result(if is_correct_error { "pass" } else { "fail" });
     log.emit();
@@ -295,12 +290,14 @@ fn test_genesis_validation_rejects_invalid_zone_id() {
     let mut genesis = GenesisState::create(&verifying_key);
 
     // Add an invalid zone ID (doesn't start with "z:")
-    genesis.initial_zones.push(fcp_bootstrap::genesis::InitialZone {
-        zone_id: "invalid-zone".to_string(),
-        name: "Invalid Zone".to_string(),
-        integrity_level: 100,
-        confidentiality_level: 100,
-    });
+    genesis
+        .initial_zones
+        .push(fcp_bootstrap::genesis::InitialZone {
+            zone_id: "invalid-zone".to_string(),
+            name: "Invalid Zone".to_string(),
+            integrity_level: 100,
+            confidentiality_level: 100,
+        });
 
     let result = genesis.validate();
 
@@ -361,13 +358,13 @@ fn test_cold_recovery_fingerprint_matches() {
     let recovery =
         ColdRecovery::from_phrase(&phrase, Some(&expected_fp)).expect("recovery should succeed");
 
-    log = log
-        .with_fingerprint(&expected_fp)
-        .with_result(if recovery.genesis.fingerprint() == expected_fp {
+    log = log.with_fingerprint(&expected_fp).with_result(
+        if recovery.genesis.fingerprint() == expected_fp {
             "pass"
         } else {
             "fail"
-        });
+        },
+    );
     log.emit();
 
     assert_eq!(
@@ -396,10 +393,7 @@ fn test_cold_recovery_deterministic() {
         .with_result(if fp1 == fp2 { "pass" } else { "fail" });
     log.emit();
 
-    assert_eq!(
-        fp1, fp2,
-        "cold recovery must be deterministic"
-    );
+    assert_eq!(fp1, fp2, "cold recovery must be deterministic");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -420,10 +414,7 @@ fn test_recovery_phrase_rejects_wrong_word_count() {
     log.with_result(if is_correct_error { "pass" } else { "fail" })
         .emit();
 
-    assert!(
-        is_correct_error,
-        "must reject phrase with wrong word count"
-    );
+    assert!(is_correct_error, "must reject phrase with wrong word count");
 }
 
 #[test]
@@ -486,7 +477,10 @@ async fn test_bootstrap_workflow_single_device() {
 
 #[tokio::test]
 async fn test_bootstrap_workflow_detects_existing_genesis() {
-    let mut log = TestLogEntry::new("test_bootstrap_workflow_detects_existing_genesis", "execute");
+    let mut log = TestLogEntry::new(
+        "test_bootstrap_workflow_detects_existing_genesis",
+        "execute",
+    );
 
     let temp_dir = TempDir::new().expect("create temp dir");
 
@@ -508,7 +502,10 @@ async fn test_bootstrap_workflow_detects_existing_genesis() {
         .expect("build config");
 
     let workflow2 = BootstrapWorkflow::new(config2).expect("create workflow 2");
-    let genesis2 = workflow2.run().await.expect("second bootstrap returns existing");
+    let genesis2 = workflow2
+        .run()
+        .await
+        .expect("second bootstrap returns existing");
 
     let fingerprints_match = genesis1.fingerprint() == genesis2.fingerprint();
 
@@ -615,7 +612,11 @@ fn test_owner_signature_verification() {
 
     log = log
         .with_fingerprint(hex::encode(public_key.to_bytes()))
-        .with_result(if verify_result.is_ok() { "pass" } else { "fail" });
+        .with_result(if verify_result.is_ok() {
+            "pass"
+        } else {
+            "fail"
+        });
     log.emit();
 
     assert!(
@@ -640,8 +641,12 @@ fn test_owner_signature_rejects_tampered_message() {
     let public_key = keypair.public();
     let verify_result = public_key.verify(tampered, &signature);
 
-    log.with_result(if verify_result.is_err() { "pass" } else { "fail" })
-        .emit();
+    log.with_result(if verify_result.is_err() {
+        "pass"
+    } else {
+        "fail"
+    })
+    .emit();
 
     assert!(
         verify_result.is_err(),

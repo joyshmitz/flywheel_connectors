@@ -570,7 +570,10 @@ where
     }
 
     /// Introspect a single connector.
-    pub async fn introspect(&self, connector_id: &ConnectorId) -> HostResult<IntrospectionResponse> {
+    pub async fn introspect(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> HostResult<IntrospectionResponse> {
         let summary = self
             .registry
             .get(connector_id)
@@ -646,7 +649,10 @@ impl DiscoveryCache {
     }
 
     /// Get cached connectors or refresh from registry.
-    pub async fn get_or_refresh<R: ConnectorRegistry>(&self, registry: &R) -> Vec<ConnectorSummary> {
+    pub async fn get_or_refresh<R: ConnectorRegistry>(
+        &self,
+        registry: &R,
+    ) -> Vec<ConnectorSummary> {
         // Try to read from cache
         {
             let read = self.cache.read().await;

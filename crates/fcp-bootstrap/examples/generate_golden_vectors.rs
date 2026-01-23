@@ -11,8 +11,8 @@ const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon aba
 
 fn main() {
     // Derive keypair from test mnemonic
-    let phrase = RecoveryPhrase::from_mnemonic(TEST_MNEMONIC)
-        .expect("Test mnemonic should be valid");
+    let phrase =
+        RecoveryPhrase::from_mnemonic(TEST_MNEMONIC).expect("Test mnemonic should be valid");
     let keypair = phrase.derive_owner_keypair();
 
     // Create deterministic genesis
@@ -31,8 +31,7 @@ fn main() {
     fs::create_dir_all(vectors_dir).expect("Failed to create vectors directory");
 
     let fingerprint_path = vectors_dir.join("expected_fingerprint.txt");
-    fs::write(&fingerprint_path, format!("{fingerprint}\n"))
-        .expect("Failed to write fingerprint");
+    fs::write(&fingerprint_path, format!("{fingerprint}\n")).expect("Failed to write fingerprint");
     println!("Wrote fingerprint to: {}", fingerprint_path.display());
 
     let cbor_path = vectors_dir.join("genesis.cbor");

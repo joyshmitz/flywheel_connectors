@@ -7,9 +7,7 @@ use crate::ceremony::{ThresholdCeremony, ThresholdConfig};
 use crate::error::{BootstrapError, BootstrapResult};
 use crate::genesis::GenesisState;
 use crate::hardware_token::{DetectedToken, TokenDetector};
-use crate::phase::{
-    BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock,
-};
+use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock};
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
 
@@ -205,14 +203,14 @@ impl BootstrapWorkflow {
                 self.run_multi_device_bootstrap(threshold, device_count)
                     .await?
             }
-            BootstrapMode::HardwareToken { token } => {
-                self.run_hardware_token_bootstrap(token)?
-            }
+            BootstrapMode::HardwareToken { token } => self.run_hardware_token_bootstrap(token)?,
             BootstrapMode::Import { phrase } => self.run_import_bootstrap(&phrase)?,
         };
 
         // Validate genesis
-        genesis.validate().map_err(|e| BootstrapError::Internal(e.to_string()))?;
+        genesis
+            .validate()
+            .map_err(|e| BootstrapError::Internal(e.to_string()))?;
 
         // Clean up phase lock
         remove_phase_lock(&self.config.data_dir)?;
@@ -287,7 +285,8 @@ impl BootstrapWorkflow {
         tracing::info!("Generating owner key...");
 
         // Generate recovery phrase
-        let phrase = RecoveryPhrase::generate().map_err(|e| BootstrapError::Crypto(e.to_string()))?;
+        let phrase =
+            RecoveryPhrase::generate().map_err(|e| BootstrapError::Crypto(e.to_string()))?;
 
         // Display recovery phrase (in real implementation, this would be a secure display)
         tracing::info!("Recovery phrase generated. Store it securely!");
@@ -318,11 +317,7 @@ impl BootstrapWorkflow {
         };
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
-        tracing::info!(
-            threshold,
-            total,
-            "Starting threshold key ceremony"
-        );
+        tracing::info!(threshold, total, "Starting threshold key ceremony");
 
         // Initialize ceremony
         let config = ThresholdConfig::new(threshold, total);
@@ -337,7 +332,10 @@ impl BootstrapWorkflow {
     }
 
     /// Run hardware token bootstrap.
-    fn run_hardware_token_bootstrap(&mut self, token: DetectedToken) -> BootstrapResult<GenesisState> {
+    fn run_hardware_token_bootstrap(
+        &mut self,
+        token: DetectedToken,
+    ) -> BootstrapResult<GenesisState> {
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
@@ -408,14 +406,10 @@ enum InitCheckResult {
     Fresh,
 
     /// Genesis already exists.
-    AlreadyExists {
-        fingerprint: String,
-    },
+    AlreadyExists { fingerprint: String },
 
     /// Partial state from crashed init.
-    PartialState {
-        phase: BootstrapPhase,
-    },
+    PartialState { phase: BootstrapPhase },
 }
 
 /// Check the current initialization state.

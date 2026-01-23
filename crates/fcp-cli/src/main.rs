@@ -45,7 +45,12 @@ struct Cli {
     no_pager: bool,
 
     /// Force pager even for short output.
-    #[arg(long, global = true, default_value_t = false, conflicts_with = "no_pager")]
+    #[arg(
+        long,
+        global = true,
+        default_value_t = false,
+        conflicts_with = "no_pager"
+    )]
     pager: bool,
 }
 

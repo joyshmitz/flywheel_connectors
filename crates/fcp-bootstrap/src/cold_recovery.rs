@@ -233,9 +233,11 @@ mod tests {
 
         assert!(recovery.genesis.validate().is_ok());
         assert!(!recovery.was_verified());
-        assert!(recovery
-            .warnings
-            .contains(&ColdRecoveryWarning::FingerprintNotVerified));
+        assert!(
+            recovery
+                .warnings
+                .contains(&ColdRecoveryWarning::FingerprintNotVerified)
+        );
     }
 
     #[test]

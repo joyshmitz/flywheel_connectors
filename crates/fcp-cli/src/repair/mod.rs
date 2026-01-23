@@ -21,9 +21,7 @@ use chrono::Utc;
 use clap::{Args, Subcommand};
 use fcp_core::ZoneId;
 
-use types::{
-    CoverageMetrics, CoverageStatus, PlacementSummary, RepairReport,
-};
+use types::{CoverageMetrics, CoverageStatus, PlacementSummary, RepairReport};
 
 /// Arguments for the `fcp repair` command.
 #[derive(Args, Debug)]
@@ -189,8 +187,10 @@ fn print_human_readable(report: &RepairReport) {
         println!("Last Repair Cycle:");
         println!("  Completed:          {}", cycle.completed_at.to_rfc3339());
         println!("  Duration:           {}ms", cycle.duration_ms);
-        println!("  Actions:            {} completed, {} failed",
-            cycle.actions_completed, cycle.actions_failed);
+        println!(
+            "  Actions:            {} completed, {} failed",
+            cycle.actions_completed, cycle.actions_failed
+        );
         println!("  Symbols Transferred: {}", cycle.symbols_transferred);
         println!(
             "  Coverage Change:    {:.1}% -> {:.1}%",

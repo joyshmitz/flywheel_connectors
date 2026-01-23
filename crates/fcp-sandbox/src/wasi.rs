@@ -59,12 +59,10 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace};
 use wasmtime::{
-    component::{Component, Linker, ResourceTable},
     Config, Engine, Store,
+    component::{Component, Linker, ResourceTable},
 };
-use wasmtime_wasi::{
-    DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiView,
-};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::egress::{EgressGuard, EgressHttpRequest, EgressRequest, EgressTcpConnectRequest};
 use crate::sandbox::{CompiledPolicy, SandboxError};
@@ -604,7 +602,11 @@ impl DeterministicRng {
     fn new(seed: u64) -> Self {
         // Ensure non-zero state
         Self {
-            state: if seed == 0 { 0x853c_49e6_748f_ea9b } else { seed },
+            state: if seed == 0 {
+                0x853c_49e6_748f_ea9b
+            } else {
+                seed
+            },
         }
     }
 
@@ -734,7 +736,9 @@ impl WasiRuntime {
                 );
                 wasi_builder
                     .preopened_dir(path, &guest_path, DirPerms::READ, FilePerms::READ)
-                    .map_err(|e| WasiError::EngineCreation(format!("failed to mount {path:?}: {e}")))?;
+                    .map_err(|e| {
+                        WasiError::EngineCreation(format!("failed to mount {path:?}: {e}"))
+                    })?;
             }
         }
 
@@ -745,13 +749,10 @@ impl WasiRuntime {
                     |n| n.to_string_lossy().to_string(),
                 );
                 wasi_builder
-                    .preopened_dir(
-                        path,
-                        &guest_path,
-                        DirPerms::all(),
-                        FilePerms::all(),
-                    )
-                    .map_err(|e| WasiError::EngineCreation(format!("failed to mount {path:?}: {e}")))?;
+                    .preopened_dir(path, &guest_path, DirPerms::all(), FilePerms::all())
+                    .map_err(|e| {
+                        WasiError::EngineCreation(format!("failed to mount {path:?}: {e}"))
+                    })?;
             }
         }
 
@@ -762,9 +763,9 @@ impl WasiRuntime {
 
         // Set fuel limit if configured
         if self.config.max_fuel > 0 {
-            store.set_fuel(self.config.max_fuel).map_err(|e| {
-                WasiError::EngineCreation(format!("failed to set fuel: {e}"))
-            })?;
+            store
+                .set_fuel(self.config.max_fuel)
+                .map_err(|e| WasiError::EngineCreation(format!("failed to set fuel: {e}")))?;
         }
 
         Ok(store)
@@ -795,7 +796,9 @@ impl WasiRuntime {
 /// # Errors
 ///
 /// Returns an error if the manifest cannot be extracted or parsed.
-pub fn extract_manifest_from_component(wasm_bytes: &[u8]) -> WasiResult<fcp_manifest::ConnectorManifest> {
+pub fn extract_manifest_from_component(
+    wasm_bytes: &[u8],
+) -> WasiResult<fcp_manifest::ConnectorManifest> {
     // Parse the component to find custom sections
     // Note: wasmtime doesn't expose custom sections directly, so we parse
     // the raw bytes directly.
@@ -938,8 +941,7 @@ mod tests {
 
     #[test]
     fn test_wasi_config_with_deterministic_mode() {
-        let config = WasiConfig::default()
-            .with_deterministic_mode(1_700_000_000, 42);
+        let config = WasiConfig::default().with_deterministic_mode(1_700_000_000, 42);
 
         assert!(config.deterministic_mode);
         assert_eq!(config.deterministic_timestamp, 1_700_000_000);
@@ -948,10 +950,7 @@ mod tests {
 
     #[test]
     fn test_fs_capability_gate() {
-        let gate = FsCapabilityGate::new(
-            vec![PathBuf::from("/usr")],
-            vec![PathBuf::from("/tmp")],
-        );
+        let gate = FsCapabilityGate::new(vec![PathBuf::from("/usr")], vec![PathBuf::from("/tmp")]);
 
         // These paths might not exist in test environment, so we test the logic
         // by checking that the paths are stored correctly

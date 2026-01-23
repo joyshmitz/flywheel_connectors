@@ -147,9 +147,9 @@ impl CoverageStatus {
     #[must_use]
     pub const fn ansi_color(&self) -> &'static str {
         match self {
-            Self::Healthy => "\x1b[32m",    // Green
-            Self::Degraded => "\x1b[33m",   // Yellow
-            Self::Critical => "\x1b[31m",   // Red
+            Self::Healthy => "\x1b[32m",     // Green
+            Self::Degraded => "\x1b[33m",    // Yellow
+            Self::Critical => "\x1b[31m",    // Red
             Self::Unavailable => "\x1b[35m", // Magenta
         }
     }
@@ -374,7 +374,11 @@ mod tests {
                 policy_name: "default".to_string(),
                 target_replicas: 3,
                 current_avg_replicas: 3.0,
-                placement_nodes: vec!["node-0".to_string(), "node-1".to_string(), "node-2".to_string()],
+                placement_nodes: vec![
+                    "node-0".to_string(),
+                    "node-1".to_string(),
+                    "node-2".to_string(),
+                ],
                 healthy_nodes: 3,
                 degraded_nodes: 0,
             },

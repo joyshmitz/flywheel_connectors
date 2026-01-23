@@ -67,9 +67,9 @@ pub trait ConnectorHealthDisplay {
 impl ConnectorHealthDisplay for ConnectorHealth {
     fn ansi_color(&self) -> &'static str {
         match self {
-            Self::Healthy => "\x1b[32m",               // green
-            Self::Degraded { .. } => "\x1b[33m",       // yellow
-            Self::Unavailable { .. } => "\x1b[31m",    // red
+            Self::Healthy => "\x1b[32m",            // green
+            Self::Degraded { .. } => "\x1b[33m",    // yellow
+            Self::Unavailable { .. } => "\x1b[31m", // red
         }
     }
 
@@ -343,10 +343,7 @@ mod tests {
     #[test]
     fn connector_health_colors() {
         assert_eq!(ConnectorHealth::healthy().ansi_color(), "\x1b[32m");
-        assert_eq!(
-            ConnectorHealth::degraded("slow").ansi_color(),
-            "\x1b[33m"
-        );
+        assert_eq!(ConnectorHealth::degraded("slow").ansi_color(), "\x1b[33m");
         assert_eq!(
             ConnectorHealth::unavailable("down").ansi_color(),
             "\x1b[31m"

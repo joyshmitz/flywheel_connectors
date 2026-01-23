@@ -77,7 +77,11 @@ fn test_genesis_cbor_roundtrip_preserves_all_fields() {
     assert_eq!(genesis.created_at, restored.created_at);
     assert_eq!(genesis.initial_zones.len(), restored.initial_zones.len());
 
-    for (orig, rest) in genesis.initial_zones.iter().zip(restored.initial_zones.iter()) {
+    for (orig, rest) in genesis
+        .initial_zones
+        .iter()
+        .zip(restored.initial_zones.iter())
+    {
         assert_eq!(orig.zone_id, rest.zone_id);
         assert_eq!(orig.name, rest.name);
         assert_eq!(orig.integrity_level, rest.integrity_level);

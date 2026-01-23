@@ -591,7 +591,11 @@ fn print_list_human_readable(output: &ConnectorListOutput) {
         for conn in &zone.connectors {
             let color = conn.status.ansi_color();
             let symbol = conn.status.symbol();
-            let sandboxed = if conn.sandboxed { "sandboxed" } else { "native" };
+            let sandboxed = if conn.sandboxed {
+                "sandboxed"
+            } else {
+                "native"
+            };
 
             println!(
                 "  {color}{symbol}{reset} {bold}{}{reset} v{} {dim}({}){reset}",
@@ -624,18 +628,12 @@ fn print_info_human_readable(info: &ConnectorInfo) {
     println!("  ID:       {}", info.id);
     println!("  Version:  {}", info.version);
     println!("  Type:     {} ({})", info.archetype, info.runtime_format);
-    println!(
-        "  Status:   {color}{symbol} {:?}{reset}",
-        info.status
-    );
+    println!("  Status:   {color}{symbol} {:?}{reset}", info.status);
     println!();
 
     println!("{bold}Zone Configuration{reset}");
     println!("  Home Zone:      {}", info.home_zone);
-    println!(
-        "  Source Zones:   {}",
-        info.allowed_source_zones.join(", ")
-    );
+    println!("  Source Zones:   {}", info.allowed_source_zones.join(", "));
     println!();
 
     println!("{bold}Capabilities{reset}");
@@ -748,10 +746,7 @@ fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
             "  {dim}Capability:{reset} {}  {risk_color}Risk: {} / {}{reset}",
             op.capability, op.risk_level, op.safety_tier
         );
-        println!(
-            "  {dim}Idempotency:{reset} {}",
-            op.idempotency
-        );
+        println!("  {dim}Idempotency:{reset} {}", op.idempotency);
 
         if let Some(approval) = &op.requires_approval {
             println!("  {dim}Approval:{reset} {approval}");

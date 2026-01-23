@@ -90,7 +90,10 @@ impl MockConnectorRegistry {
 #[async_trait]
 impl ConnectorRegistry for MockConnectorRegistry {
     async fn list(&self) -> Vec<ConnectorSummary> {
-        self.connectors.values().map(|c| c.summary.clone()).collect()
+        self.connectors
+            .values()
+            .map(|c| c.summary.clone())
+            .collect()
     }
 
     async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
@@ -181,7 +184,11 @@ async fn test_introspect_returns_rate_limits() {
     // Create a connector with rate limits
     let discord_id = ConnectorId::new("discord", "fcp", "v1").unwrap();
     let discord_limits = RateLimitDeclarations {
-        limits: vec![make_rate_limit_pool("discord_api", 50, RateLimitUnit::Requests)],
+        limits: vec![make_rate_limit_pool(
+            "discord_api",
+            50,
+            RateLimitUnit::Requests,
+        )],
         tool_pool_map: HashMap::from([
             ("send_message".to_string(), vec!["discord_api".to_string()]),
             ("edit_message".to_string(), vec!["discord_api".to_string()]),
@@ -249,7 +256,11 @@ async fn test_multiple_connectors_with_different_rate_limits() {
     // Discord connector with request-based limits
     let discord_id = ConnectorId::new("discord", "fcp", "v1").unwrap();
     let discord_limits = RateLimitDeclarations {
-        limits: vec![make_rate_limit_pool("discord_api", 50, RateLimitUnit::Requests)],
+        limits: vec![make_rate_limit_pool(
+            "discord_api",
+            50,
+            RateLimitUnit::Requests,
+        )],
         tool_pool_map: HashMap::from([(
             "send_message".to_string(),
             vec!["discord_api".to_string()],
@@ -287,7 +298,10 @@ async fn test_multiple_connectors_with_different_rate_limits() {
     let discord_response = endpoint.introspect(&discord_id).await.unwrap();
     let discord_limits = discord_response.rate_limits.unwrap();
     assert_eq!(discord_limits.limits.len(), 1);
-    assert_eq!(discord_limits.limits[0].config.unit, RateLimitUnit::Requests);
+    assert_eq!(
+        discord_limits.limits[0].config.unit,
+        RateLimitUnit::Requests
+    );
 
     // Verify OpenAI
     let openai_response = endpoint.introspect(&openai_id).await.unwrap();

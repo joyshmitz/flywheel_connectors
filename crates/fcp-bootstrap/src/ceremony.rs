@@ -365,10 +365,7 @@ impl ThresholdCeremony {
             }
 
             if joined.iter().any(|p| p.index == participant.index) {
-                return Err(format!(
-                    "Participant {} already joined",
-                    participant.index
-                ));
+                return Err(format!("Participant {} already joined", participant.index));
             }
 
             self.transcript.joins.push(JoinRecord {
@@ -448,7 +445,11 @@ impl ThresholdCeremony {
     }
 
     /// Add shares from a participant.
-    pub fn add_shares(&mut self, from_index: u32, shares: Vec<EncryptedShare>) -> Result<(), String> {
+    pub fn add_shares(
+        &mut self,
+        from_index: u32,
+        shares: Vec<EncryptedShare>,
+    ) -> Result<(), String> {
         if let CeremonyPhase::Round2Shares { shares: all_shares } = &mut self.phase {
             if all_shares.contains_key(&from_index) {
                 return Err(format!(

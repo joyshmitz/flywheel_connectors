@@ -122,10 +122,7 @@ impl std::fmt::Display for BootstrapPhase {
             Self::CeremonyRound2 {
                 shares_distributed,
                 shares_needed,
-            } => write!(
-                f,
-                "CeremonyRound2({shares_distributed}/{shares_needed})"
-            ),
+            } => write!(f, "CeremonyRound2({shares_distributed}/{shares_needed})"),
             Self::GenesisCreate => write!(f, "GenesisCreate"),
             Self::Enrollment => write!(f, "Enrollment"),
             Self::Completed { fingerprint, .. } => write!(f, "Completed({fingerprint})"),
@@ -175,7 +172,10 @@ impl std::fmt::Display for InitSuggestion {
         match self {
             Self::UseExisting => write!(f, "Use the existing genesis"),
             Self::ForceOverwrite => {
-                write!(f, "Run with --force --i-understand-this-is-destructive to overwrite")
+                write!(
+                    f,
+                    "Run with --force --i-understand-this-is-destructive to overwrite"
+                )
             }
             Self::UseDifferentPath => write!(f, "Run in a different directory"),
         }
@@ -233,9 +233,8 @@ pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
 /// Write the current phase to the lock file.
 pub fn write_phase_lock(data_dir: &Path, phase: &BootstrapPhase) -> std::io::Result<()> {
     let lock_file = data_dir.join("init.lock");
-    let contents = serde_json::to_string(phase).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let contents = serde_json::to_string(phase)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(lock_file, contents)
 }
 
@@ -265,16 +264,20 @@ mod tests {
     #[test]
     fn test_phase_is_terminal() {
         assert!(!BootstrapPhase::Uninitialized.is_terminal());
-        assert!(BootstrapPhase::Completed {
-            fingerprint: "test".to_string(),
-            completed_at: Utc::now(),
-        }
-        .is_terminal());
-        assert!(BootstrapPhase::Failed {
-            reason: "test".to_string(),
-            at_phase: "test".to_string(),
-        }
-        .is_terminal());
+        assert!(
+            BootstrapPhase::Completed {
+                fingerprint: "test".to_string(),
+                completed_at: Utc::now(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            BootstrapPhase::Failed {
+                reason: "test".to_string(),
+                at_phase: "test".to_string(),
+            }
+            .is_terminal()
+        );
     }
 
     #[test]

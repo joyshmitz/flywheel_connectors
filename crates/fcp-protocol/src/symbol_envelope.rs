@@ -109,12 +109,9 @@ pub fn derive_sender_subkey(
     info.extend_from_slice(sender_node_id.as_str().as_bytes());
     info.extend_from_slice(&sender_instance_id.to_le_bytes());
 
-    let subkey_bytes: [u8; 32] = hkdf_sha256_array(
-        Some(zone_key_id.as_bytes()),
-        zone_key.as_bytes(),
-        &info,
-    )
-        .expect("HKDF expansion for 32 bytes should never fail");
+    let subkey_bytes: [u8; 32] =
+        hkdf_sha256_array(Some(zone_key_id.as_bytes()), zone_key.as_bytes(), &info)
+            .expect("HKDF expansion for 32 bytes should never fail");
     AeadKey::from_bytes(subkey_bytes)
 }
 
