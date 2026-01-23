@@ -27,6 +27,12 @@ pub use crate::{
 // Cost and availability
 pub use crate::{CostEstimate, CurrencyCost, ResourceAvailability};
 
+// Rate limits
+pub use crate::{
+    RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope,
+    RateLimitUnit,
+};
+
 // Events
 pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
 

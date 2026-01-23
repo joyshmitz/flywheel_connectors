@@ -325,10 +325,7 @@ fn test_runtime_format_deserialize() {
 
 #[test]
 fn test_runtime_format_roundtrip() {
-    let formats = vec![
-        ConnectorRuntimeFormat::Native,
-        ConnectorRuntimeFormat::Wasi,
-    ];
+    let formats = vec![ConnectorRuntimeFormat::Native, ConnectorRuntimeFormat::Wasi];
 
     for format in formats {
         let json = serde_json::to_string(&format).expect("serialize should work");

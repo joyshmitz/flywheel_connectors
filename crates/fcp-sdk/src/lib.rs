@@ -110,7 +110,13 @@ pub use fcp_core::{
     // Provenance
     Provenance,
     ProvenanceStep,
+    RateLimitConfig,
+    RateLimitDeclarations,
+    RateLimitEnforcement,
+    RateLimitPool,
+    RateLimitScope,
     RateLimitStatus,
+    RateLimitUnit,
     ReadinessResponse,
     ReplayBufferInfo,
     RequestId,

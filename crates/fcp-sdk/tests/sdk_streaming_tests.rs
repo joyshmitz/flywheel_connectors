@@ -451,8 +451,8 @@ fn test_full_streaming_flow() {
     assert_eq!(manager.pending_acks("events.flow"), 2);
 
     // 6. Ack remaining
-    let ack2 = EventAck::new("events.flow", vec![e2.seq, e3.seq])
-        .with_cursors(vec![e2.cursor, e3.cursor]);
+    let ack2 =
+        EventAck::new("events.flow", vec![e2.seq, e3.seq]).with_cursors(vec![e2.cursor, e3.cursor]);
     manager.handle_ack(&ack2);
     assert_eq!(manager.pending_acks("events.flow"), 0);
 }

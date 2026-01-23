@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 use fcp_core::EventInfo;
 use fcp_sdk::prelude::*;
-use fcp_sdk::{OperationId, ReplayBufferInfo, SessionId, SubscribeResult};
+use fcp_sdk::{OperationId, RateLimitDeclarations, ReplayBufferInfo, SessionId, SubscribeResult};
 use serde_json::json;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -469,7 +469,11 @@ async fn test_streaming_connector_introspect_includes_events() {
 
     assert!(!introspection.events.is_empty());
     // Check that events contain expected topics
-    let topics: Vec<&str> = introspection.events.iter().map(|e| e.topic.as_str()).collect();
+    let topics: Vec<&str> = introspection
+        .events
+        .iter()
+        .map(|e| e.topic.as_str())
+        .collect();
     assert!(topics.contains(&"events.update"));
     assert!(topics.contains(&"events.created"));
 }
@@ -702,7 +706,10 @@ fn test_simulate_response_with_cost_estimate() {
 
     assert!(response.would_succeed);
     assert!(response.estimated_cost.is_some());
-    assert_eq!(response.estimated_cost.as_ref().unwrap().api_credits, Some(50));
+    assert_eq!(
+        response.estimated_cost.as_ref().unwrap().api_credits,
+        Some(50)
+    );
 }
 
 #[test]
@@ -798,4 +805,23 @@ fn test_connector_metrics_structure() {
     assert_eq!(metrics.requests_success, 1);
     assert_eq!(metrics.requests_error, 1);
     assert_eq!(metrics.events_emitted, 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RateLimitDeclarations Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_rate_limits_default_is_empty_and_valid() {
+    let connector = MinimalConnector::new();
+    let decls = connector.rate_limits();
+
+    assert!(decls.is_empty());
+    assert!(decls.validate().is_ok());
+}
+
+#[test]
+fn test_rate_limit_declarations_default_is_empty() {
+    let decls = RateLimitDeclarations::default();
+    assert!(decls.is_empty());
 }

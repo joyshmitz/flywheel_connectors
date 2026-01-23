@@ -48,7 +48,12 @@ mod json_schema_tests {
         });
 
         assert_eq!(output_schema["type"], json!("object"));
-        assert!(output_schema["required"].as_array().unwrap().contains(&json!("message_id")));
+        assert!(
+            output_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("message_id"))
+        );
     }
 
     #[test]
@@ -126,7 +131,12 @@ mod json_schema_tests {
 
         let user_schema = &schema["properties"]["user"];
         assert_eq!(user_schema["type"], json!("object"));
-        assert!(user_schema["required"].as_array().unwrap().contains(&json!("id")));
+        assert!(
+            user_schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("id"))
+        );
     }
 
     #[test]
@@ -451,7 +461,9 @@ mod schema_validation_tests {
             .collect();
 
         // Check for missing required field
-        let has_all_required = required.iter().all(|field| input_missing_email.get(*field).is_some());
+        let has_all_required = required
+            .iter()
+            .all(|field| input_missing_email.get(*field).is_some());
         assert!(!has_all_required, "Should detect missing required field");
     }
 
@@ -976,8 +988,12 @@ mod health_schema_tests {
         let states = vec![
             HealthState::Starting,
             HealthState::Ready,
-            HealthState::Degraded { reason: "test".to_string() },
-            HealthState::Error { reason: "test error".to_string() },
+            HealthState::Degraded {
+                reason: "test".to_string(),
+            },
+            HealthState::Error {
+                reason: "test error".to_string(),
+            },
         ];
 
         for state in states {
@@ -1039,7 +1055,10 @@ mod cost_estimate_tests {
         let deserialized: CostEstimate = serde_json::from_str(&json_str).unwrap();
 
         assert_eq!(cost.api_credits, deserialized.api_credits);
-        assert_eq!(cost.estimated_duration_ms, deserialized.estimated_duration_ms);
+        assert_eq!(
+            cost.estimated_duration_ms,
+            deserialized.estimated_duration_ms
+        );
     }
 
     #[test]

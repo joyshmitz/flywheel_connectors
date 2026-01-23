@@ -396,7 +396,9 @@ mod cost_estimate_vectors {
 
         // Verify structure has expected fields
         assert!(actual.is_object());
-        assert!(actual.get("api_credits").is_some() || actual.get("estimated_duration_ms").is_some());
+        assert!(
+            actual.get("api_credits").is_some() || actual.get("estimated_duration_ms").is_some()
+        );
     }
 }
 
