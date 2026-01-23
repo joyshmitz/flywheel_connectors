@@ -429,10 +429,23 @@ impl BloomFilter {
         hasher.update(item);
         let hash = hasher.finalize();
         let bytes = hash.as_bytes();
-        // Use first 8 bytes as usize
-        usize::from_le_bytes([
+        // Use first 8 bytes as u64 to avoid platform dependence (usize is 4 bytes on 32-bit)
+        let val = u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ])
+        ]);
+        // We return usize because it's used as an index, but the caller usually modulos it anyway.
+        // However, looking at the usage: `let index = hash % self.num_bits;`
+        // We should probably return u64 here, but the signature returns usize.
+        // Since we are returning a "hash" that will be modulo'd by num_bits (usize),
+        // we can cast here but we might lose entropy on 32-bit if we just cast val as usize.
+        // A better approach is to return u64 from this function and update call sites,
+        // OR just truncate here. Given this is a simple bloom filter, truncation is acceptable but suboptimal.
+        // BUT, `BloomFilter::insert` does `let index = hash % self.num_bits`.
+        // If `hash` is usize, and we are on 32-bit, we are limited to 4 billion bits (500MB).
+        // That seems fine for this "simple" implementation.
+        #[allow(clippy::cast_possible_truncation)]
+        let result = val as usize;
+        result
     }
 
     /// Clear the bloom filter.

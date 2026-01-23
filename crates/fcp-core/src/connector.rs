@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    RateLimitDeclarations, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    SubscribeResponse, UnsubscribeRequest,
 };
 
 /// Type alias for event streams.
@@ -42,6 +42,13 @@ pub trait FcpConnector: Send + Sync {
 
     /// Get introspection data describing capabilities.
     fn introspect(&self) -> Introspection;
+
+    /// Declare connector rate limits for planning and observability.
+    ///
+    /// Default: no limits declared.
+    fn rate_limits(&self) -> RateLimitDeclarations {
+        RateLimitDeclarations::default()
+    }
 
     /// Invoke an operation.
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse>;

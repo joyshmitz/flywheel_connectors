@@ -475,6 +475,8 @@ impl ZoneId {
             "tag:fcp-{}",
             self.as_str().strip_prefix("z:").unwrap_or(self.as_str())
         )
+        .replace('_', "-")
+        .replace(':', "-")
     }
 
     /// Create from Tailscale ACL tag.
@@ -1062,19 +1064,32 @@ pub enum RiskLevel {
     Critical,
 }
 
-/// Safety tier classification.
+/// Safety tier classification for tools and operations.
+///
+/// **Purpose:** Classifies the safety level of a tool or operation for agent decision-making.
+/// Determines what approval/authorization is needed before an agent can execute the operation.
+///
+/// **Usage:**
+/// - Tool descriptors: `ToolDescriptor.safety_tier`
+/// - Operation metadata: `OperationMeta.safety_tier`
+/// - Provenance validation: `can_drive_operation(tier)`
+/// - CLI filtering: `--max-safety safe`
+///
+/// **Note:** This is distinct from [`RiskTier`] in `quorum.rs`, which classifies
+/// quorum/consensus requirements for distributed operations. `SafetyTier` is about
+/// "can this agent do this?", while `RiskTier` is about "how many signatures are needed?".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SafetyTier {
-    /// Safe by default, no approval needed
+    /// Safe operations: no approval needed, read-only or benign
     Safe,
-    /// Requires policy check
+    /// Risky operations: requires policy check, may have side effects
     Risky,
-    /// Requires interactive approval
+    /// Dangerous operations: requires interactive approval
     Dangerous,
-    /// Critical system operation (requires quorum/elevation)
+    /// Critical system operations: requires quorum/elevation
     Critical,
-    /// Never allowed
+    /// Forbidden: never allowed under any circumstances
     Forbidden,
 }
 
@@ -1632,5 +1647,99 @@ mod tests {
         let json = serde_json::to_string(&constraints).unwrap();
         // Empty vecs should be omitted per #[serde(skip_serializing_if = "Vec::is_empty")]
         assert!(!json.contains("credential_allow"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Type Naming Standardization Tests (SafetyTier vs RiskTier)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn safety_tier_vs_risk_tier_are_distinct() {
+        // These are different types for different purposes:
+        // - SafetyTier: tool/operation safety classification
+        // - RiskTier (in quorum.rs): quorum/consensus requirements
+        //
+        // They share similar variant names but have different semantics:
+        // - SafetyTier has 5 levels: Safe, Risky, Dangerous, Critical, Forbidden
+        // - RiskTier has 4 levels: Safe, Risky, Dangerous, CriticalWrite
+
+        // SafetyTier variant order (for documentation)
+        assert!(matches!(SafetyTier::Safe, SafetyTier::Safe));
+        assert!(matches!(SafetyTier::Risky, SafetyTier::Risky));
+        assert!(matches!(SafetyTier::Dangerous, SafetyTier::Dangerous));
+        assert!(matches!(SafetyTier::Critical, SafetyTier::Critical));
+        assert!(matches!(SafetyTier::Forbidden, SafetyTier::Forbidden));
+
+        // Verify SafetyTier serialization
+        let tiers = [
+            (SafetyTier::Safe, "safe"),
+            (SafetyTier::Risky, "risky"),
+            (SafetyTier::Dangerous, "dangerous"),
+            (SafetyTier::Critical, "critical"),
+            (SafetyTier::Forbidden, "forbidden"),
+        ];
+
+        for (tier, expected) in tiers {
+            let json = serde_json::to_string(&tier).unwrap();
+            assert!(
+                json.contains(expected),
+                "SafetyTier::{tier:?} should serialize to contain '{expected}'"
+            );
+        }
+    }
+
+    #[test]
+    fn safety_tier_serialization_roundtrip() {
+        let tiers = [
+            SafetyTier::Safe,
+            SafetyTier::Risky,
+            SafetyTier::Dangerous,
+            SafetyTier::Critical,
+            SafetyTier::Forbidden,
+        ];
+
+        for tier in tiers {
+            let json = serde_json::to_string(&tier).unwrap();
+            let parsed: SafetyTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(tier, parsed);
+        }
+    }
+
+    #[test]
+    fn risk_level_vs_safety_tier_are_distinct() {
+        // RiskLevel: UX/prioritization (Low, Medium, High, Critical)
+        // SafetyTier: normative enforcement (Safe, Risky, Dangerous, Critical, Forbidden)
+        //
+        // Both may be present in ToolDescriptor, each for different purposes.
+
+        // RiskLevel serialization
+        let levels = [
+            (RiskLevel::Low, "low"),
+            (RiskLevel::Medium, "medium"),
+            (RiskLevel::High, "high"),
+            (RiskLevel::Critical, "critical"),
+        ];
+
+        for (level, expected) in levels {
+            let json = serde_json::to_string(&level).unwrap();
+            assert!(
+                json.contains(expected),
+                "RiskLevel::{level:?} should serialize to contain '{expected}'"
+            );
+        }
+
+        // SafetyTier serialization (different enum, different values)
+        let tiers = [
+            (SafetyTier::Safe, "safe"),
+            (SafetyTier::Forbidden, "forbidden"),
+        ];
+
+        for (tier, expected) in tiers {
+            let json = serde_json::to_string(&tier).unwrap();
+            assert!(
+                json.contains(expected),
+                "SafetyTier::{tier:?} should serialize to contain '{expected}'"
+            );
+        }
     }
 }

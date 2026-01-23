@@ -112,6 +112,104 @@ pub enum HealthState {
     Stopping,
 }
 
+/// Connector health status (external-facing health for discovery/registry).
+///
+/// This is distinct from `HealthState` which represents internal lifecycle state.
+/// `ConnectorHealth` is used in:
+/// - Discovery responses (`ConnectorSummary.health`)
+/// - Health API (`/rpc/health`)
+/// - CLI status (`fcp connector list`)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum ConnectorHealth {
+    /// Connector is healthy and accepting requests.
+    Healthy,
+
+    /// Connector is operational but with reduced performance or partial functionality.
+    Degraded {
+        /// Reason for degradation.
+        reason: String,
+    },
+
+    /// Connector is unavailable (not responding or in error state).
+    Unavailable {
+        /// Reason for unavailability.
+        reason: String,
+        /// When the connector became unavailable.
+        since: chrono::DateTime<chrono::Utc>,
+    },
+}
+
+impl ConnectorHealth {
+    /// Create a healthy status.
+    #[must_use]
+    pub const fn healthy() -> Self {
+        Self::Healthy
+    }
+
+    /// Create a degraded status.
+    #[must_use]
+    pub fn degraded(reason: impl Into<String>) -> Self {
+        Self::Degraded {
+            reason: reason.into(),
+        }
+    }
+
+    /// Create an unavailable status.
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason: reason.into(),
+            since: chrono::Utc::now(),
+        }
+    }
+
+    /// Check if the connector is healthy.
+    #[must_use]
+    pub const fn is_healthy(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+
+    /// Check if the connector is available (healthy or degraded).
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Healthy | Self::Degraded { .. })
+    }
+}
+
+impl From<&HealthState> for ConnectorHealth {
+    fn from(state: &HealthState) -> Self {
+        match state {
+            HealthState::Ready => Self::Healthy,
+            HealthState::Degraded { reason } => Self::Degraded {
+                reason: reason.clone(),
+            },
+            HealthState::Starting | HealthState::Stopping => Self::Unavailable {
+                reason: format!("Connector is {}", state.as_str()),
+                since: chrono::Utc::now(),
+            },
+            HealthState::Error { reason } => Self::Unavailable {
+                reason: reason.clone(),
+                since: chrono::Utc::now(),
+            },
+        }
+    }
+}
+
+impl HealthState {
+    /// Get the string representation of the state.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Degraded { .. } => "degraded",
+            Self::Error { .. } => "error",
+            Self::Stopping => "stopping",
+        }
+    }
+}
+
 /// Rate limit status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitStatus {
@@ -541,5 +639,151 @@ mod tests {
 
         let resp: ReadinessResponse = serde_json::from_str(json).unwrap();
         assert!(resp.components.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ConnectorHealth tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn connector_health_healthy() {
+        let health = ConnectorHealth::healthy();
+        assert!(health.is_healthy());
+        assert!(health.is_available());
+    }
+
+    #[test]
+    fn connector_health_degraded() {
+        let health = ConnectorHealth::degraded("high latency");
+        assert!(!health.is_healthy());
+        assert!(health.is_available());
+
+        if let ConnectorHealth::Degraded { reason } = &health {
+            assert_eq!(reason, "high latency");
+        } else {
+            panic!("expected Degraded variant");
+        }
+    }
+
+    #[test]
+    fn connector_health_unavailable() {
+        let health = ConnectorHealth::unavailable("connection refused");
+        assert!(!health.is_healthy());
+        assert!(!health.is_available());
+
+        if let ConnectorHealth::Unavailable { reason, since: _ } = &health {
+            assert_eq!(reason, "connection refused");
+        } else {
+            panic!("expected Unavailable variant");
+        }
+    }
+
+    #[test]
+    fn connector_health_serialization_healthy() {
+        let health = ConnectorHealth::healthy();
+        let json = serde_json::to_string(&health).unwrap();
+        assert_eq!(json, r#"{"status":"healthy"}"#);
+
+        let parsed: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_healthy());
+    }
+
+    #[test]
+    fn connector_health_serialization_degraded() {
+        let health = ConnectorHealth::degraded("rate limited");
+        let json = serde_json::to_string(&health).unwrap();
+        assert!(json.contains(r#""status":"degraded""#));
+        assert!(json.contains(r#""reason":"rate limited""#));
+
+        let parsed: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.is_healthy());
+        assert!(parsed.is_available());
+    }
+
+    #[test]
+    fn connector_health_serialization_unavailable() {
+        let health = ConnectorHealth::unavailable("service down");
+        let json = serde_json::to_string(&health).unwrap();
+        assert!(json.contains(r#""status":"unavailable""#));
+        assert!(json.contains(r#""reason":"service down""#));
+        assert!(json.contains(r#""since":"#)); // Has timestamp
+
+        let parsed: ConnectorHealth = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.is_healthy());
+        assert!(!parsed.is_available());
+    }
+
+    #[test]
+    fn connector_health_from_health_state_ready() {
+        let state = HealthState::Ready;
+        let health = ConnectorHealth::from(&state);
+        assert!(health.is_healthy());
+    }
+
+    #[test]
+    fn connector_health_from_health_state_degraded() {
+        let state = HealthState::Degraded {
+            reason: "slow upstream".to_string(),
+        };
+        let health = ConnectorHealth::from(&state);
+        assert!(!health.is_healthy());
+        assert!(health.is_available());
+
+        if let ConnectorHealth::Degraded { reason } = health {
+            assert_eq!(reason, "slow upstream");
+        } else {
+            panic!("expected Degraded variant");
+        }
+    }
+
+    #[test]
+    fn connector_health_from_health_state_error() {
+        let state = HealthState::Error {
+            reason: "crash".to_string(),
+        };
+        let health = ConnectorHealth::from(&state);
+        assert!(!health.is_healthy());
+        assert!(!health.is_available());
+
+        if let ConnectorHealth::Unavailable { reason, since: _ } = health {
+            assert_eq!(reason, "crash");
+        } else {
+            panic!("expected Unavailable variant");
+        }
+    }
+
+    #[test]
+    fn connector_health_from_health_state_starting() {
+        let state = HealthState::Starting;
+        let health = ConnectorHealth::from(&state);
+        assert!(!health.is_available());
+    }
+
+    #[test]
+    fn connector_health_from_health_state_stopping() {
+        let state = HealthState::Stopping;
+        let health = ConnectorHealth::from(&state);
+        assert!(!health.is_available());
+    }
+
+    #[test]
+    fn health_state_as_str() {
+        assert_eq!(HealthState::Starting.as_str(), "starting");
+        assert_eq!(HealthState::Ready.as_str(), "ready");
+        assert_eq!(
+            HealthState::Degraded {
+                reason: "x".to_string()
+            }
+            .as_str(),
+            "degraded"
+        );
+        assert_eq!(
+            HealthState::Error {
+                reason: "y".to_string()
+            }
+            .as_str(),
+            "error"
+        );
+        assert_eq!(HealthState::Stopping.as_str(), "stopping");
     }
 }

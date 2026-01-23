@@ -33,13 +33,32 @@ use serde::{Deserialize, Serialize};
 use crate::ZoneId;
 
 /// Risk tier for operations requiring quorum signatures (NORMATIVE).
+///
+/// **Purpose:** Classifies the quorum requirements for distributed consensus operations.
+/// Determines how many node signatures are needed to authorize an operation.
+///
+/// **Usage:**
+/// - Quorum policy: `required_quorum(n, f, risk_tier)`
+/// - Signature validation: `satisfies_quorum(policy, risk_tier)`
+/// - Lease operations: `LeaseType.default_risk_tier()`
+///
+/// **Note:** This is distinct from [`SafetyTier`] in `capability.rs`, which classifies
+/// tool/operation safety for agent authorization. `RiskTier` is about "how many signatures?",
+/// while `SafetyTier` is about "can this agent do this operation?".
+///
+/// | Tier | Required Signatures | Example Operations |
+/// |------|--------------------|--------------------|
+/// | `Safe` | 1 (coordinator only) | Safe leases |
+/// | `Risky` | `f + 1` | Risky leases |
+/// | `Dangerous` | `n - f` | Dangerous leases |
+/// | `CriticalWrite` | `n - f` | AuditHead, ZoneCheckpoint |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RiskTier {
-    /// Safe operations: coordinator-only signature allowed.
+    /// Safe operations: coordinator-only signature (1 signature).
     Safe,
-    /// Risky operations: require `f + 1` signatures.
+    /// Risky operations: require `f + 1` signatures (fault-tolerant minimum).
     Risky,
-    /// Dangerous operations: require `n - f` signatures.
+    /// Dangerous operations: require `n - f` signatures (Byzantine-tolerant).
     Dangerous,
     /// Critical writes (audit, checkpoint): require `n - f` signatures.
     CriticalWrite,

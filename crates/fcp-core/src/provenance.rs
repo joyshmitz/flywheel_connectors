@@ -246,6 +246,8 @@ impl TaintFlags {
     }
 
     /// Remove a taint flag (only valid with [`SanitizerReceipt`] proof).
+    ///
+    /// Callers MUST ensure a valid sanitizer receipt exists before removal.
     pub fn remove(&mut self, flag: TaintFlag) {
         self.0.remove(&flag);
     }
@@ -511,6 +513,11 @@ impl ProvenanceRecord {
         match tier {
             SafetyTier::Safe => Ok(()),
             SafetyTier::Risky => {
+                // PotentiallyMalicious input must never drive Risky operations
+                if self.taint_flags.contains(TaintFlag::PotentiallyMalicious) {
+                    return Err(ProvenanceViolation::MaliciousInputDetected);
+                }
+
                 // Risky operations may require elevation for tainted input
                 if self.taint_flags.has_critical() && self.integrity_label < IntegrityLevel::Work {
                     Err(ProvenanceViolation::TaintedInputForRiskyOperation {
@@ -1598,6 +1605,32 @@ mod tests {
             false,
             "pass",
             None,
+        );
+    }
+
+    #[test]
+    fn potentially_malicious_blocks_risky() {
+        // Even with Work integrity, PotentiallyMalicious must block Risky operations
+        let mut record = ProvenanceRecord::new(ZoneId::work());
+        record.taint_flags.insert(TaintFlag::PotentiallyMalicious);
+
+        assert_eq!(record.integrity_label, IntegrityLevel::Work);
+        assert!(
+            matches!(
+                record.can_drive_operation(SafetyTier::Risky),
+                Err(ProvenanceViolation::MaliciousInputDetected)
+            ),
+            "Risky operation must be blocked for potentially malicious input"
+        );
+
+        log_flow_test(
+            "potentially_malicious_blocks_risky",
+            "taint",
+            "work",
+            "blocked",
+            false,
+            "fail",
+            Some("MALICIOUS_INPUT"),
         );
     }
 

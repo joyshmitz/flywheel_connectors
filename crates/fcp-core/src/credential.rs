@@ -90,7 +90,7 @@ impl fmt::Display for CredentialId {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CredentialApplication {
-    /// HTTP Authorization header (e.g., "Bearer <token>").
+    /// HTTP Authorization header (e.g., `Bearer <token>`).
     HttpAuthorizationBearer,
 
     /// HTTP Authorization header with Basic auth.
@@ -229,7 +229,7 @@ impl CredentialObject {
 
     /// Check if the given host string is an IP literal (IPv4 or IPv6).
     ///
-    /// Handles port suffixes (e.g., "192.168.1.1:8080", "[`::1`]:8080").
+    /// Handles port suffixes (e.g., `192.168.1.1:8080`, `[::1]:8080`).
     #[must_use]
     pub fn is_ip_literal(host: &str) -> bool {
         // Strip port if present
