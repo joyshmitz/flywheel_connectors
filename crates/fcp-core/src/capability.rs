@@ -471,12 +471,13 @@ impl ZoneId {
     /// Map to Tailscale ACL tag.
     #[must_use]
     pub fn to_tailscale_tag(&self) -> String {
-        format!(
-            "tag:fcp-{}",
-            self.as_str().strip_prefix("z:").unwrap_or(self.as_str())
-        )
-        .replace('_', "-")
-        .replace(':', "-")
+        let suffix = self
+            .as_str()
+            .strip_prefix("z:")
+            .unwrap_or(self.as_str())
+            .replace('_', "-")
+            .replace(':', "-");
+        format!("tag:fcp-{suffix}")
     }
 
     /// Create from Tailscale ACL tag.
