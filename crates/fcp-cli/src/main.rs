@@ -147,16 +147,12 @@ pub(crate) fn output_with_pager(
         return Ok(());
     }
 
-    let mut child = match std::process::Command::new(&config.command)
+    let mut child = if let Ok(child) = std::process::Command::new(&config.command)
         .args(&config.args)
         .stdin(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(_) => {
-            print!("{content}");
-            return Ok(());
-        }
+        .spawn() { child } else {
+        print!("{content}");
+        return Ok(());
     };
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -202,9 +198,9 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let pager = PagerConfig::from_cli(&cli);
+    let _pager = PagerConfig::from_cli(&cli);
 
-    let stdin_input = if cli.input_stdin {
+    let _stdin_input = if cli.input_stdin {
         Some(read_stdin_input(cli.input_format)?)
     } else {
         None
@@ -214,7 +210,7 @@ fn main() -> Result<()> {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
         Commands::Connector(args) => connector::run(&args),
-        Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref(), &pager),
+        Commands::Doctor(args) => doctor::run(&args),
         Commands::Explain(args) => {
             if cli.input_stdin {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");

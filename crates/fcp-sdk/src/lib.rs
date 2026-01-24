@@ -207,16 +207,20 @@ impl SchemaValidator {
     /// # Errors
     /// Returns [`SchemaValidationError::ValidationFailed`] if validation fails.
     pub fn validate(&self, value: &serde_json::Value) -> Result<(), SchemaValidationError> {
-        match self.validator.validate(value) {
-            Ok(()) => Ok(()),
-            Err(errors) => {
-                let details: Vec<String> = errors.map(|e| e.to_string()).collect();
-                let message = details.join("; ");
-                Err(SchemaValidationError::ValidationFailed {
-                    message,
-                    errors: details,
-                })
-            }
+        let details: Vec<String> = self
+            .validator
+            .iter_errors(value)
+            .map(|e| e.to_string())
+            .collect();
+
+        if details.is_empty() {
+            Ok(())
+        } else {
+            let message = details.join("; ");
+            Err(SchemaValidationError::ValidationFailed {
+                message,
+                errors: details,
+            })
         }
     }
 }

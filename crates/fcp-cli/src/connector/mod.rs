@@ -24,9 +24,10 @@ pub mod types;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
+use fcp_core::{ConnectorHealth, SafetyTier};
 use types::{
-    AgentHintsDescriptor, AuthCapsDescriptor, ConnectorInfo, ConnectorIntrospection,
-    ConnectorListOutput, ConnectorMetricsInfo, ConnectorStatus, ConnectorSummary,
+    AgentHintsDescriptor, AuthCapsDescriptor, ConnectorHealthDisplay, ConnectorInfo,
+    ConnectorIntrospection, ConnectorListOutput, ConnectorMetricsInfo, ConnectorSummary,
     EventCapsDescriptor, EventDescriptor, EventSummary, OperationDescriptor, OperationSummary,
     RateLimitDescriptor, ResourceTypeDescriptor, SandboxInfo, ZoneConnectors,
 };
@@ -160,29 +161,35 @@ fn simulate_list_output(zone_filter: Option<&str>) -> ConnectorListOutput {
                 ConnectorSummary {
                     id: "fcp.twitter:social:v1".to_string(),
                     name: "Twitter/X".to_string(),
+                    description: Some("Social media connector".to_string()),
                     version: "1.2.0".to_string(),
-                    archetype: "bidirectional".to_string(),
-                    status: ConnectorStatus::Healthy,
-                    operation_count: 12,
-                    sandboxed: true,
+                    categories: vec!["social".to_string()],
+                    tool_count: 12,
+                    max_safety_tier: SafetyTier::Risky,
+                    enabled: true,
+                    health: ConnectorHealth::healthy(),
                 },
                 ConnectorSummary {
                     id: "fcp.discord:social:v1".to_string(),
                     name: "Discord".to_string(),
+                    description: Some("Discord messaging connector".to_string()),
                     version: "1.1.0".to_string(),
-                    archetype: "bidirectional".to_string(),
-                    status: ConnectorStatus::Healthy,
-                    operation_count: 18,
-                    sandboxed: true,
+                    categories: vec!["social".to_string(), "messaging".to_string()],
+                    tool_count: 18,
+                    max_safety_tier: SafetyTier::Risky,
+                    enabled: true,
+                    health: ConnectorHealth::healthy(),
                 },
                 ConnectorSummary {
                     id: "fcp.telegram:messaging:v1".to_string(),
                     name: "Telegram".to_string(),
+                    description: Some("Telegram messaging connector".to_string()),
                     version: "1.0.0".to_string(),
-                    archetype: "bidirectional".to_string(),
-                    status: ConnectorStatus::Degraded,
-                    operation_count: 15,
-                    sandboxed: true,
+                    categories: vec!["messaging".to_string()],
+                    tool_count: 15,
+                    max_safety_tier: SafetyTier::Risky,
+                    enabled: true,
+                    health: ConnectorHealth::degraded("Rate limited"),
                 },
             ],
         },
@@ -192,20 +199,24 @@ fn simulate_list_output(zone_filter: Option<&str>) -> ConnectorListOutput {
                 ConnectorSummary {
                     id: "fcp.openai:ai:v1".to_string(),
                     name: "OpenAI".to_string(),
+                    description: Some("OpenAI API connector".to_string()),
                     version: "2.0.0".to_string(),
-                    archetype: "operational".to_string(),
-                    status: ConnectorStatus::Healthy,
-                    operation_count: 8,
-                    sandboxed: true,
+                    categories: vec!["ai".to_string()],
+                    tool_count: 8,
+                    max_safety_tier: SafetyTier::Dangerous,
+                    enabled: true,
+                    health: ConnectorHealth::healthy(),
                 },
                 ConnectorSummary {
                     id: "fcp.anthropic:ai:v1".to_string(),
                     name: "Anthropic".to_string(),
+                    description: Some("Anthropic Claude connector".to_string()),
                     version: "1.5.0".to_string(),
-                    archetype: "operational".to_string(),
-                    status: ConnectorStatus::Healthy,
-                    operation_count: 6,
-                    sandboxed: true,
+                    categories: vec!["ai".to_string()],
+                    tool_count: 6,
+                    max_safety_tier: SafetyTier::Dangerous,
+                    enabled: true,
+                    health: ConnectorHealth::healthy(),
                 },
             ],
         },
@@ -289,7 +300,7 @@ fn simulate_connector_info(connector_id: &str) -> Result<ConnectorInfo> {
                 network_access: true,
                 allowed_hosts: vec!["api.twitter.com".to_string(), "api.x.com".to_string()],
             },
-            status: ConnectorStatus::Healthy,
+            status: ConnectorHealth::healthy(),
             metrics: Some(ConnectorMetricsInfo {
                 requests_total: 15234,
                 requests_success: 15100,
@@ -589,21 +600,18 @@ fn print_list_human_readable(output: &ConnectorListOutput) {
         println!("{}", "-".repeat(zone.zone_id.len()));
 
         for conn in &zone.connectors {
-            let color = conn.status.ansi_color();
-            let symbol = conn.status.symbol();
-            let sandboxed = if conn.sandboxed {
-                "sandboxed"
-            } else {
-                "native"
-            };
+            let color = conn.health.ansi_color();
+            let symbol = conn.health.symbol();
+            let enabled_str = if conn.enabled { "enabled" } else { "disabled" };
+            let categories = conn.categories.join(", ");
 
             println!(
                 "  {color}{symbol}{reset} {bold}{}{reset} v{} {dim}({}){reset}",
-                conn.name, conn.version, conn.archetype
+                conn.name, conn.version, categories
             );
             println!(
-                "    {dim}ID:{reset} {}  {dim}Ops:{reset} {}  {dim}[{}]{reset}",
-                conn.id, conn.operation_count, sandboxed
+                "    {dim}ID:{reset} {}  {dim}Tools:{reset} {}  {dim}[{}]{reset}",
+                conn.id, conn.tool_count, enabled_str
             );
         }
         println!();
@@ -616,6 +624,7 @@ fn print_info_human_readable(info: &ConnectorInfo) {
     let dim = "\x1b[2m";
     let color = info.status.ansi_color();
     let symbol = info.status.symbol();
+    let label = info.status.label();
 
     println!();
     println!("{bold}{}{reset}", info.name);
@@ -628,7 +637,7 @@ fn print_info_human_readable(info: &ConnectorInfo) {
     println!("  ID:       {}", info.id);
     println!("  Version:  {}", info.version);
     println!("  Type:     {} ({})", info.archetype, info.runtime_format);
-    println!("  Status:   {color}{symbol} {:?}{reset}", info.status);
+    println!("  Status:   {color}{symbol} {label}{reset}");
     println!();
 
     println!("{bold}Zone Configuration{reset}");

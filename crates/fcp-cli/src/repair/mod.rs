@@ -17,7 +17,6 @@
 pub mod types;
 
 use anyhow::Result;
-use chrono::Utc;
 use clap::{Args, Subcommand};
 use fcp_core::ZoneId;
 
@@ -134,11 +133,11 @@ fn print_human_readable(report: &RepairReport) {
     println!("  Distinct Nodes:     {}", report.coverage.distinct_nodes);
     println!(
         "  Max Node Fraction:  {:.1}%",
-        report.coverage.max_node_fraction_bps as f64 / 100.0
+        f64::from(report.coverage.max_node_fraction_bps) / 100.0
     );
     println!(
         "  Coverage:           {:.1}%",
-        report.coverage.coverage_bps as f64 / 100.0
+        f64::from(report.coverage.coverage_bps) / 100.0
     );
     println!(
         "  Available:          {}",
@@ -152,7 +151,7 @@ fn print_human_readable(report: &RepairReport) {
         if deficit > 0 {
             println!(
                 "  Deficit:            {:.1}% below target",
-                deficit as f64 / 100.0
+                f64::from(deficit) / 100.0
             );
         }
     }
@@ -194,8 +193,8 @@ fn print_human_readable(report: &RepairReport) {
         println!("  Symbols Transferred: {}", cycle.symbols_transferred);
         println!(
             "  Coverage Change:    {:.1}% -> {:.1}%",
-            cycle.coverage_before_bps as f64 / 100.0,
-            cycle.coverage_after_bps as f64 / 100.0
+            f64::from(cycle.coverage_before_bps) / 100.0,
+            f64::from(cycle.coverage_after_bps) / 100.0
         );
         println!();
     }

@@ -231,7 +231,7 @@ pub struct ConnectorIntrospection {
 /// Full operation descriptor for AI agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationDescriptor {
-    /// Operation ID (e.g., "twitter.post_tweet")
+    /// Operation ID (e.g., "`twitter.post_tweet`")
     pub id: String,
     /// Human-readable summary
     pub summary: String,
@@ -308,7 +308,7 @@ pub struct EventDescriptor {
 pub struct ResourceTypeDescriptor {
     /// Resource type name
     pub name: String,
-    /// URI pattern (e.g., "fcp://fcp.twitter/tweet/{id}")
+    /// URI pattern (e.g., "<fcp://fcp.twitter/tweet/{id>}")
     pub uri_pattern: String,
     /// JSON Schema for resource
     pub schema: serde_json::Value,

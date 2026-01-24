@@ -475,8 +475,7 @@ impl ZoneId {
             .as_str()
             .strip_prefix("z:")
             .unwrap_or(self.as_str())
-            .replace('_', "-")
-            .replace(':', "-");
+            .replace(['_', ':'], "-");
         format!("tag:fcp-{suffix}")
     }
 

@@ -5,7 +5,7 @@
 
 use chrono::Utc;
 use fcp_bootstrap::{
-    BootstrapConfig, BootstrapMode, BootstrapWorkflow, ColdRecovery, GenesisState,
+    BootstrapConfig, BootstrapError, BootstrapMode, BootstrapWorkflow, ColdRecovery, GenesisState,
     GenesisValidationError, RecoveryPhrase, RecoveryPhraseError,
 };
 use fcp_core::Uuid;
@@ -501,22 +501,23 @@ async fn test_bootstrap_workflow_detects_existing_genesis() {
         .build()
         .expect("build config");
 
-    let workflow2 = BootstrapWorkflow::new(config2).expect("create workflow 2");
-    let genesis2 = workflow2
-        .run()
-        .await
-        .expect("second bootstrap returns existing");
+    // Second bootstrap attempt should detect existing genesis and return AlreadyExists error
+    let workflow2_result = BootstrapWorkflow::new(config2);
 
-    let fingerprints_match = genesis1.fingerprint() == genesis2.fingerprint();
+    // Verify that the error contains the correct fingerprint
+    let already_exists = matches!(
+        workflow2_result,
+        Err(BootstrapError::AlreadyExists { ref fingerprint }) if fingerprint == &genesis1.fingerprint()
+    );
 
     log = log
         .with_fingerprint(genesis1.fingerprint())
-        .with_result(if fingerprints_match { "pass" } else { "fail" });
+        .with_result(if already_exists { "pass" } else { "fail" });
     log.emit();
 
     assert!(
-        fingerprints_match,
-        "re-bootstrap must return existing genesis"
+        already_exists,
+        "re-bootstrap must detect existing genesis and return AlreadyExists error"
     );
 }
 
