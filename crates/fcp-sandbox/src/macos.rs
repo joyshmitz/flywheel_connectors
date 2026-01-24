@@ -380,7 +380,9 @@ impl Sandbox for MacOsSandbox {
 /// sandbox_init flags.
 const SANDBOX_NAMED: u64 = 0x0001;
 
-extern "C" {
+// SAFETY: These are FFI bindings to macOS sandbox APIs.
+// sandbox_init and sandbox_free_error are documented Apple APIs.
+unsafe extern "C" {
     /// Initialize sandbox with a profile string.
     fn sandbox_init(profile: *const i8, flags: u64, errorbuf: *mut *mut i8) -> i32;
 
