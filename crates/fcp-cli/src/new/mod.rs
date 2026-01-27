@@ -185,6 +185,24 @@ fn extract_short_name(connector_id: &str) -> &str {
     connector_id.strip_prefix("fcp.").unwrap_or(connector_id)
 }
 
+/// Normalize a connector short name into a crate-safe slug.
+fn normalize_crate_slug(short_name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in short_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else {
+            if !last_dash {
+                slug.push('-');
+                last_dash = true;
+            }
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
 /// Scaffold a new connector.
 fn scaffold_connector(
     connector_id: &str,
@@ -194,8 +212,9 @@ fn scaffold_connector(
     dry_run: bool,
 ) -> Result<ScaffoldResult> {
     let short_name = extract_short_name(connector_id);
-    let crate_name = format!("fcp-{short_name}");
-    let crate_path = format!("connectors/{short_name}");
+    let crate_slug = normalize_crate_slug(short_name);
+    let crate_name = format!("fcp-{crate_slug}");
+    let crate_path = format!("connectors/{crate_slug}");
 
     let mut files_created = Vec::new();
 
@@ -254,6 +273,7 @@ fn generate_files(
     no_e2e: bool,
 ) -> Result<Vec<(String, String, String)>> {
     let manifest = generate_manifest_toml(connector_id, short_name, archetype, zone)?;
+    let crate_ident = crate_name.replace('-', "_");
     let mut files = vec![
         (
             "Cargo.toml".to_string(),
@@ -267,7 +287,7 @@ fn generate_files(
         ),
         (
             "src/main.rs".to_string(),
-            generate_main_rs(short_name),
+            generate_main_rs(short_name, &crate_ident),
             "FCP protocol loop entrypoint".to_string(),
         ),
         (
@@ -287,7 +307,7 @@ fn generate_files(
         ),
         (
             "tests/unit_tests.rs".to_string(),
-            generate_unit_tests_rs(short_name),
+            generate_unit_tests_rs(short_name, &crate_ident),
             "Unit test scaffolding".to_string(),
         ),
     ];
@@ -295,7 +315,7 @@ fn generate_files(
     if !no_e2e {
         files.push((
             "tests/e2e_tests.rs".to_string(),
-            generate_e2e_tests_rs(connector_id, short_name),
+            generate_e2e_tests_rs(connector_id, crate_name),
             "E2E test scaffolding".to_string(),
         ));
     }
