@@ -107,7 +107,7 @@ enum Commands {
 
     /// Policy simulation and preflight checks.
     ///
-    /// Simulate policy outcomes for an InvokeRequest without side effects.
+    /// Simulate policy outcomes for an `InvokeRequest` without side effects.
     Policy(policy::PolicyArgs),
 
     /// Coverage status and repair planning.

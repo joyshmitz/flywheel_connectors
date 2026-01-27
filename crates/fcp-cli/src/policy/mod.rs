@@ -1,17 +1,17 @@
 //! `fcp policy` command implementation.
 //!
-//! Provides a policy simulation CLI for DecisionReceipt previews.
+//! Provides a policy simulation CLI for `DecisionReceipt` previews.
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, PolicyPattern,
-    PolicySimulationError, PolicySimulationInput, Provenance, ZonePolicyObject,
+    DecisionReceipt, DecisionReceiptPolicy, InvokeRequest, PolicySimulationError,
+    PolicySimulationInput, Provenance, ZonePolicyObject,
 };
 use semver::Version;
 
@@ -35,20 +35,20 @@ pub struct SimulateArgs {
     /// Policy simulation input (JSON). Use "-" for stdin.
     ///
     /// Accepts either:
-    /// 1) PolicySimulationInput JSON (with zone_policy + invoke_request)
-    /// 2) InvokeRequest JSON (a permissive zone policy is synthesized)
+    /// 1) `PolicySimulationInput` JSON (with `zone_policy` + `invoke_request`)
+    /// 2) `InvokeRequest` JSON (a permissive zone policy is synthesized)
     #[arg(long)]
     pub input: PathBuf,
 
-    /// Output JSON (DecisionReceipt). Default true.
+    /// Output JSON (`DecisionReceipt`). Default true.
     #[arg(long, default_value_t = true)]
     pub json: bool,
 }
 
 /// Run the policy command.
-pub fn run(args: PolicyArgs) -> Result<()> {
-    match args.command {
-        PolicyCommands::Simulate(sim_args) => run_simulate(&sim_args),
+pub fn run(args: &PolicyArgs) -> Result<()> {
+    match &args.command {
+        PolicyCommands::Simulate(sim_args) => run_simulate(sim_args),
     }
 }
 
@@ -61,7 +61,7 @@ fn run_simulate(args: &SimulateArgs) -> Result<()> {
     }
 }
 
-fn read_input(path: &Path) -> Result<String> {
+fn read_input(path: &PathBuf) -> Result<String> {
     if path.as_os_str() == "-" {
         let mut buf = String::new();
         io::stdin()
@@ -111,7 +111,7 @@ fn default_zone_policy(invoke: &InvokeRequest) -> ZonePolicyObject {
     let header = fcp_core::ObjectHeader {
         schema,
         zone_id: invoke.zone_id.clone(),
-        created_at: fcp_core::Utc::now().timestamp() as u64,
+        created_at: u64::try_from(fcp_core::Utc::now().timestamp()).unwrap_or(0),
         provenance: Provenance::new(invoke.zone_id.clone()),
         refs: Vec::new(),
         foreign_refs: Vec::new(),
@@ -136,8 +136,8 @@ fn default_zone_policy(invoke: &InvokeRequest) -> ZonePolicyObject {
 
 fn output_receipt(receipt: &DecisionReceipt, json: bool) -> Result<()> {
     if json {
-        let payload = serde_json::to_string_pretty(receipt)
-            .context("failed to serialize DecisionReceipt")?;
+        let payload =
+            serde_json::to_string_pretty(receipt).context("failed to serialize DecisionReceipt")?;
         println!("{payload}");
         return Ok(());
     }
@@ -179,7 +179,7 @@ mod tests {
     fn parse_policy_simulation_input_direct() {
         let invoke = InvokeRequest {
             r#type: "invoke".to_string(),
-            id: fcp_core::RequestId::new(),
+            id: fcp_core::RequestId::new("req-1"),
             connector_id: "fcp.test:base:v1".parse().unwrap(),
             operation: "op".parse().unwrap(),
             zone_id: fcp_core::ZoneId::work(),
