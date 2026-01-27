@@ -1037,12 +1037,8 @@ mod tests {
             provenance: None,
             approval_tokens: vec![],
         };
-        let suite = ConnectorSuite::default_deny(
-            "deny_invoke",
-            test_handshake(),
-            invoke,
-            "FCP-3001",
-        );
+        let suite =
+            ConnectorSuite::default_deny("deny_invoke", test_handshake(), invoke, "FCP-3001");
 
         let mut runner = E2eRunner::new("fcp-e2e");
         let report = runner

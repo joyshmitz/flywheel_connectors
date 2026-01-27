@@ -557,12 +557,16 @@ fn build_critical_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
 
 fn print_human_readable(report: &DoctorReport) {
     let reset = "\x1b[0m";
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let red = "\x1b[31m";
+    let dim = "\x1b[2m";
     let color = report.overall_status.ansi_color();
     let symbol = report.overall_status.symbol();
 
     println!();
     println!("FCP Doctor Report");
-    println!("=================");
+    println!("═════════════════");
     println!();
     println!("Zone:           {}", report.zone_id);
     println!("Generated:      {}", report.generated_at.to_rfc3339());
@@ -572,43 +576,139 @@ fn print_human_readable(report: &DoctorReport) {
     );
     println!();
 
+    // Freshness section with color coding
     println!("Freshness:");
+    let chk_color = freshness_color(report.checkpoint.freshness);
+    let rev_color = freshness_color(report.revocation.freshness);
+    let aud_color = freshness_color(report.audit.freshness);
+
     println!(
-        "  Checkpoint:   {:?} (seq={:?}, age={:?}s)",
+        "  Checkpoint:   {chk_color}{:?}{reset} (seq={}, age={}s)",
         report.checkpoint.freshness,
         report.checkpoint.checkpoint_seq.unwrap_or(0),
         report.checkpoint.age_secs.unwrap_or(0)
     );
+    if let Some(reason) = &report.checkpoint.reason {
+        println!("                {dim}{reason}{reset}");
+    }
+
     println!(
-        "  Revocation:   {:?} (seq={:?})",
+        "  Revocation:   {rev_color}{:?}{reset} (seq={}, age={}s)",
         report.revocation.freshness,
-        report.revocation.head_seq.unwrap_or(0)
+        report.revocation.head_seq.unwrap_or(0),
+        report.revocation.age_secs.unwrap_or(0)
     );
+    if let Some(reason) = &report.revocation.reason {
+        println!("                {dim}{reason}{reset}");
+    }
+
     println!(
-        "  Audit:        {:?} (seq={:?})",
+        "  Audit:        {aud_color}{:?}{reset} (seq={}, coverage={:.0}%)",
         report.audit.freshness,
-        report.audit.head_seq.unwrap_or(0)
+        report.audit.head_seq.unwrap_or(0),
+        report.audit.coverage.unwrap_or(0.0) * 100.0
     );
+    if let Some(reason) = &report.audit.reason {
+        println!("                {dim}{reason}{reset}");
+    }
     println!();
 
+    // Transport Policy section
+    println!("Transport Policy:");
+    let lan_status = if report.transport_policy.allow_lan {
+        format!("{green}enabled{reset}")
+    } else {
+        format!("{red}disabled{reset}")
+    };
+    let derp_status = if report.transport_policy.allow_derp {
+        format!("{green}enabled{reset}")
+    } else {
+        format!("{yellow}disabled{reset}")
+    };
+    let funnel_status = if report.transport_policy.allow_funnel {
+        format!("{green}enabled{reset}")
+    } else {
+        format!("{dim}disabled{reset}")
+    };
+    println!("  LAN:    {lan_status}");
+    println!("  DERP:   {derp_status}");
+    println!("  Funnel: {funnel_status}");
+    println!();
+
+    // Store Coverage section
+    println!("Store Coverage:");
+    let store_color = if report.store_coverage.store_healthy {
+        green
+    } else {
+        red
+    };
+    let store_status = if report.store_coverage.store_healthy {
+        "healthy"
+    } else {
+        "degraded"
+    };
+    println!("  Status:       {store_color}{store_status}{reset}");
+    println!(
+        "  Checkpoint:   {}%",
+        report.store_coverage.checkpoint_coverage_bps.unwrap_or(0) / 100
+    );
+    println!(
+        "  Policy:       {}%",
+        report.store_coverage.policy_head_coverage_bps.unwrap_or(0) / 100
+    );
+    println!(
+        "  Revocation:   {}%",
+        report.store_coverage.revocation_head_coverage_bps.unwrap_or(0) / 100
+    );
+    if let Some(reason) = &report.store_coverage.reason {
+        println!("                {dim}{reason}{reset}");
+    }
+    println!();
+
+    // Degraded mode section (only if degraded)
+    if report.degraded_mode.is_degraded {
+        println!("{yellow}Degraded Mode:{reset}");
+        for reason in &report.degraded_mode.reasons {
+            println!("  {yellow}⚠ [{}]{reset} {}", reason.code, reason.description);
+        }
+        if let Some(since) = report.degraded_mode.since {
+            let duration = report.generated_at.timestamp() as u64 - since;
+            println!("  {dim}Duration: {}s{reset}", duration);
+        }
+        println!();
+    }
+
+    // Checks section
     if !report.checks.is_empty() {
         println!("Checks:");
         for check in &report.checks {
             let status_color = match check.status {
-                types::CheckStatus::Ok => "\x1b[32m",
-                types::CheckStatus::Warn => "\x1b[33m",
-                types::CheckStatus::Fail => "\x1b[31m",
+                types::CheckStatus::Ok => green,
+                types::CheckStatus::Warn => yellow,
+                types::CheckStatus::Fail => red,
             };
             let status_symbol = match check.status {
                 types::CheckStatus::Ok => "✓",
                 types::CheckStatus::Warn => "⚠",
                 types::CheckStatus::Fail => "✗",
             };
+            let code_suffix = check
+                .reason_code
+                .as_ref()
+                .map_or(String::new(), |c| format!(" [{c}]"));
             println!(
-                "  {status_color}{status_symbol} {}: {}{reset}",
+                "  {status_color}{status_symbol} {}: {}{code_suffix}{reset}",
                 check.name, check.message
             );
         }
+        println!();
     }
-    println!();
+}
+
+fn freshness_color(level: FreshnessLevel) -> &'static str {
+    match level {
+        FreshnessLevel::Fresh => "\x1b[32m",
+        FreshnessLevel::Stale => "\x1b[33m",
+        FreshnessLevel::TooStale | FreshnessLevel::Missing => "\x1b[31m",
+    }
 }

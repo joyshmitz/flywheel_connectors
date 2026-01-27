@@ -20,9 +20,7 @@ use super::types::EnvironmentInfo;
 pub fn collect() -> EnvironmentInfo {
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
-    let cpu_count = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(1);
+    let cpu_count = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
 
     let os_version = get_os_version();
     let memory_bytes = get_memory_bytes();

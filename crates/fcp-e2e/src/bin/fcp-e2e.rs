@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::{env, io, process};
 
 use fcp_core::CorrelationId;
-use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger, E2eReport, E2eRunner};
+use fcp_e2e::{
+    AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger, E2eReport, E2eRunner,
+};
 
 #[derive(Debug, Default)]
 struct CliArgs {
@@ -50,31 +52,39 @@ fn parse_args() -> Result<CliArgs, String> {
                 parsed.interop = true;
             }
             "--output" => {
-                let value = args.next().ok_or_else(|| "--output requires a value".to_string())?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--output requires a value".to_string())?;
                 parsed.output = Some(PathBuf::from(value));
             }
             "--module" => {
-                let value = args.next().ok_or_else(|| "--module requires a value".to_string())?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--module requires a value".to_string())?;
                 parsed.module = value;
             }
             "--test-name" => {
-                let value =
-                    args.next().ok_or_else(|| "--test-name requires a value".to_string())?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--test-name requires a value".to_string())?;
                 parsed.test_name = value;
             }
             "--connector-cmd" => {
-                let value =
-                    args.next().ok_or_else(|| "--connector-cmd requires a value".to_string())?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--connector-cmd requires a value".to_string())?;
                 parsed.connector_cmd = Some(value);
             }
             "--connector-arg" => {
-                let value =
-                    args.next().ok_or_else(|| "--connector-arg requires a value".to_string())?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--connector-arg requires a value".to_string())?;
                 parsed.connector_args.push(value);
             }
             "--request" => {
-                let value =
-                    args.next().ok_or_else(|| "--request requires a value".to_string())?;
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--request requires a value".to_string())?;
                 let json = serde_json::from_str(&value)
                     .map_err(|err| format!("--request JSON invalid: {err}"))?;
                 parsed.requests.push(json);

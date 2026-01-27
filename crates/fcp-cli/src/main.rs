@@ -101,6 +101,7 @@ enum InputFormat {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct PagerConfig {
     command: String,
     args: Vec<String>,
@@ -122,6 +123,7 @@ impl PagerConfig {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn output_with_pager(
     content: &str,
     config: &PagerConfig,
