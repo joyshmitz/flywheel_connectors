@@ -44,5 +44,8 @@ chrono.workspace = true
 # HTTP client for test assertions
 reqwest.workspace = true
 
+# Log scanning
+regex.workspace = true
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

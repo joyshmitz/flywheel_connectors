@@ -48,11 +48,13 @@
 mod assertions;
 pub mod fixtures;
 mod harness;
+mod log_scan;
 mod mock_server;
 mod tracing_config;
 
 pub use assertions::*;
 pub use harness::*;
+pub use log_scan::*;
 pub use mock_server::*;
 pub use tracing_config::*;
 
