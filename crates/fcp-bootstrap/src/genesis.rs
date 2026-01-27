@@ -229,6 +229,10 @@ impl GenesisState {
     }
 
     /// Serialize the genesis state to canonical CBOR.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if CBOR serialization fails.
     pub fn to_cbor(&self) -> Result<Vec<u8>, crate::error::BootstrapError> {
         let mut buf = Vec::new();
         ciborium::into_writer(self, &mut buf)?;
@@ -236,6 +240,10 @@ impl GenesisState {
     }
 
     /// Deserialize a genesis state from CBOR.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if CBOR deserialization fails.
     pub fn from_cbor(data: &[u8]) -> Result<Self, crate::error::BootstrapError> {
         let genesis: Self = ciborium::from_reader(data)?;
         Ok(genesis)
@@ -251,16 +259,19 @@ pub struct OwnerKeypair {
 
 impl OwnerKeypair {
     /// Create a new owner keypair from a signing key.
-    pub fn new(signing_key: Ed25519SigningKey) -> Self {
+    #[must_use]
+    pub const fn new(signing_key: Ed25519SigningKey) -> Self {
         Self { signing_key }
     }
 
     /// Get the verifying (public) key.
+    #[must_use]
     pub fn verifying_key(&self) -> Ed25519VerifyingKey {
         self.signing_key.verifying_key()
     }
 
     /// Sign data with the owner key.
+    #[must_use]
     pub fn sign(&self, message: &[u8]) -> fcp_crypto::Ed25519Signature {
         self.signing_key.sign(message)
     }
