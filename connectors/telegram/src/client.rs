@@ -5,8 +5,9 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
-use tracing::{instrument, warn};
+use reqwest::{Client, StatusCode};
+use serde::{de::DeserializeOwned, Serialize};
+use tracing::{debug, instrument, warn};
 
 use crate::types::*;
 
@@ -49,28 +50,113 @@ impl TelegramClient {
         format!("{}/bot{}/{}", self.base_url, self.token, method)
     }
 
+    /// Execute a request with retries.
+    async fn request<T, B>(
+        &self,
+        method: &str,
+        endpoint: &str,
+        body: Option<&B>,
+        timeout: Option<Duration>,
+    ) -> Result<T, TelegramError>
+    where
+        T: DeserializeOwned,
+        B: Serialize + ?Sized,
+    {
+        let url = self.api_url(endpoint);
+        let mut attempts = 0;
+        let max_retries = 3;
+        let mut delay = Duration::from_millis(100);
+
+        loop {
+            attempts += 1;
+            let mut req = match method {
+                "POST" => self.client.post(&url),
+                _ => self.client.get(&url),
+            };
+
+            if let Some(b) = body {
+                req = req.json(b);
+            }
+
+            if let Some(t) = timeout {
+                req = req.timeout(t);
+            }
+
+            let result = req.send().await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        let retry_after = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(5);
+
+                        if attempts < max_retries {
+                            let wait = Duration::from_secs(retry_after);
+                            warn!(attempt = attempts, wait_secs = retry_after, "Rate limited, retrying");
+                            tokio::time::sleep(wait).await;
+                            continue;
+                        }
+                    }
+
+                    // Telegram returns 200 even for logical errors, but check for HTTP errors anyway
+                    if status.is_server_error() {
+                        if attempts < max_retries {
+                            warn!(attempt = attempts, status = %status, "Server error, retrying");
+                            tokio::time::sleep(delay).await;
+                            delay *= 2;
+                            continue;
+                        }
+                    }
+
+                    // Parse the Telegram response wrapper
+                    let tg_response: TelegramResponse<T> = response.json().await?;
+
+                    if tg_response.ok {
+                        return tg_response.result.ok_or_else(|| TelegramError::Api {
+                            code: 0,
+                            description: "Empty result".into(),
+                        });
+                    }
+
+                    // Handle logical API errors
+                    let err = TelegramError::Api {
+                        code: tg_response.error_code.unwrap_or(0),
+                        description: tg_response.description.clone().unwrap_or_default(),
+                    };
+
+                    // Retry on 429 or 5xx equivalents in logical errors if applicable
+                    if err.is_retryable() && attempts < max_retries {
+                        warn!(attempt = attempts, error = %err, "Retryable API error");
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+
+                    return Err(err);
+                }
+                Err(e) => {
+                    if (e.is_timeout() || e.is_connect()) && attempts < max_retries {
+                        warn!(attempt = attempts, error = %e, "Connection error, retrying");
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+                    return Err(TelegramError::Http(e));
+                }
+            }
+        }
+    }
+
     /// Get bot information.
     #[instrument(skip(self))]
     pub async fn get_me(&self) -> Result<BotInfo, TelegramError> {
-        let response: TelegramResponse<BotInfo> = self
-            .client
-            .get(self.api_url("getMe"))
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        if response.ok {
-            response.result.ok_or_else(|| TelegramError::Api {
-                code: 0,
-                description: "Empty result".into(),
-            })
-        } else {
-            Err(TelegramError::Api {
-                code: response.error_code.unwrap_or(0),
-                description: response.description.unwrap_or_default(),
-            })
-        }
+        self.request("GET", "getMe", None::<&()>, None).await
     }
 
     /// Get updates using long polling.
@@ -79,26 +165,13 @@ impl TelegramClient {
         &self,
         request: GetUpdatesRequest,
     ) -> Result<Vec<Update>, TelegramError> {
-        let response: TelegramResponse<Vec<Update>> = self
-            .client
-            .post(self.api_url("getUpdates"))
-            .json(&request)
-            .timeout(Duration::from_secs(
-                u64::try_from(request.timeout.unwrap_or(30)).unwrap_or(30) + 10,
-            ))
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        if response.ok {
-            Ok(response.result.unwrap_or_default())
-        } else {
-            Err(TelegramError::Api {
-                code: response.error_code.unwrap_or(0),
-                description: response.description.unwrap_or_default(),
-            })
-        }
+        let timeout = Duration::from_secs(
+            u64::try_from(request.timeout.unwrap_or(30)).unwrap_or(30) + 10,
+        );
+        // Default to empty vec if result is missing but ok is true (though request handles that)
+        self.request("POST", "getUpdates", Some(&request), Some(timeout))
+            .await
+            .map(|opt: Vec<Update>| opt)
     }
 
     /// Send a text message.
@@ -117,50 +190,21 @@ impl TelegramClient {
             message_thread_id: options.message_thread_id,
         };
 
-        let response: TelegramResponse<Message> = self
-            .client
-            .post(self.api_url("sendMessage"))
-            .json(&request)
-            .send()
-            .await?
-            .json()
-            .await?;
-
-        if response.ok {
-            response.result.ok_or_else(|| TelegramError::Api {
-                code: 0,
-                description: "Empty result".into(),
-            })
-        } else {
-            // Check for parse errors and retry without parse mode
-            let desc = response.description.as_deref().unwrap_or("");
-            if is_parse_error(desc) && request.parse_mode.is_some() {
-                warn!("Parse mode error, retrying without formatting");
-                let retry_request = SendMessageRequest {
-                    parse_mode: None,
-                    ..request
-                };
-                let retry_response: TelegramResponse<Message> = self
-                    .client
-                    .post(self.api_url("sendMessage"))
-                    .json(&retry_request)
-                    .send()
-                    .await?
-                    .json()
-                    .await?;
-
-                if retry_response.ok {
-                    return retry_response.result.ok_or_else(|| TelegramError::Api {
-                        code: 0,
-                        description: "Empty result".into(),
-                    });
+        match self.request("POST", "sendMessage", Some(&request), None).await {
+            Ok(msg) => Ok(msg),
+            Err(TelegramError::Api { code, description }) => {
+                // Check for parse errors and retry without parse mode
+                if is_parse_error(&description) && request.parse_mode.is_some() {
+                    warn!("Parse mode error, retrying without formatting");
+                    let retry_request = SendMessageRequest {
+                        parse_mode: None,
+                        ..request
+                    };
+                    return self.request("POST", "sendMessage", Some(&retry_request), None).await;
                 }
+                Err(TelegramError::Api { code, description })
             }
-
-            Err(TelegramError::Api {
-                code: response.error_code.unwrap_or(0),
-                description: response.description.unwrap_or_default(),
-            })
+            Err(e) => Err(e),
         }
     }
 
@@ -168,9 +212,17 @@ impl TelegramClient {
     #[instrument(skip_all)]
     pub async fn get_file(&self, file_id: impl Into<String>) -> Result<File, TelegramError> {
         let file_id = file_id.into();
+        // getFile uses query params, but our request helper expects JSON body for POST or no body for GET.
+        // reqwest GET with body is technically allowed but getFile supports query params.
+        // We can just construct the URL with query params.
+        // Or cleaner: make request() support query params?
+        // Simpler: Just manual impl for get_file or change request() to take an enum for body/query.
+        // Let's manually invoke client for get_file to keep request() simple for JSON-RPC style calls.
+        
+        let url = self.api_url("getFile");
         let response: TelegramResponse<File> = self
             .client
-            .get(self.api_url("getFile"))
+            .get(&url)
             .query(&[("file_id", &file_id)])
             .send()
             .await?
@@ -202,28 +254,20 @@ impl TelegramClient {
         callback_query_id: impl Into<String>,
         text: Option<&str>,
     ) -> Result<bool, TelegramError> {
-        let mut params = vec![("callback_query_id", callback_query_id.into())];
-        if let Some(t) = text {
-            params.push(("text", t.to_string()));
+        // answerCallbackQuery is POST with JSON (or form)
+        #[derive(Serialize)]
+        struct AnswerCallbackQueryRequest<'a> {
+            callback_query_id: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            text: Option<&'a str>,
         }
 
-        let response: TelegramResponse<bool> = self
-            .client
-            .post(self.api_url("answerCallbackQuery"))
-            .form(&params)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let request = AnswerCallbackQueryRequest {
+            callback_query_id: callback_query_id.into(),
+            text,
+        };
 
-        if response.ok {
-            Ok(response.result.unwrap_or(true))
-        } else {
-            Err(TelegramError::Api {
-                code: response.error_code.unwrap_or(0),
-                description: response.description.unwrap_or_default(),
-            })
-        }
+        self.request("POST", "answerCallbackQuery", Some(&request), None).await
     }
 }
 
