@@ -878,21 +878,16 @@ impl CapabilityConstraints {
 }
 
 /// Rate limit scope - determines how rate limits are tracked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationRateLimitScope {
     /// Rate limit per connector instance (default).
+    #[default]
     PerConnector,
     /// Rate limit per zone.
     PerZone,
     /// Rate limit per principal (user/agent).
     PerPrincipal,
-}
-
-impl Default for OperationRateLimitScope {
-    fn default() -> Self {
-        Self::PerConnector
-    }
 }
 
 impl std::fmt::Display for OperationRateLimitScope {
@@ -939,7 +934,7 @@ pub struct RateLimit {
     pub scope: Option<String>,
 
     /// Pool name for shared rate limiting across operations.
-    /// Operations with the same pool_name share a single rate limit bucket.
+    /// Operations with the same `pool_name` share a single rate limit bucket.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_name: Option<String>,
 }
@@ -993,9 +988,9 @@ impl RateLimit {
 /// Error returned when rate limit validation fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RateLimitValidationError {
-    /// max (bucket size) must be > 0.
+    /// `max` (bucket size) must be > 0.
     ZeroMax,
-    /// per_ms (period) must be > 0.
+    /// `per_ms` (period) must be > 0.
     ZeroPeriod,
     /// Invalid scope value.
     InvalidScope { scope: String },

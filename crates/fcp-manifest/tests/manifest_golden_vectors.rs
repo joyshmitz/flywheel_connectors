@@ -1488,11 +1488,11 @@ fn rejects_invalid_rate_limit_shorthand() {
         Some(1),
     );
     let invalid_cases = [
-        "invalid",    // no slash
-        "60/week",    // invalid unit
-        "abc/min",    // non-numeric max
-        "/min",       // missing max
-        "60/",        // missing unit
+        "invalid", // no slash
+        "60/week", // invalid unit
+        "abc/min", // non-numeric max
+        "/min",    // missing max
+        "60/",     // missing unit
     ];
 
     for shorthand in invalid_cases {
