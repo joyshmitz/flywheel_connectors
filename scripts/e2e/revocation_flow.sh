@@ -61,6 +61,15 @@ json_or_null() {
   fi
 }
 
+json_number_or_null() {
+  local value="$1"
+  if [[ -z "${value}" ]]; then
+    printf 'null'
+  else
+    printf '%s' "${value}"
+  fi
+}
+
 log_step() {
   local step="$1"
   local step_number="$2"
@@ -71,15 +80,17 @@ log_step() {
   local correlation_id
   local token_json
   local propagation_json
+  local details
 
-  timestamp="$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")"
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   correlation_id="$(correlation_id_for_step "${step_number}")"
   token_json="$(json_or_null "${TOKEN_ID}")"
-  propagation_json="$(json_or_null "${PROPAGATION_MS}")"
+  propagation_json="$(json_number_or_null "${PROPAGATION_MS}")"
+  details="{\"token_id\":${token_json},\"propagation_time_ms\":${propagation_json}}"
 
   mkdir -p "$(dirname "${LOG_JSONL}")"
-  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"token_id":%s,"propagation_time_ms":%s,"result":"%s","artifacts":%s}\n' \
-    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${token_json}" "${propagation_json}" "${result}" "${artifacts_json}" >> "${LOG_JSONL}"
+  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
+    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
 }
 
 run_step() {

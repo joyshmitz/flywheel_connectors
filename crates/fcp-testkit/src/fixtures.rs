@@ -9,12 +9,20 @@ use fcp_core::{CapabilityToken, ConnectorId, HealthSnapshot};
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a test connector ID.
+///
+/// # Panics
+///
+/// Panics if the hard-coded connector ID is invalid.
 #[must_use]
 pub fn test_connector_id() -> ConnectorId {
     ConnectorId::new("test-connector", "test", "1.0.0").expect("valid connector id")
 }
 
 /// Create a connector ID with custom values.
+///
+/// # Panics
+///
+/// Panics if the provided connector ID components are invalid.
 #[must_use]
 pub fn connector_id(name: &str, archetype: &str, version: &str) -> ConnectorId {
     ConnectorId::new(name, archetype, version).expect("valid connector id")
@@ -86,7 +94,7 @@ pub mod json {
     /// Paginated response.
     #[must_use]
     pub fn paginated<T: serde::Serialize>(
-        items: Vec<T>,
+        items: &[T],
         total: usize,
         page: usize,
     ) -> serde_json::Value {

@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn chacha20_roundtrip() {
         let key = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(1);
         let plaintext = b"hello world";
         let aad = b"additional data";
 
@@ -455,7 +455,7 @@ mod tests {
     fn wrong_key_fails() {
         let key1 = AeadKey::generate();
         let key2 = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(2);
 
         let ciphertext = chacha20_encrypt(&key1, &nonce, b"secret", b"aad").unwrap();
         let result = chacha20_decrypt(&key2, &nonce, &ciphertext, b"aad");
@@ -466,8 +466,8 @@ mod tests {
     #[test]
     fn wrong_nonce_fails() {
         let key = AeadKey::generate();
-        let nonce1 = ChaCha20Nonce::generate();
-        let nonce2 = ChaCha20Nonce::generate();
+        let nonce1 = ChaCha20Nonce::from_counter(3);
+        let nonce2 = ChaCha20Nonce::from_counter(4);
 
         let ciphertext = chacha20_encrypt(&key, &nonce1, b"secret", b"aad").unwrap();
         let result = chacha20_decrypt(&key, &nonce2, &ciphertext, b"aad");
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn wrong_aad_fails() {
         let key = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(5);
 
         let ciphertext = chacha20_encrypt(&key, &nonce, b"secret", b"aad1").unwrap();
         let result = chacha20_decrypt(&key, &nonce, &ciphertext, b"aad2");
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn tampered_ciphertext_fails() {
         let key = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(6);
 
         let mut ciphertext = chacha20_encrypt(&key, &nonce, b"secret", b"aad").unwrap();
         ciphertext[0] ^= 0xff; // Flip bits
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn empty_plaintext() {
         let key = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(7);
 
         let ciphertext = chacha20_encrypt(&key, &nonce, b"", b"aad").unwrap();
         assert_eq!(ciphertext.len(), AEAD_TAG_SIZE); // Tag only
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn empty_aad() {
         let key = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(8);
         let plaintext = b"secret";
 
         let ciphertext = chacha20_encrypt(&key, &nonce, plaintext, b"").unwrap();
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn ciphertext_length() {
         let key = AeadKey::generate();
-        let nonce = ChaCha20Nonce::generate();
+        let nonce = ChaCha20Nonce::from_counter(9);
         let plaintext = b"hello";
 
         let ciphertext = chacha20_encrypt(&key, &nonce, plaintext, b"").unwrap();

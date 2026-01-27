@@ -313,6 +313,97 @@ These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use
 - **Gmail**: use a sandbox Gmail account; test list + search; avoid deletes.
 - **OpenAI/Anthropic**: use low-cost model; test minimal prompt invoke.
 
+### Command Templates (fcp-e2e connector mode)
+Build the connector binary first:
+```bash
+cargo build -p fcp-telegram
+cargo build -p fcp-discord
+cargo build -p fcp-twitter
+cargo build -p fcp-openai
+cargo build -p fcp-anthropic
+```
+
+**Common JSON-RPC request skeletons** (use with `--request '<json>'`):
+- Configure: `{"jsonrpc":"2.0","id":"1","method":"configure","params":{...}}`
+- Handshake:
+  ```json
+  {"jsonrpc":"2.0","id":"2","method":"handshake","params":{
+    "protocol_version":"2.0",
+    "zone":"z:work",
+    "zone_dir":null,
+    "host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    "nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    "capabilities_requested":[]
+  }}
+  ```
+- Health: `{"jsonrpc":"2.0","id":"3","method":"health","params":{}}`
+- Introspect: `{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}`
+- Invoke (example):
+  ```json
+  {"jsonrpc":"2.0","id":"5","method":"invoke","params":{
+    "operation":"<operation>",
+    "input":{...},
+    "capability_token":"<base64-cose-token>"
+  }}
+  ```
+
+**Telegram (bot token required)**:
+```bash
+fcp-e2e --connector-cmd target/debug/fcp-telegram \
+  --module telegram --test-name telegram_smoke \
+  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"token":"<BOT_TOKEN>"}}' \
+  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
+  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
+  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
+  --output artifacts/e2e/telegram/2026-01-27/run.jsonl
+```
+
+**Discord (bot token required)**:
+```bash
+fcp-e2e --connector-cmd target/debug/fcp-discord \
+  --module discord --test-name discord_smoke \
+  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"bot_token":"<BOT_TOKEN>"}}' \
+  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
+  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
+  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
+  --output artifacts/e2e/discord/2026-01-27/run.jsonl
+```
+
+**Twitter/X (OAuth 1.0a required)**:
+```bash
+fcp-e2e --connector-cmd target/debug/fcp-twitter \
+  --module twitter --test-name twitter_smoke \
+  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"consumer_key":"<CONSUMER_KEY>","consumer_secret":"<CONSUMER_SECRET>","access_token":"<ACCESS_TOKEN>","access_token_secret":"<ACCESS_TOKEN_SECRET>"}}' \
+  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
+  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
+  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
+  --output artifacts/e2e/twitter/2026-01-27/run.jsonl
+```
+
+**OpenAI (API key required)**:
+```bash
+fcp-e2e --connector-cmd target/debug/fcp-openai \
+  --module openai --test-name openai_smoke \
+  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"api_key":"<OPENAI_API_KEY>"}}' \
+  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
+  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
+  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
+  --output artifacts/e2e/openai/2026-01-27/run.jsonl
+```
+
+**Anthropic (API key required)**:
+```bash
+fcp-e2e --connector-cmd target/debug/fcp-anthropic \
+  --module anthropic --test-name anthropic_smoke \
+  --request '{"jsonrpc":"2.0","id":"1","method":"configure","params":{"api_key":"<ANTHROPIC_API_KEY>"}}' \
+  --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
+  --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
+  --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
+  --output artifacts/e2e/anthropic/2026-01-27/run.jsonl
+```
+
+**Invoke note:** connector `invoke` requires a valid `capability_token`. For manual runs, mint tokens via the host/mesh policy path (preferred). If running connectors directly, defer invoke until token minting is wired.
+
 ### Logging Checklist
 - Every step emits a JSONL entry with `timestamp`, `script`, `step`, `correlation_id`, `result`.
 - Attach artifacts (response payloads, receipts, decision receipts) in `artifacts`.

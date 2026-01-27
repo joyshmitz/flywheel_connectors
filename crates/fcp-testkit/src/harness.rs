@@ -41,7 +41,7 @@ pub struct ConnectorTestHarness<C> {
 
 impl<C: FcpConnector> ConnectorTestHarness<C> {
     /// Create a new test harness wrapping the given connector.
-    pub fn new(connector: C) -> Self {
+    pub const fn new(connector: C) -> Self {
         Self {
             connector,
             operations: Vec::new(),
@@ -51,12 +51,12 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
     }
 
     /// Get a reference to the inner connector.
-    pub fn connector(&self) -> &C {
+    pub const fn connector(&self) -> &C {
         &self.connector
     }
 
     /// Get a mutable reference to the inner connector.
-    pub fn connector_mut(&mut self) -> &mut C {
+    pub const fn connector_mut(&mut self) -> &mut C {
         &mut self.connector
     }
 
@@ -104,7 +104,7 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
 
         let result = self.connector.configure(config.clone()).await;
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         self.operations.push(RecordedOperation {
             operation: "configure".to_string(),
@@ -112,7 +112,7 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
             result: result
                 .as_ref()
                 .map(|()| serde_json::json!({}))
-                .map_err(|e| e.to_string()),
+                .map_err(ToString::to_string),
             duration_ms,
             timestamp: chrono::Utc::now(),
         });
@@ -144,7 +144,7 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
 
         let result = self.connector.health().await;
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         self.operations.push(RecordedOperation {
             operation: "health".to_string(),
@@ -164,7 +164,7 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
 
         let result = self.connector.introspect();
 
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         self.operations.push(RecordedOperation {
             operation: "introspect".to_string(),

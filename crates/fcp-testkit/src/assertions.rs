@@ -44,11 +44,11 @@ pub fn assert_error_type<T: std::fmt::Debug>(result: &FcpResult<T>, expected: &s
     }
 }
 
-/// Assert that a result is a NotConfigured error.
+/// Assert that a result is a `NotConfigured` error.
 ///
 /// # Panics
 ///
-/// Panics if the result is not a NotConfigured error.
+/// Panics if the result is not a `NotConfigured` error.
 pub fn assert_not_configured<T: std::fmt::Debug>(result: &FcpResult<T>) {
     match result {
         Err(FcpError::NotConfigured) => {}
@@ -56,11 +56,11 @@ pub fn assert_not_configured<T: std::fmt::Debug>(result: &FcpResult<T>) {
     }
 }
 
-/// Assert that a result is a NotHandshaken error.
+/// Assert that a result is a `NotHandshaken` error.
 ///
 /// # Panics
 ///
-/// Panics if the result is not a NotHandshaken error.
+/// Panics if the result is not a `NotHandshaken` error.
 pub fn assert_not_handshaken<T: std::fmt::Debug>(result: &FcpResult<T>) {
     match result {
         Err(FcpError::NotHandshaken) => {}
@@ -135,7 +135,7 @@ pub fn assert_has_result(response: &InvokeResponse) {
 /// Panics if result is not null/None.
 pub fn assert_no_result(response: &InvokeResponse) {
     if let Some(val) = &response.result {
-        assert!(val.is_null(), "Expected null result but got: {:?}", val);
+        assert!(val.is_null(), "Expected null result but got: {val:?}");
     }
 }
 
@@ -148,9 +148,7 @@ pub fn assert_result_has_field(response: &InvokeResponse, field: &str) {
     let result = response.result.as_ref().expect("Response has no result");
     assert!(
         result.get(field).is_some(),
-        "Expected field '{}' in result but got: {:?}",
-        field,
-        result
+        "Expected field '{field}' in result but got: {result:?}"
     );
 }
 
@@ -168,8 +166,7 @@ pub fn assert_result_field_eq(
     let actual = result.get(field).unwrap_or(&serde_json::Value::Null);
     assert_eq!(
         actual, expected,
-        "Expected field '{}' to equal {:?} but got {:?}",
-        field, expected, actual
+        "Expected field '{field}' to equal {expected:?} but got {actual:?}"
     );
 }
 
@@ -189,10 +186,7 @@ pub fn assert_json_has(value: &serde_json::Value, path: &str) {
     for part in &parts {
         match current.get(*part) {
             Some(v) => current = v,
-            None => panic!(
-                "Missing field '{}' in path '{}'. JSON: {:?}",
-                part, path, value
-            ),
+            None => panic!("Missing field '{part}' in path '{path}'. JSON: {value:?}"),
         }
     }
 }
@@ -222,8 +216,7 @@ pub fn assert_json_array_len(value: &serde_json::Value, expected_len: usize) {
     assert_eq!(
         array.len(),
         expected_len,
-        "Expected array of length {} but got {}",
-        expected_len,
+        "Expected array of length {expected_len} but got {}",
         array.len()
     );
 }
@@ -237,9 +230,7 @@ pub fn assert_json_string_contains(value: &serde_json::Value, pattern: &str) {
     let s = value.as_str().expect("Expected JSON string");
     assert!(
         s.contains(pattern),
-        "Expected string containing '{}' but got '{}'",
-        pattern,
-        s
+        "Expected string containing '{pattern}' but got '{s}'"
     );
 }
 
@@ -276,9 +267,7 @@ where
 
     assert!(
         elapsed >= min_duration,
-        "Expected operation to take at least {:?} but completed in {:?}",
-        min_duration,
-        elapsed
+        "Expected operation to take at least {min_duration:?} but completed in {elapsed:?}"
     );
 
     result
