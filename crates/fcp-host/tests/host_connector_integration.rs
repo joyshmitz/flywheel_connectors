@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fcp_conformance::schemas::validate_e2e_log_jsonl;
 use fcp_core::{
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
     Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId, ZoneId,
@@ -15,6 +14,7 @@ use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
     PreflightRequest, PreflightResponse,
 };
+use fcp_testkit::LogCapture;
 use serde_json::json;
 use tokio::sync::Mutex;
 
@@ -325,5 +325,7 @@ fn host_log_schema_example() {
     ));
 
     let payload = logger.to_json_lines();
-    validate_e2e_log_jsonl(&payload).expect("log schema should validate");
+    let capture = LogCapture::new();
+    capture.push_line(&payload);
+    capture.assert_valid();
 }

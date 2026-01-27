@@ -1824,6 +1824,7 @@ mod tests {
                 per_ms: 60000,
                 burst: Some(10),
                 scope: Some("per_zone".into()),
+                pool_name: None,
             }),
             requires_approval: Some(ApprovalMode::Policy),
         };

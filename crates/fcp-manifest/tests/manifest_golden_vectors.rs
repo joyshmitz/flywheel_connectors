@@ -1194,3 +1194,319 @@ fn parses_singleton_writer_state_model() {
         fcp_manifest::ConnectorStateModel::SingletonWriter
     ));
 }
+
+// =============================================================================
+// Rate Limit Validation Tests
+// =============================================================================
+
+#[test]
+fn accepts_valid_rate_limit_shorthand() {
+    let _log = TestLog::new(
+        "accepts_valid_rate_limit_shorthand",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        "rate_limit = \"60/min\"\nidempotency = \"none\"",
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest with rate limit");
+
+    let op = parsed
+        .provides
+        .operations
+        .get("test_op")
+        .expect("test_op exists");
+    let rate = op.rate_limit.as_ref().expect("rate_limit present");
+    assert_eq!(rate.as_inner().max, 60);
+    assert_eq!(rate.as_inner().per_ms, 60_000);
+}
+
+#[test]
+fn accepts_valid_rate_limit_structured() {
+    let _log = TestLog::new(
+        "accepts_valid_rate_limit_structured",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 100, per_ms = 60000, burst = 10, scope = "per_zone" }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
+
+    let op = parsed
+        .provides
+        .operations
+        .get("test_op")
+        .expect("test_op exists");
+    let rate = op.rate_limit.as_ref().expect("rate_limit present");
+    assert_eq!(rate.as_inner().max, 100);
+    assert_eq!(rate.as_inner().per_ms, 60_000);
+    assert_eq!(rate.as_inner().burst, Some(10));
+    assert_eq!(rate.as_inner().scope.as_deref(), Some("per_zone"));
+}
+
+#[test]
+fn accepts_rate_limit_with_pool_name() {
+    let _log = TestLog::new(
+        "accepts_rate_limit_with_pool_name",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 10, per_ms = 1000, pool_name = "api.global" }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let parsed = ConnectorManifest::parse_str(&with_hash).expect("valid manifest");
+
+    let op = parsed
+        .provides
+        .operations
+        .get("test_op")
+        .expect("test_op exists");
+    let rate = op.rate_limit.as_ref().expect("rate_limit present");
+    assert_eq!(rate.as_inner().pool_name.as_deref(), Some("api.global"));
+}
+
+#[test]
+fn rejects_rate_limit_zero_max() {
+    let _log = TestLog::new(
+        "rejects_rate_limit_zero_max",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 0, per_ms = 60000 }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    assert!(matches!(err, ManifestError::RateLimit(_)));
+    assert!(err.to_string().contains("max"));
+}
+
+#[test]
+fn rejects_rate_limit_zero_period() {
+    let _log = TestLog::new(
+        "rejects_rate_limit_zero_period",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 60, per_ms = 0 }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    assert!(matches!(err, ManifestError::RateLimit(_)));
+    assert!(err.to_string().contains("per_ms"));
+}
+
+#[test]
+fn rejects_rate_limit_invalid_scope() {
+    let _log = TestLog::new(
+        "rejects_rate_limit_invalid_scope",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 60, per_ms = 60000, scope = "invalid_scope" }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    assert!(matches!(err, ManifestError::RateLimit(_)));
+    assert!(err.to_string().contains("scope"));
+}
+
+#[test]
+fn rejects_rate_limit_empty_pool_name() {
+    let _log = TestLog::new(
+        "rejects_rate_limit_empty_pool_name",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 60, per_ms = 60000, pool_name = "" }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    assert!(matches!(err, ManifestError::RateLimit(_)));
+    assert!(err.to_string().contains("pool_name"));
+}
+
+#[test]
+fn rejects_rate_limit_invalid_pool_name() {
+    let _log = TestLog::new(
+        "rejects_rate_limit_invalid_pool_name",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "idempotency = \"none\"",
+        r#"rate_limit = { max = 60, per_ms = 60000, pool_name = "pool with spaces!" }
+idempotency = "none""#,
+    );
+    let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+    let hash = unchecked.compute_interface_hash().expect("compute hash");
+    let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+    let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+    assert!(matches!(err, ManifestError::RateLimit(_)));
+    assert!(err.to_string().contains("pool_name"));
+}
+
+#[test]
+fn accepts_all_valid_rate_limit_scopes() {
+    let _log = TestLog::new(
+        "accepts_all_valid_rate_limit_scopes",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    for scope in ["per_connector", "per_zone", "per_principal"] {
+        let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+            "idempotency = \"none\"",
+            &format!(
+                r#"rate_limit = {{ max = 60, per_ms = 60000, scope = "{scope}" }}
+idempotency = "none""#
+            ),
+        );
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+        let parsed = ConnectorManifest::parse_str(&with_hash)
+            .unwrap_or_else(|_| panic!("scope {scope} should be valid"));
+
+        let op = parsed
+            .provides
+            .operations
+            .get("test_op")
+            .expect("test_op exists");
+        let rate = op.rate_limit.as_ref().expect("rate_limit present");
+        assert_eq!(rate.as_inner().scope.as_deref(), Some(scope));
+    }
+}
+
+#[test]
+fn accepts_rate_limit_shorthand_units() {
+    let _log = TestLog::new(
+        "accepts_rate_limit_shorthand_units",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let test_cases = [
+        ("10/sec", 10, 1_000),
+        ("10/s", 10, 1_000),
+        ("60/min", 60, 60_000),
+        ("60/m", 60, 60_000),
+        ("100/hour", 100, 3_600_000),
+        ("100/h", 100, 3_600_000),
+        ("1000/day", 1000, 86_400_000),
+        ("1000/d", 1000, 86_400_000),
+    ];
+
+    for (shorthand, expected_max, expected_per_ms) in test_cases {
+        let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+            "idempotency = \"none\"",
+            &format!(
+                r#"rate_limit = "{shorthand}"
+idempotency = "none""#
+            ),
+        );
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = toml.replace(PLACEHOLDER_HASH, &hash.to_string());
+        let parsed = ConnectorManifest::parse_str(&with_hash)
+            .unwrap_or_else(|_| panic!("shorthand {shorthand} should be valid"));
+
+        let op = parsed
+            .provides
+            .operations
+            .get("test_op")
+            .expect("test_op exists");
+        let rate = op.rate_limit.as_ref().expect("rate_limit present");
+        assert_eq!(rate.as_inner().max, expected_max, "shorthand: {shorthand}");
+        assert_eq!(
+            rate.as_inner().per_ms,
+            expected_per_ms,
+            "shorthand: {shorthand}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_rate_limit_shorthand() {
+    let _log = TestLog::new(
+        "rejects_invalid_rate_limit_shorthand",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let invalid_cases = [
+        "invalid",    // no slash
+        "60/week",    // invalid unit
+        "abc/min",    // non-numeric max
+        "/min",       // missing max
+        "60/",        // missing unit
+    ];
+
+    for shorthand in invalid_cases {
+        let toml = base_manifest_toml(PLACEHOLDER_HASH).replace(
+            "idempotency = \"none\"",
+            &format!(
+                r#"rate_limit = "{shorthand}"
+idempotency = "none""#
+            ),
+        );
+        let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Toml(_)),
+            "shorthand {shorthand} should fail: got {err}"
+        );
+    }
+}
