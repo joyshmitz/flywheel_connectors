@@ -8,6 +8,7 @@
 //! - Platform-specific sandbox availability
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Duration;
 
 use fcp_manifest::{SandboxProfile, SandboxSection};
@@ -381,4 +382,173 @@ fn test_canary_connector_permissive_profile() {
 
     // Should allow direct network (so verify_network_blocked fails)
     assert!(sandbox.verify_network_blocked(&policy).is_err());
+}
+
+// ============================================================================
+// OS Sandbox Apply Integration Tests (Linux)
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+mod linux_apply_integration {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    const CHILD_ENV: &str = "FCP_SANDBOX_CHILD";
+
+    fn run_child(test_name: &str, mode: &str) -> std::process::ExitStatus {
+        let exe = std::env::current_exe().expect("current_exe");
+        Command::new(exe)
+            .env(CHILD_ENV, mode)
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .status()
+            .expect("spawn child test")
+    }
+
+    #[test]
+    fn sandbox_child_network_blocked() {
+        let mode = std::env::var(CHILD_ENV).unwrap_or_default();
+        if mode != "network" {
+            return;
+        }
+
+        let manifest = strict_manifest();
+        let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
+        let sandbox = create_sandbox().unwrap();
+
+        if let Err(err) = sandbox.apply(&policy) {
+            eprintln!("skipping sandbox apply (network test): {err}");
+            std::process::exit(125);
+        }
+
+        // Attempt direct network access; seccomp should kill the process.
+        let _ = std::net::TcpStream::connect("1.1.1.1:80");
+
+        // If we made it here, sandbox did not block as expected.
+        std::process::exit(1);
+    }
+
+    #[test]
+    fn test_sandbox_blocks_network_syscalls_strict() {
+        let status = run_child("sandbox_child_network_blocked", "network");
+
+        if status.code() == Some(125) {
+            eprintln!("skipping network syscall enforcement test (sandbox apply failed)");
+            return;
+        }
+
+        assert!(!status.success(), "expected network syscall to be blocked");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGSYS),
+            "expected SIGSYS from seccomp on network syscall"
+        );
+    }
+
+    #[test]
+    fn sandbox_child_exec_denied() {
+        let mode = std::env::var(CHILD_ENV).unwrap_or_default();
+        if mode != "exec" {
+            return;
+        }
+
+        let manifest = strict_manifest();
+        let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
+        let sandbox = create_sandbox().unwrap();
+
+        if let Err(err) = sandbox.apply(&policy) {
+            eprintln!("skipping sandbox apply (exec denied test): {err}");
+            std::process::exit(125);
+        }
+
+        let _ = Command::new("/bin/true").status();
+        std::process::exit(1);
+    }
+
+    #[test]
+    fn test_sandbox_blocks_exec_strict() {
+        let status = run_child("sandbox_child_exec_denied", "exec");
+
+        if status.code() == Some(125) {
+            eprintln!("skipping exec syscall enforcement test (sandbox apply failed)");
+            return;
+        }
+
+        assert!(!status.success(), "expected exec syscall to be blocked");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGSYS),
+            "expected SIGSYS from seccomp on exec syscall"
+        );
+    }
+
+    #[test]
+    fn sandbox_child_exec_allowed_permissive() {
+        let mode = std::env::var(CHILD_ENV).unwrap_or_default();
+        if mode != "exec_ok" {
+            return;
+        }
+
+        let manifest = permissive_manifest();
+        let policy = CompiledPolicy::from_manifest(&manifest, None).unwrap();
+        let sandbox = create_sandbox().unwrap();
+
+        if let Err(err) = sandbox.apply(&policy) {
+            eprintln!("skipping sandbox apply (exec allowed test): {err}");
+            std::process::exit(125);
+        }
+
+        let status = Command::new("/bin/true").status().expect("exec /bin/true");
+        if status.success() {
+            std::process::exit(0);
+        }
+
+        std::process::exit(1);
+    }
+
+    #[test]
+    fn test_sandbox_allows_exec_permissive() {
+        let status = run_child("sandbox_child_exec_allowed_permissive", "exec_ok");
+
+        if status.code() == Some(125) {
+            eprintln!("skipping permissive exec test (sandbox apply failed)");
+            return;
+        }
+
+        assert!(
+            status.success(),
+            "expected permissive sandbox to allow exec"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+mod non_linux_apply_integration {
+    use super::*;
+
+    #[test]
+    fn test_sandbox_apply_skipped_non_linux() {
+        let sandbox = match create_sandbox() {
+            Ok(sandbox) => sandbox,
+            Err(err) => {
+                eprintln!("skipping sandbox apply integration: {err}");
+                return;
+            }
+        };
+        if !sandbox.is_available() {
+            eprintln!(
+                "skipping sandbox apply integration: platform {} not available",
+                sandbox.platform_name()
+            );
+            return;
+        }
+
+        // If available, we still avoid applying in tests on non-Linux to prevent
+        // platform-specific side effects. This keeps the skip explicit.
+        eprintln!(
+            "skipping sandbox apply integration on {} in tests",
+            sandbox.platform_name()
+        );
+    }
 }

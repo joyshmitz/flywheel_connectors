@@ -11,6 +11,7 @@
 //! All tests emit structured JSON for audit compliance.
 
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use fcp_manifest::{NetworkConstraints, SandboxProfile, SandboxSection};
 use fcp_sandbox::{
@@ -19,6 +20,77 @@ use fcp_sandbox::{
     TlsVerifier, canonicalize_hostname, create_sandbox, is_hostname_canonical, is_link_local,
     is_localhost, is_private_range, is_tailnet_range,
 };
+use tracing_subscriber::fmt::MakeWriter;
+
+// ============================================================================
+// Structured Logging Helpers
+// ============================================================================
+
+#[derive(Clone)]
+struct SharedWriter {
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buf
+            .lock()
+            .expect("log buffer lock poisoned")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct SharedMakeWriter {
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl<'a> MakeWriter<'a> for SharedMakeWriter {
+    type Writer = SharedWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        SharedWriter {
+            buf: self.buf.clone(),
+        }
+    }
+}
+
+static LOG_BUF: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+static LOG_INIT: Once = Once::new();
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+
+fn init_json_logger() -> Arc<Mutex<Vec<u8>>> {
+    let buf = LOG_BUF
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone();
+
+    LOG_INIT.call_once(|| {
+        let make_writer = SharedMakeWriter { buf: buf.clone() };
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::WARN)
+            .with_current_span(false)
+            .with_span_list(false)
+            .with_writer(make_writer)
+            .finish();
+
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+
+    buf
+}
+
+fn take_log_lines(buf: &Arc<Mutex<Vec<u8>>>) -> Vec<String> {
+    let mut guard = buf.lock().expect("log buffer lock poisoned");
+    let bytes = std::mem::take(&mut *guard);
+    drop(guard);
+    let text = String::from_utf8_lossy(&bytes);
+    text.lines().map(str::to_string).collect()
+}
 
 // ============================================================================
 // Test Fixtures
@@ -1345,5 +1417,65 @@ mod canary {
 
         // Direct network allowed (verify_network_blocked returns Err)
         assert!(sandbox.verify_network_blocked(&policy).is_err());
+    }
+}
+
+// ============================================================================
+// Structured Logging Tests
+// ============================================================================
+
+mod structured_logging {
+    use super::*;
+
+    #[test]
+    fn test_egress_denial_emits_structured_log() {
+        let _guard = LOG_LOCK.lock().expect("log lock poisoned");
+        let buf = init_json_logger();
+        buf.lock().expect("log buffer lock poisoned").clear();
+
+        let guard = EgressGuard::new();
+        let constraints = strict_constraints();
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://evil.example.com/data".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let result = guard.evaluate(&request, &constraints);
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::HostNotAllowed,
+                ..
+            })
+        ));
+
+        let lines = take_log_lines(&buf);
+        assert!(!lines.is_empty(), "expected JSON logs from egress denial");
+
+        let mut found = false;
+        for line in lines {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+
+            let host = value
+                .get("fields")
+                .and_then(|fields| fields.get("host"))
+                .and_then(|host| host.as_str());
+
+            if host == Some("evil.example.com") {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(
+            found,
+            "expected structured log entry with host field for denial"
+        );
     }
 }
