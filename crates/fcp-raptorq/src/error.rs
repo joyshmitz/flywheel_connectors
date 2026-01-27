@@ -101,6 +101,13 @@ pub enum DecodeError {
         /// Reason the symbol is invalid.
         reason: String,
     },
+
+    /// Invalid transmission information (OTI).
+    #[error("invalid transmission info: {reason}")]
+    InvalidTransmissionInfo {
+        /// Reason the OTI is invalid.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
