@@ -920,6 +920,18 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use fcp_testkit::MockApiServer;
 
+    #[test]
+    fn scan_log_report_flags_secret() {
+        let input = r#"{"token":"sk-abc123def456ghi789jkl012mno345pqr"}"#;
+        let report = scan_log_jsonl(input);
+        assert_eq!(report.error_count, 1);
+        assert_eq!(report.warn_count, 0);
+        assert_eq!(report.findings.len(), 1);
+        let finding = &report.findings[0];
+        assert_eq!(finding.rule_id, "OPENAI_API_KEY");
+        assert!(finding.context_redacted.contains("<redacted>"));
+    }
+
     #[derive(Debug)]
     struct DummyConnector {
         base: BaseConnector,
