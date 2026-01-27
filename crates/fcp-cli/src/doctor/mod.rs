@@ -232,8 +232,10 @@ fn build_degraded_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
             "checkpoint_integrity",
             "Checkpoint signature verified",
         ))
-        .add_check(CheckResult::warn("checkpoint_age", "Checkpoint is 5 minutes old")
-            .with_reason_code("FCP-5001"))
+        .add_check(
+            CheckResult::warn("checkpoint_age", "Checkpoint is 5 minutes old")
+                .with_reason_code("FCP-5001"),
+        )
         .add_check(CheckResult::ok(
             "revocation_chain",
             "Revocation chain is unbroken",
@@ -288,10 +290,13 @@ fn build_stale_checkpoint_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
             }],
             since: Some(now - 3000),
         })
-        .add_check(CheckResult::fail(
-            "checkpoint_freshness",
-            "Checkpoint exceeds max-stale threshold (1h > 30m)",
-        ).with_reason_code("FCP-5002"))
+        .add_check(
+            CheckResult::fail(
+                "checkpoint_freshness",
+                "Checkpoint exceeds max-stale threshold (1h > 30m)",
+            )
+            .with_reason_code("FCP-5002"),
+        )
         .add_check(CheckResult::ok(
             "revocation_chain",
             "Revocation chain is unbroken",
@@ -350,10 +355,13 @@ fn build_stale_revocation_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
             "checkpoint_integrity",
             "Checkpoint signature verified",
         ))
-        .add_check(CheckResult::fail(
-            "revocation_freshness",
-            "Revocation list exceeds max-stale threshold (2h > 1h)",
-        ).with_reason_code("FCP-5003"))
+        .add_check(
+            CheckResult::fail(
+                "revocation_freshness",
+                "Revocation list exceeds max-stale threshold (2h > 1h)",
+            )
+            .with_reason_code("FCP-5003"),
+        )
         .build()
 }
 
@@ -410,14 +418,14 @@ fn build_network_partition_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
             ],
             since: Some(now - 600),
         })
-        .add_check(CheckResult::warn(
-            "network_connectivity",
-            "2 of 3 peer nodes unreachable",
-        ).with_reason_code("FCP-6001"))
-        .add_check(CheckResult::warn(
-            "derp_relay",
-            "DERP relay connection failed",
-        ).with_reason_code("FCP-6002"))
+        .add_check(
+            CheckResult::warn("network_connectivity", "2 of 3 peer nodes unreachable")
+                .with_reason_code("FCP-6001"),
+        )
+        .add_check(
+            CheckResult::warn("derp_relay", "DERP relay connection failed")
+                .with_reason_code("FCP-6002"),
+        )
         .add_check(CheckResult::ok(
             "checkpoint_integrity",
             "Local checkpoint signature verified",
@@ -476,10 +484,10 @@ fn build_low_coverage_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
             "checkpoint_integrity",
             "Checkpoint signature verified",
         ))
-        .add_check(CheckResult::warn(
-            "store_coverage",
-            "Coverage at 66%, below 70% threshold",
-        ).with_reason_code("FCP-7001"))
+        .add_check(
+            CheckResult::warn("store_coverage", "Coverage at 66%, below 70% threshold")
+                .with_reason_code("FCP-7001"),
+        )
         .add_check(CheckResult::ok(
             "revocation_chain",
             "Revocation chain is unbroken",
@@ -540,18 +548,21 @@ fn build_critical_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
             ],
             since: Some(now),
         })
-        .add_check(CheckResult::fail(
-            "zone_bootstrap",
-            "Zone has not completed bootstrap",
-        ).with_reason_code("FCP-9001"))
-        .add_check(CheckResult::fail(
-            "checkpoint_availability",
-            "No checkpoint object found",
-        ).with_reason_code("FCP-9003"))
-        .add_check(CheckResult::fail(
-            "transport_paths",
-            "No transport paths available (LAN/DERP/Funnel all disabled)",
-        ).with_reason_code("FCP-9002"))
+        .add_check(
+            CheckResult::fail("zone_bootstrap", "Zone has not completed bootstrap")
+                .with_reason_code("FCP-9001"),
+        )
+        .add_check(
+            CheckResult::fail("checkpoint_availability", "No checkpoint object found")
+                .with_reason_code("FCP-9003"),
+        )
+        .add_check(
+            CheckResult::fail(
+                "transport_paths",
+                "No transport paths available (LAN/DERP/Funnel all disabled)",
+            )
+            .with_reason_code("FCP-9002"),
+        )
         .build()
 }
 
@@ -658,7 +669,11 @@ fn print_human_readable(report: &DoctorReport) {
     );
     println!(
         "  Revocation:   {}%",
-        report.store_coverage.revocation_head_coverage_bps.unwrap_or(0) / 100
+        report
+            .store_coverage
+            .revocation_head_coverage_bps
+            .unwrap_or(0)
+            / 100
     );
     if let Some(reason) = &report.store_coverage.reason {
         println!("                {dim}{reason}{reset}");
@@ -669,7 +684,10 @@ fn print_human_readable(report: &DoctorReport) {
     if report.degraded_mode.is_degraded {
         println!("{yellow}Degraded Mode:{reset}");
         for reason in &report.degraded_mode.reasons {
-            println!("  {yellow}⚠ [{}]{reset} {}", reason.code, reason.description);
+            println!(
+                "  {yellow}⚠ [{}]{reset} {}",
+                reason.code, reason.description
+            );
         }
         if let Some(since) = report.degraded_mode.since {
             let duration = report.generated_at.timestamp() as u64 - since;

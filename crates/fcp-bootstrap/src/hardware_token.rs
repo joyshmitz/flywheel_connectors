@@ -30,6 +30,7 @@ pub struct DetectedToken {
 
 impl DetectedToken {
     /// Check if this token supports Ed25519.
+    #[must_use]
     pub fn supports_ed25519(&self) -> bool {
         self.mechanisms
             .iter()
@@ -37,6 +38,7 @@ impl DetectedToken {
     }
 
     /// Check if this token supports ECDH for X25519.
+    #[must_use]
     pub fn supports_x25519(&self) -> bool {
         self.mechanisms
             .iter()
@@ -60,6 +62,10 @@ pub trait HardwareTokenProvider: Send + Sync {
     fn list_tokens(&self) -> Vec<DetectedToken>;
 
     /// Generate an Ed25519 keypair on the token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a token error if key generation fails or the token is unavailable.
     fn generate_keypair(
         &self,
         token: &DetectedToken,
@@ -68,6 +74,10 @@ pub trait HardwareTokenProvider: Send + Sync {
     ) -> Result<[u8; 32], TokenError>;
 
     /// Sign data with a key on the token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a token error if signing fails or the token is unavailable.
     fn sign(
         &self,
         token: &DetectedToken,
@@ -130,6 +140,7 @@ impl TokenDetector {
     }
 
     /// Detect all available tokens.
+    #[must_use]
     pub fn detect_all(&self) -> Vec<DetectedToken> {
         let mut tokens = Vec::new();
 
@@ -145,6 +156,7 @@ impl TokenDetector {
     }
 
     /// Detect tokens that support the required mechanisms for FCP.
+    #[must_use]
     pub fn detect_fcp_compatible(&self) -> Vec<DetectedToken> {
         self.detect_all()
             .into_iter()
