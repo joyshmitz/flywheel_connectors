@@ -97,6 +97,7 @@ mod syscall_nr {
     pub const FORK: u32 = 57;
     pub const VFORK: u32 = 58;
     pub const EXECVE: u32 = 59;
+    pub const EXECVEAT: u32 = 322;
     pub const EXIT: u32 = 60;
     pub const WAIT4: u32 = 61;
     pub const KILL: u32 = 62;
@@ -196,6 +197,7 @@ mod syscall_nr {
     pub const EXIT_GROUP: u32 = 94;
     pub const CLONE: u32 = 220;
     pub const EXECVE: u32 = 221;
+    pub const EXECVEAT: u32 = 281;
     pub const MMAP: u32 = 222;
     pub const MPROTECT: u32 = 226;
     pub const MUNMAP: u32 = 215;
@@ -409,7 +411,7 @@ impl LinuxSandbox {
 
         // Process creation syscalls (if exec is allowed)
         if !policy.deny_exec {
-            allowed.extend([CLONE, CLONE3, FORK, VFORK, EXECVE, WAIT4]);
+            allowed.extend([CLONE, CLONE3, FORK, VFORK, EXECVE, EXECVEAT, WAIT4]);
         }
 
         // Ptrace (if allowed)
@@ -446,7 +448,7 @@ impl LinuxSandbox {
         }
 
         if !policy.deny_exec {
-            allowed.extend([CLONE, EXECVE]);
+            allowed.extend([CLONE, EXECVE, EXECVEAT]);
         }
 
         if !policy.deny_ptrace {
