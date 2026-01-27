@@ -10,6 +10,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::schemas::{SchemaValidationError, validate_e2e_log_jsonl};
 use chrono::{DateTime, TimeZone, Utc};
 use fcp_mesh::{MeshNode, MeshNodeConfig};
 use fcp_store::{
@@ -275,6 +276,12 @@ impl LogCollector {
             .filter_map(|entry| serde_json::to_string(&entry).ok())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Validate the JSONL output against the E2E log schema (v1).
+    pub fn validate_jsonl(&self) -> Result<(), SchemaValidationError> {
+        let payload = self.to_jsonl();
+        validate_e2e_log_jsonl(&payload)
     }
 }
 

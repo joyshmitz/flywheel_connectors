@@ -17,6 +17,7 @@ serde_json.workspace = true
 hex.workspace = true
 semver.workspace = true
 chrono.workspace = true
+jsonschema.workspace = true
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }
@@ -30,4 +31,3 @@ fcp-tailscale = { path = "../fcp-tailscale" }
 
 [dev-dependencies]
 pretty_assertions.workspace = true
-jsonschema.workspace = true

@@ -76,6 +76,17 @@ impl E2eLogEntry {
             context: redact_secrets(&context),
         }
     }
+
+    /// Validate this log entry against the shared E2E schema.
+    ///
+    /// # Errors
+    /// Returns [`LogSchemaError`] if required fields are missing or malformed.
+    pub fn validate(&self) -> Result<(), LogSchemaError> {
+        let value = serde_json::to_value(self).map_err(|err| LogSchemaError::InvalidJson {
+            message: err.to_string(),
+        })?;
+        validate_log_entry_value(&value)
+    }
 }
 
 /// Logger that collects E2E log entries in memory.
@@ -132,6 +143,159 @@ impl E2eLogger {
     }
 }
 
+/// Errors for log schema validation.
+#[derive(Debug, thiserror::Error)]
+pub enum LogSchemaError {
+    /// JSON serialization failure.
+    #[error("invalid json: {message}")]
+    InvalidJson { message: String },
+    /// Missing required field.
+    #[error("missing required field: {field}")]
+    MissingField { field: &'static str },
+    /// Invalid field type or value.
+    #[error("invalid field {field}: {message}")]
+    InvalidField {
+        field: &'static str,
+        message: String,
+    },
+}
+
+/// Validate an arbitrary JSON value against the shared E2E log schema.
+///
+/// This accepts both harness logs (`test_name`, `phase`) and script logs
+/// (`script`, `step`) as long as the required base fields are present.
+pub fn validate_log_entry_value(value: &serde_json::Value) -> Result<(), LogSchemaError> {
+    let obj = value.as_object().ok_or(LogSchemaError::InvalidField {
+        field: "root",
+        message: "expected object".to_string(),
+    })?;
+
+    require_string(obj, "timestamp")?;
+    require_string(obj, "result")?;
+    require_string(obj, "correlation_id")?;
+    require_u64(obj, "duration_ms")?;
+
+    let result = obj.get("result").and_then(|val| val.as_str()).unwrap_or("");
+    if result != "pass" && result != "fail" {
+        return Err(LogSchemaError::InvalidField {
+            field: "result",
+            message: "must be 'pass' or 'fail'".to_string(),
+        });
+    }
+
+    let has_test_name = obj
+        .get("test_name")
+        .and_then(|val| val.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let has_script = obj
+        .get("script")
+        .and_then(|val| val.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_test_name && !has_script {
+        return Err(LogSchemaError::MissingField {
+            field: "test_name|script",
+        });
+    }
+
+    let has_phase = obj
+        .get("phase")
+        .and_then(|val| val.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    let has_step = obj
+        .get("step")
+        .and_then(|val| val.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !has_phase && !has_step {
+        return Err(LogSchemaError::MissingField {
+            field: "phase|step",
+        });
+    }
+
+    if let Some(level) = obj.get("level") {
+        if level.as_str().is_none() {
+            return Err(LogSchemaError::InvalidField {
+                field: "level",
+                message: "must be string".to_string(),
+            });
+        }
+    }
+
+    if let Some(assertions) = obj.get("assertions") {
+        let assertions_obj = assertions.as_object().ok_or(LogSchemaError::InvalidField {
+            field: "assertions",
+            message: "expected object".to_string(),
+        })?;
+        require_u64_from(assertions_obj, "passed", "assertions.passed")?;
+        require_u64_from(assertions_obj, "failed", "assertions.failed")?;
+    }
+
+    if let Some(artifacts) = obj.get("artifacts") {
+        let array = artifacts.as_array().ok_or(LogSchemaError::InvalidField {
+            field: "artifacts",
+            message: "expected array".to_string(),
+        })?;
+        for (idx, item) in array.iter().enumerate() {
+            if item.as_str().is_none() {
+                return Err(LogSchemaError::InvalidField {
+                    field: "artifacts",
+                    message: format!("entry {idx} must be string"),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn require_string(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<(), LogSchemaError> {
+    let value = obj
+        .get(field)
+        .and_then(|val| val.as_str())
+        .ok_or(LogSchemaError::MissingField { field })?;
+    if value.is_empty() {
+        return Err(LogSchemaError::InvalidField {
+            field,
+            message: "must be non-empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn require_u64(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<(), LogSchemaError> {
+    require_u64_from(obj, field, field)
+}
+
+fn require_u64_from(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    display_field: &'static str,
+) -> Result<(), LogSchemaError> {
+    let value = obj.get(field).ok_or(LogSchemaError::MissingField {
+        field: display_field,
+    })?;
+    let ok = match value {
+        serde_json::Value::Number(num) => num.as_u64().is_some(),
+        _ => false,
+    };
+    if !ok {
+        return Err(LogSchemaError::InvalidField {
+            field: display_field,
+            message: "must be unsigned integer".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -152,6 +316,52 @@ fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
             serde_json::Value::Array(values.iter().map(redact_secrets).collect())
         }
         other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AssertionsSummary, E2eLogEntry, validate_log_entry_value};
+    use serde_json::json;
+
+    #[test]
+    fn validate_harness_log_entry() {
+        let entry = E2eLogEntry::new(
+            "info",
+            "test_harness",
+            "fcp-e2e",
+            "execute",
+            "00000000-0000-4000-8000-000000000000",
+            "pass",
+            12,
+            AssertionsSummary::new(3, 0),
+            json!({"zone_id": "z:work"}),
+        );
+        entry.validate().expect("entry should validate");
+    }
+
+    #[test]
+    fn validate_script_log_entry() {
+        let entry = json!({
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "e2e_happy_path",
+            "step": "invoke",
+            "step_number": 4,
+            "correlation_id": "00000000-0000-4000-8000-000000000000",
+            "duration_ms": 25,
+            "result": "pass",
+            "artifacts": ["receipt.cbor"]
+        });
+        validate_log_entry_value(&entry).expect("script entry should validate");
+    }
+
+    #[test]
+    fn reject_missing_core_fields() {
+        let entry = json!({
+            "script": "e2e_happy_path",
+            "step": "invoke"
+        });
+        assert!(validate_log_entry_value(&entry).is_err());
     }
 }
 

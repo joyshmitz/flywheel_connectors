@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flywheel.dev/schemas/fcp-e2e-log-1.schema.json",
+  "title": "FCP2 E2E Log Entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "timestamp",
+    "real_time",
+    "node_id",
+    "test_name",
+    "phase",
+    "correlation_id",
+    "event_type",
+    "details"
+  ],
+  "properties": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Simulated timestamp (RFC3339 UTC)."
+    },
+    "real_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Wall-clock timestamp (RFC3339 UTC)."
+    },
+    "node_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Node identifier emitting the log entry."
+    },
+    "test_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Scenario or test name."
+    },
+    "phase": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Phase within the test scenario."
+    },
+    "correlation_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Correlation identifier for tracing."
+    },
+    "event_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Event category (e.g., session_established, symbol_routed, denial)."
+    },
+    "details": {
+      "description": "Optional structured details payload.",
+      "type": ["object", "array", "string", "number", "boolean", "null"]
+    }
+  }
+}

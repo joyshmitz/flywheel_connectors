@@ -5,7 +5,7 @@
 //! - Rejection of forbidden constructs (negative tests)
 //! - Deterministic validation behavior
 
-use super::FZPF_V01_SCHEMA;
+use super::{E2E_LOG_V1_SCHEMA, FZPF_V01_SCHEMA};
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -23,6 +23,7 @@ mod examples {
     pub const TRANSPORT_RESTRICTIONS: &str = include_str!("examples/transport_restrictions.json");
     pub const FRESHNESS_POLICY: &str = include_str!("examples/freshness_policy.json");
     pub const TAINT_APPROVAL: &str = include_str!("examples/taint_approval.json");
+    pub const E2E_LOG_MINIMAL: &str = include_str!("examples/e2e_log_minimal.json");
 }
 
 // ============================================================================
@@ -214,6 +215,49 @@ fn reject_invalid_confidentiality_level() {
             "Confidentiality level {level} should be rejected (must be 0-100)",
         );
     }
+}
+
+// ============================================================================
+// E2E Log Schema Validation
+// ============================================================================
+
+fn load_e2e_log_schema() -> Validator {
+    let schema: Value =
+        serde_json::from_str(E2E_LOG_V1_SCHEMA).expect("E2E log schema should be valid JSON");
+    Validator::new(&schema).expect("E2E log schema should be a valid JSON Schema")
+}
+
+#[test]
+fn valid_e2e_log_entry() {
+    let validator = load_e2e_log_schema();
+    let doc: Value = serde_json::from_str(examples::E2E_LOG_MINIMAL)
+        .expect("e2e_log_minimal.json should be valid JSON");
+    let result = validator.validate(&doc);
+    assert!(
+        result.is_ok(),
+        "e2e_log_minimal.json should validate: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+}
+
+#[test]
+fn reject_missing_e2e_log_fields() {
+    let validator = load_e2e_log_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "node_id": "node-0",
+            "test_name": "missing-fields",
+            "phase": "execute",
+            "event_type": "symbol_routed",
+            "details": {}
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "Log entry missing required fields should be rejected"
+    );
 }
 
 #[test]

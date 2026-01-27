@@ -1,0 +1,15 @@
+{
+  "timestamp": "2026-01-27T00:00:00Z",
+  "real_time": "2026-01-27T00:00:01Z",
+  "node_id": "node-0",
+  "test_name": "test_symbol_routing",
+  "phase": "execute",
+  "correlation_id": "2b9735b4-5aa0-4f6e-8d3d-2c2a5d74ad8a",
+  "event_type": "symbol_routed",
+  "details": {
+    "source_node": "node-0",
+    "target_node": "node-2",
+    "hops": 1,
+    "result": "pass"
+  }
+}

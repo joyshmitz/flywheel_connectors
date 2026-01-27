@@ -293,6 +293,19 @@ fn init_test_logging() {
 }
 ```
 
+#### 6.1.1 E2E Log JSONL Schema (Required)
+
+The canonical JSON Schema for E2E log entries lives at:
+
+- `crates/fcp-conformance/src/schemas/E2E_Log_v1.schema.json`
+
+Validation helpers are available via:
+
+- `fcp_conformance::schemas::validate_e2e_log_entry`
+- `fcp_conformance::schemas::validate_e2e_log_jsonl`
+
+All E2E harness outputs MUST validate against the v1 schema.
+
 ### 6.2 Required Log Fields
 
 Every log entry MUST include:

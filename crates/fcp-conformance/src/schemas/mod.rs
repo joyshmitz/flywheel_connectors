@@ -30,8 +30,73 @@
 //! assert!(result.is_ok());
 //! ```
 
+use jsonschema::Validator;
+use serde_json::Value;
+
 /// The FZPF v0.1 JSON Schema as a string constant.
 pub const FZPF_V01_SCHEMA: &str = include_str!("FZPF_v0.1.schema.json");
+
+/// The E2E harness JSONL log schema (v1).
+pub const E2E_LOG_V1_SCHEMA: &str = include_str!("E2E_Log_v1.schema.json");
+
+/// Schema validation error for conformance helpers.
+#[derive(Debug, Clone)]
+pub struct SchemaValidationError {
+    message: String,
+}
+
+impl SchemaValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for SchemaValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for SchemaValidationError {}
+
+fn compile_schema(schema_str: &str) -> Result<Validator, SchemaValidationError> {
+    let schema: Value = serde_json::from_str(schema_str)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))?;
+    Validator::new(&schema)
+        .map_err(|err| SchemaValidationError::new(format!("schema compile failed: {err}")))
+}
+
+/// Validate a single E2E log entry (JSON object) against the v1 schema.
+pub fn validate_e2e_log_entry(value: &Value) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(E2E_LOG_V1_SCHEMA)?;
+    validator
+        .validate(value)
+        .map_err(|err| SchemaValidationError::new(err.to_string()))
+}
+
+/// Validate a JSONL payload of E2E log entries.
+pub fn validate_e2e_log_jsonl(input: &str) -> Result<(), SchemaValidationError> {
+    let validator = compile_schema(E2E_LOG_V1_SCHEMA)?;
+    for (idx, line) in input.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(trimmed).map_err(|err| {
+            SchemaValidationError::new(format!("line {}: invalid JSON: {err}", idx + 1))
+        })?;
+        if let Err(err) = validator.validate(&value) {
+            return Err(SchemaValidationError::new(format!(
+                "line {}: {}",
+                idx + 1,
+                err
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests;
