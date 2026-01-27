@@ -50,12 +50,12 @@ impl TestLogEntry {
         }
     }
 
-    fn with_result(mut self, result: &'static str) -> Self {
+    const fn with_result(mut self, result: &'static str) -> Self {
         self.result = result;
         self
     }
 
-    fn with_error(mut self, error: impl ToString) -> Self {
+    fn with_error(mut self, error: &impl ToString) -> Self {
         self.error = Some(error.to_string());
         self.result = "fail";
         self
@@ -66,7 +66,7 @@ impl TestLogEntry {
         self
     }
 
-    fn with_fingerprint(mut self, fingerprint: impl ToString) -> Self {
+    fn with_fingerprint(mut self, fingerprint: &impl ToString) -> Self {
         self.owner_pubkey_fingerprint = Some(fingerprint.to_string());
         self
     }
@@ -94,7 +94,7 @@ fn test_owner_key_generation_succeeds() {
     let public_key = keypair.public();
 
     log = log
-        .with_fingerprint(hex::encode(public_key.to_bytes()))
+        .with_fingerprint(&hex::encode(public_key.to_bytes()))
         .with_result("pass");
     log.emit();
 
@@ -116,7 +116,7 @@ fn test_recovery_phrase_has_24_words() {
 
     log = log
         .with_result(if words.len() == 24 { "pass" } else { "fail" })
-        .with_fingerprint(format!("word_count={}", words.len()));
+        .with_fingerprint(&format!("word_count={}", words.len()));
     log.emit();
 
     assert_eq!(
@@ -160,7 +160,7 @@ fn test_different_phrases_yield_different_keys() {
     let pk1 = phrase1.derive_owner_keypair().public().to_bytes();
     let pk2 = phrase2.derive_owner_keypair().public().to_bytes();
 
-    let result = if pk1 != pk2 { "pass" } else { "fail" };
+    let result = if pk1 == pk2 { "fail" } else { "pass" };
     log.with_result(result).emit();
 
     assert_ne!(pk1, pk2, "different phrases must yield different keys");
@@ -189,7 +189,7 @@ fn test_genesis_state_has_all_required_zones() {
 
     log = log
         .with_genesis_objects(required_zones.to_vec())
-        .with_fingerprint(genesis.fingerprint())
+        .with_fingerprint(&genesis.fingerprint())
         .with_result(if all_present { "pass" } else { "fail" });
     log.emit();
 
@@ -242,7 +242,7 @@ fn test_genesis_cbor_serialization_roundtrip() {
 
     log = log
         .with_genesis_objects(vec!["genesis_state"])
-        .with_fingerprint(genesis.fingerprint())
+        .with_fingerprint(&genesis.fingerprint())
         .with_result(if matches { "pass" } else { "fail" });
     log.emit();
 
@@ -329,7 +329,7 @@ fn test_cold_recovery_from_phrase() {
     let recovery = ColdRecovery::from_phrase(&phrase, None).expect("recovery should succeed");
 
     log = log
-        .with_fingerprint(recovery.genesis.fingerprint())
+        .with_fingerprint(&recovery.genesis.fingerprint())
         .with_genesis_objects(vec!["genesis_state"])
         .with_result("pass");
     log.emit();
@@ -462,13 +462,13 @@ fn test_bootstrap_workflow_single_device() {
         Ok(genesis) => {
             log = log
                 .with_genesis_objects(vec!["genesis_state", "owner_key"])
-                .with_fingerprint(genesis.fingerprint())
+                .with_fingerprint(&genesis.fingerprint())
                 .with_result("pass");
             log.emit();
             assert!(genesis.validate().is_ok(), "genesis must be valid");
         }
         Err(e) => {
-            log = log.with_error(e);
+            log = log.with_error(&e);
             log.emit();
             panic!("bootstrap workflow failed");
         }
@@ -511,7 +511,7 @@ fn test_bootstrap_workflow_detects_existing_genesis() {
     );
 
     log = log
-        .with_fingerprint(genesis1.fingerprint())
+        .with_fingerprint(&genesis1.fingerprint())
         .with_result(if already_exists { "pass" } else { "fail" });
     log.emit();
 
@@ -539,8 +539,7 @@ fn test_zone_integrity_levels_are_ordered() {
             .initial_zones
             .iter()
             .find(|z| z.zone_id == zone_id)
-            .map(|z| z.integrity_level)
-            .unwrap_or(0)
+            .map_or(0, |z| z.integrity_level)
     };
 
     let owner = get_integrity("z:owner");
@@ -573,8 +572,7 @@ fn test_zone_confidentiality_levels_are_ordered() {
             .initial_zones
             .iter()
             .find(|z| z.zone_id == zone_id)
-            .map(|z| z.confidentiality_level)
-            .unwrap_or(0)
+            .map_or(0, |z| z.confidentiality_level)
     };
 
     let owner = get_conf("z:owner");
@@ -612,7 +610,7 @@ fn test_owner_signature_verification() {
     let verify_result = public_key.verify(message, &signature);
 
     log = log
-        .with_fingerprint(hex::encode(public_key.to_bytes()))
+        .with_fingerprint(&hex::encode(public_key.to_bytes()))
         .with_result(if verify_result.is_ok() {
             "pass"
         } else {

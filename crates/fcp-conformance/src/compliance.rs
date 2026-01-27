@@ -70,8 +70,8 @@ impl StaticCompliance {
     #[must_use]
     pub fn run_manifest(manifest_toml: &str) -> Self {
         let mut findings = Vec::new();
-        let parsed = ConnectorManifest::parse_str(manifest_toml);
-        let passed = match parsed {
+        let parse_result = ConnectorManifest::parse_str(manifest_toml);
+        let passed = match parse_result {
             Ok(_) => {
                 findings.push(ComplianceFinding::pass(
                     "manifest.parse_validate",
@@ -94,6 +94,7 @@ impl StaticCompliance {
 
 /// Input configuration for dynamic compliance checks.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DynamicSuite {
     /// Configuration payload.
     pub config: serde_json::Value,
@@ -165,12 +166,13 @@ pub struct ComplianceReport {
 impl ComplianceReport {
     /// Whether the compliance report is passing.
     #[must_use]
-    pub fn passed(&self) -> bool {
+    pub const fn passed(&self) -> bool {
         self.static_checks.passed && self.dynamic_checks.passed
     }
 }
 
 /// Run dynamic compliance checks against an in-process connector.
+#[allow(clippy::too_many_lines)]
 pub async fn run_dynamic_checks<C: FcpConnector>(
     connector: &mut C,
     suite: DynamicSuite,
@@ -180,7 +182,7 @@ pub async fn run_dynamic_checks<C: FcpConnector>(
 
     let configure_result = connector.configure(suite.config.clone()).await;
     let configured = match configure_result {
-        Ok(_) => {
+        Ok(()) => {
             findings.push(ComplianceFinding::pass("configure", "configure ok"));
             true
         }
@@ -398,7 +400,7 @@ pub async fn run_dynamic_checks<C: FcpConnector>(
     DynamicCompliance { passed, findings }
 }
 
-fn is_capability_denial(err: &FcpError) -> bool {
+const fn is_capability_denial(err: &FcpError) -> bool {
     matches!(
         err,
         FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }

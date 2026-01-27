@@ -461,8 +461,7 @@ fn can_traverse_implicitly(source: &str, target: &str) -> bool {
 fn evaluate_cross_zone_access(request: &CrossZoneRequest) -> CrossZoneDecision {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     let make_receipt = |reason_code: ReasonCode| DecisionReceipt {
         source_zone: request.source_zone.clone(),

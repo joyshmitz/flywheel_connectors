@@ -4,8 +4,6 @@
 //! ensuring determinism and backwards compatibility.
 
 use fcp_bootstrap::{GenesisState, RecoveryPhrase};
-use fcp_crypto::Ed25519SigningKey;
-use std::path::Path;
 
 /// Well-known test mnemonic (DO NOT USE FOR REAL KEYS).
 const TEST_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
@@ -39,8 +37,7 @@ fn test_genesis_fingerprint_matches_golden() {
     let expected = EXPECTED_FINGERPRINT.trim();
     assert_eq!(
         fingerprint, expected,
-        "Genesis fingerprint changed! Was: {}, Expected: {}",
-        fingerprint, expected
+        "Genesis fingerprint changed! Was: {fingerprint}, Expected: {expected}"
     );
 }
 
@@ -116,8 +113,7 @@ fn test_genesis_has_all_required_zones() {
     for zone_id in required_zones {
         assert!(
             genesis.initial_zones.iter().any(|z| z.zone_id == zone_id),
-            "Missing required zone: {}",
-            zone_id
+            "Missing required zone: {zone_id}"
         );
     }
 }
@@ -153,13 +149,13 @@ fn test_key_material_is_not_logged() {
     let phrase = RecoveryPhrase::from_mnemonic(TEST_MNEMONIC).unwrap();
     let keypair = phrase.derive_owner_keypair();
 
-    let debug_output = format!("{:?}", phrase);
+    let debug_output = format!("{phrase:?}");
     assert!(
         !debug_output.contains("abandon"),
         "Recovery phrase words leaked in Debug output"
     );
 
-    let keypair_debug = format!("{:?}", keypair);
+    let keypair_debug = format!("{keypair:?}");
     // The debug output should only contain the public key, not private material
     assert!(
         keypair_debug.contains("public_key"),

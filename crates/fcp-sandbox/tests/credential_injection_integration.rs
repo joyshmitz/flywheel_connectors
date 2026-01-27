@@ -115,11 +115,7 @@ impl CredentialInjector for MockCredentialInjector {
     }
 
     fn is_host_allowed(&self, credential_id: &str, host: &str) -> Result<bool, EgressError> {
-        Ok(MockCredentialInjector::is_host_allowed(
-            self,
-            credential_id,
-            host,
-        ))
+        Ok(Self::is_host_allowed(self, credential_id, host))
     }
 
     fn inject_http(

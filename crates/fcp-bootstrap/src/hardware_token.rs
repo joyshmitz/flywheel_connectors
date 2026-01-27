@@ -146,9 +146,7 @@ impl TokenDetector {
 
         for provider in &self.provider_paths {
             if provider.exists() {
-                if let Ok(provider_tokens) = detect_tokens_for_provider(provider) {
-                    tokens.extend(provider_tokens);
-                }
+                tokens.extend(detect_tokens_for_provider(provider));
             }
         }
 
@@ -160,7 +158,7 @@ impl TokenDetector {
     pub fn detect_fcp_compatible(&self) -> Vec<DetectedToken> {
         self.detect_all()
             .into_iter()
-            .filter(|t| t.supports_ed25519())
+            .filter(DetectedToken::supports_ed25519)
             .collect()
     }
 }
@@ -214,7 +212,7 @@ fn default_provider_paths() -> Vec<PathBuf> {
 ///
 /// This is a stub implementation - a real implementation would use the
 /// pkcs11 crate to interact with the provider.
-fn detect_tokens_for_provider(provider: &PathBuf) -> Result<Vec<DetectedToken>, TokenError> {
+fn detect_tokens_for_provider(provider: &PathBuf) -> Vec<DetectedToken> {
     // In a real implementation, we would:
     // 1. Load the PKCS#11 library
     // 2. Initialize it
@@ -225,7 +223,7 @@ fn detect_tokens_for_provider(provider: &PathBuf) -> Result<Vec<DetectedToken>, 
     tracing::debug!(?provider, "Probing PKCS#11 provider");
 
     // For now, return empty - actual implementation would use pkcs11 crate
-    Ok(Vec::new())
+    Vec::new()
 }
 
 /// Mock token provider for testing.

@@ -62,6 +62,10 @@ impl Eq for RecoveryPhrase {}
 
 impl RecoveryPhrase {
     /// Generate a new random recovery phrase with 256 bits of entropy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the mnemonic cannot be generated from entropy.
     pub fn generate() -> Result<Self, RecoveryPhraseError> {
         use rand::RngCore;
         let mut entropy = [0u8; 32];
@@ -74,12 +78,16 @@ impl RecoveryPhrase {
         entropy.zeroize();
 
         Ok(Self {
-            entropy: mnemonic.to_entropy().to_vec(),
+            entropy: mnemonic.to_entropy(),
             mnemonic,
         })
     }
 
     /// Parse a recovery phrase from a space-separated mnemonic string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the word count is invalid or the phrase cannot be parsed.
     pub fn from_mnemonic(phrase: &str) -> Result<Self, RecoveryPhraseError> {
         let words: Vec<&str> = phrase.split_whitespace().collect();
 
@@ -91,12 +99,16 @@ impl RecoveryPhrase {
             .map_err(|e| RecoveryPhraseError::InvalidMnemonic(e.to_string()))?;
 
         Ok(Self {
-            entropy: mnemonic.to_entropy().to_vec(),
+            entropy: mnemonic.to_entropy(),
             mnemonic,
         })
     }
 
     /// Parse a recovery phrase from an array of words.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the word count is invalid or the phrase cannot be parsed.
     pub fn from_words(words: &[&str]) -> Result<Self, RecoveryPhraseError> {
         if words.len() != 24 {
             return Err(RecoveryPhraseError::WrongWordCount(words.len()));
@@ -112,6 +124,7 @@ impl RecoveryPhrase {
     ///
     /// This exposes the recovery phrase. The returned string should be
     /// displayed to the user only during initial setup and then zeroized.
+    #[must_use]
     pub fn to_phrase(&self) -> String {
         self.mnemonic.to_string()
     }
@@ -122,6 +135,7 @@ impl RecoveryPhrase {
     ///
     /// This exposes the recovery phrase. The returned vector should be
     /// displayed to the user only during initial setup.
+    #[must_use]
     pub fn words(&self) -> Vec<&'static str> {
         self.mnemonic.words().collect()
     }
@@ -130,6 +144,11 @@ impl RecoveryPhrase {
     ///
     /// Uses HKDF-SHA256 with a domain separator to derive the Ed25519 seed
     /// from the BIP39 entropy.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HKDF expansion fails or the derived seed is invalid (should never happen).
+    #[must_use]
     pub fn derive_owner_keypair(&self) -> OwnerKeypair {
         // Domain separator for FCP2 owner key derivation
         const FCP2_OWNER_KEY_DOMAIN: &[u8] = b"FCP2-OWNER-KEY-V1";
@@ -155,6 +174,7 @@ impl RecoveryPhrase {
     /// # Security
     ///
     /// This exposes the raw entropy. Use with extreme caution.
+    #[must_use]
     pub fn entropy(&self) -> &[u8] {
         &self.entropy
     }
@@ -177,11 +197,13 @@ pub struct OwnerKeypair {
 
 impl OwnerKeypair {
     /// Get the verifying (public) key.
+    #[must_use]
     pub fn public(&self) -> Ed25519VerifyingKey {
         self.signing_key.verifying_key()
     }
 
     /// Sign data with the owner key.
+    #[must_use]
     pub fn sign(&self, message: &[u8]) -> fcp_crypto::Ed25519Signature {
         self.signing_key.sign(message)
     }
@@ -191,6 +213,7 @@ impl OwnerKeypair {
     /// # Security
     ///
     /// This exposes the private key material. Use with extreme caution.
+    #[must_use]
     pub fn to_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
     }

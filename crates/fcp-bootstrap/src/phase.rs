@@ -68,11 +68,13 @@ pub enum BootstrapPhase {
 
 impl BootstrapPhase {
     /// Check if this is a terminal phase.
+    #[must_use]
     pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Completed { .. } | Self::Failed { .. })
     }
 
     /// Check if this phase can be resumed after a crash.
+    #[must_use]
     pub const fn is_resumable(&self) -> bool {
         matches!(
             self,
@@ -84,6 +86,7 @@ impl BootstrapPhase {
     }
 
     /// Get a human-readable description of this phase.
+    #[must_use]
     pub const fn description(&self) -> &'static str {
         match self {
             Self::Uninitialized => "System is not initialized",
@@ -201,6 +204,7 @@ impl std::fmt::Display for PartialStateSuggestion {
 }
 
 /// Detects partial state from a crashed initialization.
+#[must_use]
 pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
     // Check for lock file
     let lock_file = data_dir.join("init.lock");

@@ -30,6 +30,7 @@ pub enum TimeValidationResult {
 
 impl TimeValidationResult {
     /// Check if bootstrap should proceed.
+    #[must_use]
     pub const fn should_proceed(&self) -> bool {
         matches!(
             self,
@@ -38,6 +39,7 @@ impl TimeValidationResult {
     }
 
     /// Check if this is an error that should block bootstrap.
+    #[must_use]
     pub const fn is_error(&self) -> bool {
         matches!(self, Self::DriftError { .. })
     }
@@ -86,14 +88,12 @@ impl TimeValidation {
         // Try NTP check with short timeout
         let ntp_result = ntp_check_with_timeout(Duration::from_secs(2));
 
-        let (ntp_time, drift, result) = ntp_result.map_or(
-            (None, None, TimeValidationResult::CannotValidate),
-            |ntp| {
+        let (ntp_time, drift, result) =
+            ntp_result.map_or((None, None, TimeValidationResult::CannotValidate), |ntp| {
                 let drift = compute_drift(system_time, ntp);
                 let result = classify_drift(drift);
                 (Some(ntp), Some(drift), result)
-            },
-        );
+            });
 
         Self {
             system_time,
