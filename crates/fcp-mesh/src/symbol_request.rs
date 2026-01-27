@@ -234,6 +234,7 @@ impl SymbolRequestHandler {
         admission: &mut AdmissionController,
         peer: &NodeId,
         now_ms: u64,
+        symbol_size: u16,
     ) -> Result<ValidatedRequest, SymbolRequestError> {
         // Check if unauthenticated requests are allowed
         if !is_authenticated && !self.policy.allow_unauthenticated {
@@ -277,7 +278,7 @@ impl SymbolRequestHandler {
         }
 
         // Check admission control
-        let estimated_response_bytes = u64::from(max_response_symbols) * 1024; // Assume 1KB/symbol
+        let estimated_response_bytes = u64::from(max_response_symbols) * u64::from(symbol_size);
         admission.check_admission(
             peer,
             estimated_response_bytes,
