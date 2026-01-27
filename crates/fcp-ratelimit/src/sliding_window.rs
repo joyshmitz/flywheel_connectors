@@ -159,11 +159,16 @@ pub struct FixedWindow {
     /// Window duration.
     window: Duration,
 
+    /// Mutable state.
+    state: Mutex<FixedWindowState>,
+}
+
+struct FixedWindowState {
     /// Current request count.
-    count: Mutex<u32>,
+    count: u32,
 
     /// Window start time.
-    window_start: Mutex<Instant>,
+    window_start: Instant,
 }
 
 impl FixedWindow {
@@ -173,19 +178,10 @@ impl FixedWindow {
         Self {
             limit,
             window,
-            count: Mutex::new(0),
-            window_start: Mutex::new(Instant::now()),
-        }
-    }
-
-    /// Check if we need to reset the window.
-    fn maybe_reset(&self) {
-        let mut window_start = self.window_start.lock();
-        let now = Instant::now();
-
-        if now.duration_since(*window_start) >= self.window {
-            *self.count.lock() = 0;
-            *window_start = now;
+            state: Mutex::new(FixedWindowState {
+                count: 0,
+                window_start: Instant::now(),
+            }),
         }
     }
 }
@@ -193,12 +189,17 @@ impl FixedWindow {
 #[async_trait]
 impl RateLimiter for FixedWindow {
     async fn try_acquire(&self) -> bool {
-        self.maybe_reset();
+        let mut state = self.state.lock();
+        let now = Instant::now();
 
-        let mut count = self.count.lock();
+        // Check window expiry
+        if now.duration_since(state.window_start) >= self.window {
+            state.count = 0;
+            state.window_start = now;
+        }
 
-        if *count < self.limit {
-            *count += 1;
+        if state.count < self.limit {
+            state.count += 1;
             true
         } else {
             false
@@ -228,37 +229,52 @@ impl RateLimiter for FixedWindow {
     }
 
     fn remaining(&self) -> u32 {
-        self.maybe_reset();
-        let count = self.count.lock();
-        self.limit.saturating_sub(*count)
+        let mut state = self.state.lock();
+        let now = Instant::now();
+
+        if now.duration_since(state.window_start) >= self.window {
+            state.count = 0;
+            state.window_start = now;
+        }
+
+        self.limit.saturating_sub(state.count)
     }
 
     async fn wait_time(&self) -> Duration {
-        self.maybe_reset();
+        let mut state = self.state.lock();
+        let now = Instant::now();
 
-        if *self.count.lock() < self.limit {
+        // Check reset inside wait_time to ensure consistency
+        if now.duration_since(state.window_start) >= self.window {
+            state.count = 0;
+            state.window_start = now;
+        }
+
+        if state.count < self.limit {
             return Duration::ZERO;
         }
 
-        let window_start = *self.window_start.lock();
-        let elapsed = Instant::now().duration_since(window_start);
-
+        let elapsed = now.duration_since(state.window_start);
         self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
     }
 
     async fn reset(&self) {
-        *self.count.lock() = 0;
-        *self.window_start.lock() = Instant::now();
+        let mut state = self.state.lock();
+        state.count = 0;
+        state.window_start = Instant::now();
     }
 
     fn state(&self) -> RateLimitState {
-        self.maybe_reset();
+        let mut state = self.state.lock();
+        let now = Instant::now();
 
-        let count = *self.count.lock();
-        let remaining = self.limit.saturating_sub(count);
+        if now.duration_since(state.window_start) >= self.window {
+            state.count = 0;
+            state.window_start = now;
+        }
 
-        let window_start = *self.window_start.lock();
-        let elapsed = Instant::now().duration_since(window_start);
+        let remaining = self.limit.saturating_sub(state.count);
+        let elapsed = now.duration_since(state.window_start);
         let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 
         RateLimitState {

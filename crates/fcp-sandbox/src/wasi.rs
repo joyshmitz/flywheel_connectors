@@ -144,6 +144,7 @@ pub type WasiResult<T> = Result<T, WasiError>;
 /// This is derived from `CompiledPolicy` and controls all aspects of the
 /// sandbox enforcement within the WASI runtime.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct WasiConfig {
     /// Memory limit in bytes.
     pub memory_limit_bytes: u64,
@@ -270,7 +271,7 @@ impl WasiConfig {
 
     /// Enable deterministic mode with fixed timestamp and seed.
     #[must_use]
-    pub fn with_deterministic_mode(mut self, timestamp: u64, seed: u64) -> Self {
+    pub const fn with_deterministic_mode(mut self, timestamp: u64, seed: u64) -> Self {
         self.deterministic_mode = true;
         self.deterministic_timestamp = timestamp;
         self.deterministic_seed = seed;
@@ -293,7 +294,7 @@ impl WasiConfig {
 
     /// Inherit stdout/stderr from host.
     #[must_use]
-    pub fn with_inherit_stdio(mut self, stdout: bool, stderr: bool) -> Self {
+    pub const fn with_inherit_stdio(mut self, stdout: bool, stderr: bool) -> Self {
         self.inherit_stdout = stdout;
         self.inherit_stderr = stderr;
         self
@@ -315,6 +316,7 @@ pub struct FsCapabilityGate {
 
 impl FsCapabilityGate {
     /// Create a new filesystem capability gate.
+    #[must_use]
     pub fn new(readonly_paths: Vec<PathBuf>, writable_paths: Vec<PathBuf>) -> Self {
         // Canonicalize paths where possible
         let readonly_paths = readonly_paths
@@ -421,7 +423,8 @@ pub struct NetworkCapabilityGate {
 
 impl NetworkCapabilityGate {
     /// Create a new network capability gate.
-    pub fn new(constraints: Option<NetworkConstraints>, block_direct: bool) -> Self {
+    #[must_use]
+    pub const fn new(constraints: Option<NetworkConstraints>, block_direct: bool) -> Self {
         Self {
             guard: EgressGuard::new(),
             constraints,
@@ -509,8 +512,10 @@ pub struct WasiHostState {
     /// Resource table for component model.
     resource_table: ResourceTable,
     /// Filesystem capability gate.
+    #[allow(dead_code)]
     fs_gate: Arc<FsCapabilityGate>,
     /// Network capability gate.
+    #[allow(dead_code)]
     net_gate: Arc<NetworkCapabilityGate>,
     /// Whether deterministic mode is enabled.
     deterministic_mode: bool,
@@ -599,7 +604,7 @@ struct DeterministicRng {
 }
 
 impl DeterministicRng {
-    fn new(seed: u64) -> Self {
+    const fn new(seed: u64) -> Self {
         // Ensure non-zero state
         Self {
             state: if seed == 0 {
@@ -610,7 +615,7 @@ impl DeterministicRng {
         }
     }
 
-    fn next_u64(&mut self) -> u64 {
+    const fn next_u64(&mut self) -> u64 {
         let mut x = self.state;
         x ^= x << 13;
         x ^= x >> 7;
@@ -619,7 +624,7 @@ impl DeterministicRng {
         x
     }
 
-    fn next_byte(&mut self) -> u8 {
+    const fn next_byte(&mut self) -> u8 {
         (self.next_u64() & 0xFF) as u8
     }
 }
@@ -737,7 +742,10 @@ impl WasiRuntime {
                 wasi_builder
                     .preopened_dir(path, &guest_path, DirPerms::READ, FilePerms::READ)
                     .map_err(|e| {
-                        WasiError::EngineCreation(format!("failed to mount {path:?}: {e}"))
+                        WasiError::EngineCreation(format!(
+                            "failed to mount {}: {e}",
+                            path.display()
+                        ))
                     })?;
             }
         }
@@ -751,7 +759,10 @@ impl WasiRuntime {
                 wasi_builder
                     .preopened_dir(path, &guest_path, DirPerms::all(), FilePerms::all())
                     .map_err(|e| {
-                        WasiError::EngineCreation(format!("failed to mount {path:?}: {e}"))
+                        WasiError::EngineCreation(format!(
+                            "failed to mount {}: {e}",
+                            path.display()
+                        ))
                     })?;
             }
         }
@@ -773,13 +784,13 @@ impl WasiRuntime {
 
     /// Get a reference to the linker.
     #[must_use]
-    pub fn linker(&self) -> &Linker<WasiHostState> {
+    pub const fn linker(&self) -> &Linker<WasiHostState> {
         &self.linker
     }
 
     /// Get the engine.
     #[must_use]
-    pub fn engine(&self) -> &Engine {
+    pub const fn engine(&self) -> &Engine {
         &self.engine
     }
 }
@@ -996,7 +1007,7 @@ mod tests {
         assert_eq!(read_leb128(&[0x80, 0x01]), Some((128, 2)));
 
         // Larger value
-        assert_eq!(read_leb128(&[0xE5, 0x8E, 0x26]), Some((624485, 3)));
+        assert_eq!(read_leb128(&[0xE5, 0x8E, 0x26]), Some((624_485, 3)));
     }
 
     #[test]

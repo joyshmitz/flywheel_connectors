@@ -1069,6 +1069,15 @@ mod tests {
         }
     }
 
+    struct DenyPolicy;
+
+    #[async_trait::async_trait]
+    impl PolicyEngine for DenyPolicy {
+        async fn evaluate_preflight(&self, _request: &PreflightRequest) -> PreflightResponse {
+            PreflightResponse::denied("policy denied")
+        }
+    }
+
     #[tokio::test]
     async fn discovery_cache_reuses_within_ttl() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1081,6 +1090,7 @@ mod tests {
             ConnectorHealth::healthy(),
         );
         let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
         let cache = DiscoveryCache::new(Duration::from_secs(60));
 
         let _ = cache.get_or_refresh(&registry).await;
@@ -1121,6 +1131,7 @@ mod tests {
             ConnectorHealth::healthy(),
         );
         let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        #[allow(clippy::duration_suboptimal_units)]
         let endpoint = DiscoveryEndpoint::with_cache_ttl(
             Arc::new(registry),
             Arc::new(AllowPolicy),
@@ -1163,5 +1174,23 @@ mod tests {
 
         let response = endpoint.introspect(&summary.id).await.unwrap();
         assert_eq!(response.archetype, ConnectorArchetype::RequestResponse);
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_preflight_passthrough() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(DenyPolicy));
+
+        let request = PreflightRequest {
+            connector_id: ConnectorId::new("preflight", "test", "v1").unwrap(),
+            operation: "invoke".to_string(),
+            params: None,
+            principal: None,
+        };
+
+        let response = endpoint.preflight(request).await;
+        assert!(!response.allowed);
+        assert_eq!(response.reason.as_deref(), Some("policy denied"));
     }
 }

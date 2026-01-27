@@ -594,6 +594,50 @@ impl SymbolAck {
             signature: Ed25519Signature::from_bytes(&[0u8; 64]), // Placeholder until signed
         }
     }
+
+    /// Compute the signature transcript bytes (signature excluded).
+    #[must_use]
+    pub fn transcript_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"FCP2-SYMBOL-ACK-V1");
+        buf.extend_from_slice(self.object_id.as_bytes());
+        buf.extend_from_slice(self.zone_id.as_bytes());
+        buf.extend_from_slice(self.zone_key_id.as_bytes());
+        buf.extend_from_slice(&self.epoch_id.to_le_bytes());
+
+        // Manual serialization for determinism
+        let reason_byte = match self.reason {
+            SymbolAckReason::Complete => 0,
+            SymbolAckReason::Canceled => 1,
+            SymbolAckReason::ResourceExhausted => 2,
+            SymbolAckReason::DecodeFailed => 3,
+        };
+        buf.push(reason_byte);
+
+        buf.extend_from_slice(&self.final_symbol_count.to_le_bytes());
+        if let Some(ref reconstructed) = self.reconstructed_object_id {
+            buf.push(1);
+            buf.extend_from_slice(reconstructed.as_bytes());
+        } else {
+            buf.push(0);
+        }
+        buf
+    }
+
+    /// Sign the symbol ack in-place.
+    pub fn sign(&mut self, signing_key: &Ed25519SigningKey) {
+        let transcript = self.transcript_bytes();
+        self.signature = signing_key.sign(&transcript);
+    }
+
+    /// Verify the symbol ack signature.
+    ///
+    /// # Errors
+    /// Returns `CryptoError` if signature verification fails.
+    pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        let transcript = self.transcript_bytes();
+        verifying_key.verify(&transcript, &self.signature)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -665,6 +709,45 @@ impl SymbolRequest {
     #[must_use]
     pub fn has_proof_of_need(&self) -> bool {
         self.missing_hint.as_ref().is_some_and(|h| !h.is_empty())
+    }
+
+    /// Compute the signature transcript bytes (signature excluded).
+    #[must_use]
+    pub fn transcript_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"FCP2-SYMBOL-REQUEST-V1");
+        buf.extend_from_slice(self.object_id.as_bytes());
+        buf.extend_from_slice(self.zone_id.as_bytes());
+        buf.extend_from_slice(self.zone_key_id.as_bytes());
+        buf.extend_from_slice(&self.epoch_id.to_le_bytes());
+        buf.extend_from_slice(&self.max_symbols.to_le_bytes());
+        buf.push(self.priority);
+
+        if let Some(ref hints) = self.missing_hint {
+            let hint_len = u32::try_from(hints.len()).unwrap_or(u32::MAX);
+            buf.extend_from_slice(&hint_len.to_le_bytes());
+            for esi in hints {
+                buf.extend_from_slice(&esi.to_le_bytes());
+            }
+        } else {
+            buf.extend_from_slice(&0u32.to_le_bytes());
+        }
+        buf
+    }
+
+    /// Sign the symbol request in-place.
+    pub fn sign(&mut self, signing_key: &Ed25519SigningKey) {
+        let transcript = self.transcript_bytes();
+        self.signature = signing_key.sign(&transcript);
+    }
+
+    /// Verify the symbol request signature.
+    ///
+    /// # Errors
+    /// Returns `CryptoError` if signature verification fails.
+    pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        let transcript = self.transcript_bytes();
+        verifying_key.verify(&transcript, &self.signature)
     }
 }
 

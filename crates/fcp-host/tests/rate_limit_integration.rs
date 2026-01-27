@@ -153,7 +153,7 @@ fn make_operation(name: &str, rate_limit_scope: Option<&str>) -> OperationInfo {
         description: Some(format!("Detailed description of {name}")),
         input_schema: serde_json::json!({"type": "object"}),
         output_schema: serde_json::json!({"type": "object"}),
-        capability: CapabilityId::new(&format!("cap.test.{name}")).expect("valid capability id"),
+        capability: CapabilityId::new(format!("cap.test.{name}")).expect("valid capability id"),
         risk_level: RiskLevel::Low,
         safety_tier: SafetyTier::Safe,
         idempotency: IdempotencyClass::None,

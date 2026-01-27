@@ -703,8 +703,7 @@ fn check_landlock_available() -> bool {
 fn check_userns_available() -> bool {
     // Check /proc/sys/kernel/unprivileged_userns_clone
     std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
-        .map(|s| s.trim() == "1")
-        .unwrap_or(true) // Default to available if file doesn't exist
+        .map_or(true, |s| s.trim() == "1") // Default to available if file doesn't exist
 }
 
 /// Set resource limit.

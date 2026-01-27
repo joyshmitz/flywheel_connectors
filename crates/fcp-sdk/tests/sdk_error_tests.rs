@@ -208,7 +208,7 @@ fn test_external_error_serialization() {
         message: "Model overloaded".to_string(),
         status_code: Some(503),
         retryable: true,
-        retry_after: Some(Duration::from_millis(5000)),
+        retry_after: Some(Duration::from_secs(5)),
     };
 
     let json = serde_json::to_string(&err).expect("serialize should work");
@@ -223,7 +223,7 @@ fn test_external_error_serialization() {
     {
         assert_eq!(service, "openai");
         assert_eq!(*status_code, Some(503));
-        assert_eq!(*retry_after, Some(Duration::from_millis(5000)));
+        assert_eq!(*retry_after, Some(Duration::from_secs(5)));
     } else {
         panic!("Expected External variant");
     }

@@ -236,22 +236,7 @@ impl ConnectorManifest {
                     cidr_deny.sort_unstable();
 
                     let mut spki_pins: Vec<&Base64Bytes> = nc.spki_pins.iter().collect();
-                    // Base64Bytes doesn't implement Ord, but its string repr does.
-                    // Actually, we can just sort pointers if we want deterministic order?
-                    // No, we need content sort.
-                    // Base64Bytes is a newtype around Vec<u8>, which is Ord?
-                    // Wait, Base64Bytes in lib.rs does NOT derive Ord.
-                    // It derives PartialEq, Eq, Hash.
-                    // I need to check Base64Bytes definition.
-                    // It is `struct Base64Bytes(Vec<u8>)`. `Vec<u8>` is Ord.
-                    // So I should derive Ord for Base64Bytes.
-                    // For now, I will assume it's not Ord and sort by string representation or just skip sorting if it's hard?
-                    // No, determinism is key.
-                    // I will update Base64Bytes to derive Ord.
-                    // BUT I cannot change Base64Bytes definition in this replacement easily if it's far away.
-                    // Let's check `Base64Bytes` definition. It is in this file.
-                    // I'll sort by inner bytes.
-                    spki_pins.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                    spki_pins.sort_unstable();
 
                     InterfaceNetworkConstraints {
                         host_allow,
@@ -1672,7 +1657,7 @@ impl PolicySection {
 }
 
 /// Raw base64 bytes (requires the `base64:` prefix).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Base64Bytes(Vec<u8>);
 
 impl Base64Bytes {
