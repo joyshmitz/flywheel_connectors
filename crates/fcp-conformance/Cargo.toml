@@ -23,6 +23,7 @@ fcp-core = { path = "../fcp-core" }
 fcp-protocol = { path = "../fcp-protocol" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-cbor = { path = "../fcp-cbor" }
+fcp-manifest = { path = "../fcp-manifest" }
 fcp-mesh = { path = "../fcp-mesh" }
 fcp-store = { path = "../fcp-store" }
 fcp-tailscale = { path = "../fcp-tailscale" }

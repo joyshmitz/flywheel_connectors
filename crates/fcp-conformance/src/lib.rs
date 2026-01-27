@@ -20,12 +20,17 @@
 
 #![forbid(unsafe_code)]
 
+pub mod compliance;
 pub mod harness;
 pub mod interop;
 pub mod schemas;
 pub mod vectors;
 
 // Re-export vector types for convenience
+pub use compliance::{
+    CheckStatus, ComplianceFinding, ComplianceReport, DynamicCompliance, DynamicSuite,
+    StaticCompliance, run_dynamic_checks,
+};
 pub use vectors::core::{CanonicalPayloadGoldenVector, ObjectIdGoldenVector};
 pub use vectors::fcpc::FcpcGoldenVector;
 pub use vectors::fcps::FcpsGoldenVector;

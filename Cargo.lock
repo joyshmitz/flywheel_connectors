@@ -1719,6 +1719,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-manifest",
  "fcp-mesh",
  "fcp-protocol",
  "fcp-store",
