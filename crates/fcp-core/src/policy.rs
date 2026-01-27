@@ -5,13 +5,17 @@
 
 use std::collections::{HashMap, HashSet};
 
+use chrono::Utc;
+use fcp_cbor::SchemaId;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     ApprovalScope, ApprovalToken, CapabilityGrant, CapabilityId, ConfidentialityLevel, ConnectorId,
-    Decision, DecisionReceipt, FlowCheckResult, IntegrityLevel, NodeSignature, ObjectHeader,
-    ObjectId, OperationId, PrincipalId, ProvenanceRecord, ProvenanceViolation, RoleObject,
-    SafetyTier, SanitizerReceipt, TaintFlag, TaintFlags, ZoneId,
+    Decision, DecisionReceipt, FlowCheckResult, IntegrityLevel, InvokeRequest, NodeId,
+    NodeSignature, ObjectHeader, ObjectId, OperationId, PrincipalId, Provenance, ProvenanceRecord,
+    ProvenanceViolation, RoleObject, SafetyTier, SanitizerReceipt, TaintFlag, TaintFlags,
+    TaintLevel, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -260,6 +264,216 @@ pub struct PolicyDecision {
     pub reason_code: DecisionReasonCode,
     pub evidence: Vec<ObjectId>,
     pub explanation: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Policy Simulation (CLI/Test Harness Support)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Input payload for policy simulation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicySimulationInput {
+    /// Zone policy to evaluate (authoritative for simulation).
+    pub zone_policy: ZonePolicyObject,
+    /// Invoke request under evaluation.
+    pub invoke_request: InvokeRequest,
+    /// Transport mode to evaluate against.
+    #[serde(default = "default_transport_mode")]
+    pub transport: TransportMode,
+    /// Whether checkpoint freshness is satisfied.
+    #[serde(default = "default_true")]
+    pub checkpoint_fresh: bool,
+    /// Whether revocation freshness is satisfied.
+    #[serde(default = "default_true")]
+    pub revocation_fresh: bool,
+    /// Whether execution approvals are required for this operation.
+    #[serde(default)]
+    pub execution_approval_required: bool,
+    /// Sanitizer receipts to apply (optional).
+    #[serde(default)]
+    pub sanitizer_receipts: Vec<SanitizerReceipt>,
+    /// Related object ids (optional).
+    #[serde(default)]
+    pub related_object_ids: Vec<ObjectId>,
+    /// Explicit request object id override (optional).
+    #[serde(default)]
+    pub request_object_id: Option<ObjectId>,
+    /// Explicit input hash override (optional).
+    #[serde(default)]
+    pub request_input_hash: Option<[u8; 32]>,
+    /// Safety tier for the requested operation.
+    #[serde(default = "default_safety_tier")]
+    pub safety_tier: SafetyTier,
+    /// Optional principal override (otherwise derived from capability token).
+    #[serde(default)]
+    pub principal: Option<String>,
+    /// Optional capability id override (otherwise derived from capability token).
+    #[serde(default)]
+    pub capability_id: Option<String>,
+    /// Optional explicit provenance record (otherwise derived from request/zone).
+    #[serde(default)]
+    pub provenance_record: Option<ProvenanceRecord>,
+    /// Optional override for evaluation time (epoch ms).
+    #[serde(default)]
+    pub now_ms: Option<u64>,
+}
+
+/// Errors returned by policy simulation.
+#[derive(Debug, thiserror::Error)]
+pub enum PolicySimulationError {
+    #[error("missing required claim: {claim}")]
+    MissingClaim { claim: &'static str },
+    #[error("invalid principal id '{value}': {message}")]
+    InvalidPrincipal { value: String, message: String },
+    #[error("invalid capability id '{value}': {message}")]
+    InvalidCapability { value: String, message: String },
+    #[error("failed to parse token claims: {message}")]
+    TokenClaims { message: String },
+    #[error("zone mismatch: request zone '{request_zone}' vs policy zone '{policy_zone}'")]
+    ZoneMismatch {
+        request_zone: String,
+        policy_zone: String,
+    },
+}
+
+/// Simulate a policy decision for a given invocation.
+///
+/// This does NOT execute connector logic or write mesh objects.
+///
+/// # Errors
+/// Returns [`PolicySimulationError`] if required inputs are missing or invalid.
+pub fn simulate_policy_decision(
+    input: &PolicySimulationInput,
+) -> Result<DecisionReceipt, PolicySimulationError> {
+    let invoke = &input.invoke_request;
+    if invoke.zone_id != input.zone_policy.zone_id {
+        return Err(PolicySimulationError::ZoneMismatch {
+            request_zone: invoke.zone_id.as_str().to_string(),
+            policy_zone: input.zone_policy.zone_id.as_str().to_string(),
+        });
+    }
+
+    let claims = invoke
+        .capability_token
+        .raw
+        .claims_unverified()
+        .map_err(|err| PolicySimulationError::TokenClaims {
+            message: err.to_string(),
+        })?;
+
+    let principal_str = input
+        .principal
+        .as_deref()
+        .or_else(|| claims.get_subject())
+        .ok_or(PolicySimulationError::MissingClaim { claim: "sub" })?;
+    let principal = PrincipalId::new(principal_str).map_err(|err| {
+        PolicySimulationError::InvalidPrincipal {
+            value: principal_str.to_string(),
+            message: err.to_string(),
+        }
+    })?;
+
+    let capability_str = input
+        .capability_id
+        .as_deref()
+        .or_else(|| claims.get_capability_id())
+        .ok_or(PolicySimulationError::MissingClaim {
+            claim: "capability_id",
+        })?;
+    let capability_id = CapabilityId::new(capability_str).map_err(|err| {
+        PolicySimulationError::InvalidCapability {
+            value: capability_str.to_string(),
+            message: err.to_string(),
+        }
+    })?;
+
+    let request_object_id = input.request_object_id.unwrap_or_else(|| {
+        ObjectId::from_unscoped_bytes(invoke.id.0.as_bytes())
+    });
+
+    let provenance = input
+        .provenance_record
+        .clone()
+        .unwrap_or_else(|| provenance_from_request(invoke));
+
+    let now_ms = input
+        .now_ms
+        .unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
+
+    let decision_input = PolicyDecisionInput {
+        request_object_id,
+        zone_id: invoke.zone_id.clone(),
+        principal,
+        connector_id: invoke.connector_id.clone(),
+        operation_id: invoke.operation.clone(),
+        capability_id,
+        safety_tier: input.safety_tier,
+        provenance,
+        approval_tokens: &invoke.approval_tokens,
+        sanitizer_receipts: &input.sanitizer_receipts,
+        request_input: Some(&invoke.input),
+        request_input_hash: input.request_input_hash,
+        related_object_ids: &input.related_object_ids,
+        transport: input.transport,
+        checkpoint_fresh: input.checkpoint_fresh,
+        revocation_fresh: input.revocation_fresh,
+        execution_approval_required: input.execution_approval_required,
+        now_ms,
+    };
+
+    let engine = PolicyEngine {
+        zone_policy: input.zone_policy.clone(),
+    };
+    let decision = engine.evaluate_invoke(&decision_input);
+    let header = ObjectHeader {
+        schema: SchemaId::new("fcp.core", "DecisionReceipt", Version::new(1, 0, 0)),
+        zone_id: invoke.zone_id.clone(),
+        created_at: now_ms / 1000,
+        provenance: Provenance::new(invoke.zone_id.clone()),
+        refs: Vec::new(),
+        foreign_refs: Vec::new(),
+        ttl_secs: None,
+        placement: None,
+    };
+    let signature = NodeSignature::new(NodeId::new("policy-sim"), [0u8; 64], now_ms / 1000);
+
+    Ok(decision.to_receipt(header, request_object_id, signature))
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_transport_mode() -> TransportMode {
+    TransportMode::Lan
+}
+
+fn default_safety_tier() -> SafetyTier {
+    SafetyTier::Safe
+}
+
+fn provenance_from_request(req: &InvokeRequest) -> ProvenanceRecord {
+    let origin = req
+        .provenance
+        .as_ref()
+        .map(|p| p.origin_zone.clone())
+        .unwrap_or_else(|| req.zone_id.clone());
+    let mut record = ProvenanceRecord::new(origin);
+
+    if let Some(prov) = &req.provenance {
+        match prov.taint {
+            TaintLevel::Untainted => {}
+            TaintLevel::Tainted => {
+                record.taint_flags.insert(TaintFlag::PublicInput);
+            }
+            TaintLevel::HighlyTainted => {
+                record.taint_flags.insert(TaintFlag::PublicInput);
+                record.taint_flags.insert(TaintFlag::PotentiallyMalicious);
+            }
+        }
+    }
+
+    record
 }
 
 impl PolicyDecision {
