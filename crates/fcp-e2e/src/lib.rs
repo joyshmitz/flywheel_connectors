@@ -112,6 +112,7 @@ impl E2eRunner {
             &correlation_id,
             "configure",
             config_result,
+            false,
             &mut assertions_passed,
             &mut assertions_failed,
         );
@@ -127,11 +128,12 @@ impl E2eRunner {
             &correlation_id,
             "handshake",
             handshake_result,
+            false,
             &mut assertions_passed,
             &mut assertions_failed,
         );
 
-        let health = timed_sync(|| connector.health()).await;
+        let health = timed_async_value(|| connector.health()).await;
         passed &= log_health(
             &mut self.logger,
             &suite.test_name,
@@ -165,17 +167,12 @@ impl E2eRunner {
                 &correlation_id,
                 "invoke",
                 invoke_result,
+                suite.expect_invoke_error,
                 &mut assertions_passed,
                 &mut assertions_failed,
             );
 
-            if suite.expect_invoke_error {
-                if ok {
-                    passed = false;
-                }
-            } else {
-                passed &= ok;
-            }
+            passed &= ok;
         }
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -211,7 +208,7 @@ where
     let start = Instant::now();
     let result = f().await;
     TimedResult {
-        result: result.map_err(|e| e.to_string()),
+        result,
         duration_ms: start.elapsed().as_millis() as u64,
     }
 }
@@ -228,8 +225,21 @@ where
     }
 }
 
+async fn timed_async_value<T, F, Fut>(f: F) -> TimedValue<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let start = Instant::now();
+    let value = f().await;
+    TimedValue {
+        value,
+        duration_ms: start.elapsed().as_millis() as u64,
+    }
+}
+
 struct TimedResult<T> {
-    result: Result<T, String>,
+    result: Result<T, FcpError>,
     duration_ms: u64,
 }
 
@@ -255,33 +265,56 @@ fn log_result(
     correlation_id: &str,
     operation: &str,
     result: TimedResult<serde_json::Value>,
+    expect_error: bool,
     assertions_passed: &mut u32,
     assertions_failed: &mut u32,
 ) -> bool {
     let success = result.result.is_ok();
-    if success {
+    let passed = if expect_error { !success } else { success };
+    if passed {
         *assertions_passed += 1;
     } else {
         *assertions_failed += 1;
     }
 
+    let (decision, reason_code, reason_message, error_details, retryable, retry_after_ms) =
+        if let Err(err) = &result.result {
+            let response = err.to_response();
+            (
+                Some("deny".to_string()),
+                Some(response.code),
+                Some(response.message),
+                response.details,
+                Some(response.retryable),
+                response.retry_after_ms,
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
+
     let entry = E2eLogEntry::new(
-        if success { "info" } else { "error" },
+        if passed { "info" } else { "error" },
         test_name.to_string(),
         module.to_string(),
         phase.to_string(),
         correlation_id.to_string(),
-        if success { "pass" } else { "fail" },
+        if passed { "pass" } else { "fail" },
         result.duration_ms,
         AssertionsSummary::new(*assertions_passed, *assertions_failed),
         serde_json::json!({
             "operation": operation,
-            "error": result.result.clone().err(),
+            "decision": decision,
+            "reason_code": reason_code,
+            "reason_message": reason_message,
+            "error_details": error_details,
+            "retryable": retryable,
+            "retry_after_ms": retry_after_ms,
+            "expected_error": expect_error,
         }),
     );
     logger.push(entry);
 
-    success
+    passed
 }
 
 fn log_health(
@@ -356,8 +389,8 @@ fn log_introspection(
 mod tests {
     use super::*;
     use fcp_core::{
-        AgentHint, BaseConnector, CapabilityId, ConnectorId, EventCaps, HandshakeResponse,
-        HealthSnapshot, InstanceId, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
+        AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps,
+        HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, OperationId, OperationInfo,
         RiskLevel, SafetyTier, SessionId, ZoneId,
     };
 
@@ -421,19 +454,20 @@ mod tests {
         fn introspect(&self) -> Introspection {
             Introspection {
                 operations: vec![OperationInfo {
-                    id: OperationId::from("dummy.echo"),
+                    id: OperationId::from_static("dummy.echo"),
                     summary: "Echo".to_string(),
                     description: None,
                     input_schema: serde_json::json!({"type": "object"}),
                     output_schema: serde_json::json!({"type": "object"}),
-                    capability: CapabilityId::from("dummy.echo"),
+                    capability: CapabilityId::from_static("dummy.echo"),
                     risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
-                    idempotency: fcp_core::IdempotencyClass::Idempotent,
+                    idempotency: fcp_core::IdempotencyClass::None,
                     ai_hints: AgentHint {
                         when_to_use: "echo".to_string(),
                         common_mistakes: vec![],
-                        availability_notes: None,
+                        examples: vec![],
+                        related: vec![],
                     },
                     rate_limit: None,
                     requires_approval: None,
@@ -447,12 +481,7 @@ mod tests {
 
         async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
             if req.operation.as_str() == "dummy.echo" {
-                Ok(InvokeResponse {
-                    id: req.id,
-                    status: InvokeStatus::Ok,
-                    output: serde_json::json!({"ok": true}),
-                    error: None,
-                })
+                Ok(InvokeResponse::ok(req.id, serde_json::json!({ "ok": true })))
             } else {
                 Err(FcpError::Unauthorized {
                     code: 2101,
@@ -462,10 +491,7 @@ mod tests {
         }
 
         async fn subscribe(&self, _req: fcp_core::SubscribeRequest) -> fcp_core::FcpResult<fcp_core::SubscribeResponse> {
-            Err(FcpError::Unsupported {
-                code: 5001,
-                message: "Streaming not supported".to_string(),
-            })
+            Err(FcpError::StreamingNotSupported)
         }
 
         async fn unsubscribe(&self, _req: fcp_core::UnsubscribeRequest) -> fcp_core::FcpResult<()> {
@@ -507,7 +533,7 @@ mod tests {
             r#type: "invoke".to_string(),
             id: fcp_core::RequestId::from("req-1"),
             connector_id: ConnectorId::from_static("fcp.dummy:request_response:0.1.0"),
-            operation: OperationId::from("dummy.denied"),
+            operation: OperationId::from_static("dummy.denied"),
             zone_id: ZoneId::work(),
             input: serde_json::json!({}),
             capability_token: CapabilityToken::test_token(),

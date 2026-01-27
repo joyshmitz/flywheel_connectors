@@ -8,6 +8,7 @@ members = [
     "crates/fcp-cli",
     "crates/fcp-conformance",
     "crates/fcp-crypto",
+    "crates/fcp-e2e",
     "crates/fcp-host",
     "crates/fcp-manifest",
     "crates/fcp-mesh",
