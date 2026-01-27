@@ -26,12 +26,86 @@ use fcp_core::{
     CorrelationId, FcpConnector, FcpError, HandshakeRequest, HealthSnapshot, Introspection,
     InvokeRequest, InvokeResponse, InvokeStatus, ObjectId,
 };
+use fcp_testkit::{LogRedactionScanner, ScanSeverity};
 use serde::{Deserialize, Serialize};
 
 pub use logging::{
     AssertionsSummary, E2eLogEntry, E2eLogger, LogSchemaError, validate_log_entry_value,
 };
 pub use subprocess::ConnectorProcessRunner;
+
+/// Summary report for a log scan run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogScanReport {
+    /// Total non-empty lines scanned.
+    pub total_lines: u64,
+    /// Findings with redacted context.
+    pub findings: Vec<LogScanReportFinding>,
+    /// Number of error-severity findings.
+    pub error_count: u64,
+    /// Number of warn-severity findings.
+    pub warn_count: u64,
+}
+
+/// A single log scan finding with redacted context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogScanReportFinding {
+    /// 1-based line number.
+    pub line: usize,
+    /// Rule identifier.
+    pub rule_id: String,
+    /// Severity label.
+    pub severity: String,
+    /// Optional JSON path.
+    pub json_path: Option<String>,
+    /// Redacted context snippet.
+    pub context_redacted: String,
+}
+
+/// Scan a JSONL payload for secrets/PII and return a report.
+#[must_use]
+pub fn scan_log_jsonl(input: &str) -> LogScanReport {
+    let scanner = LogRedactionScanner::new();
+    let findings = scanner.scan_jsonl(input);
+    let lines: Vec<&str> = input.lines().collect();
+    let mut report_findings = Vec::new();
+    let mut error_count = 0_u64;
+    let mut warn_count = 0_u64;
+
+    for finding in findings {
+        let line_idx = finding.line.saturating_sub(1);
+        let raw = lines.get(line_idx).copied().unwrap_or_default();
+        let mut redacted = raw.replace(&finding.snippet, "<redacted>");
+        if redacted.len() > 200 {
+            redacted.truncate(200);
+        }
+        let severity = match finding.severity {
+            ScanSeverity::Error => {
+                error_count += 1;
+                "error"
+            }
+            ScanSeverity::Warn => {
+                warn_count += 1;
+                "warn"
+            }
+        };
+        report_findings.push(LogScanReportFinding {
+            line: finding.line,
+            rule_id: finding.rule_id,
+            severity: severity.to_string(),
+            json_path: finding.json_path,
+            context_redacted: redacted,
+        });
+    }
+
+    let total_lines = lines.iter().filter(|line| !line.trim().is_empty()).count() as u64;
+    LogScanReport {
+        total_lines,
+        findings: report_findings,
+        error_count,
+        warn_count,
+    }
+}
 
 /// Errors returned by the E2E harness.
 #[derive(Debug, thiserror::Error)]
