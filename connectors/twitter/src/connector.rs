@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     BaseConnector, CapabilityGrant, CapabilityToken, CapabilityVerifier, ConnectorId, EventCaps,
-    FcpError, HandshakeRequest, HandshakeResponse, OperationId, SessionId,
+    FcpError, HandshakeRequest, HandshakeResponse, SessionId,
 };
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, broadcast};

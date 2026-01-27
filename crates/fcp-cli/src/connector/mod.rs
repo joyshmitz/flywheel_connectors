@@ -317,6 +317,7 @@ fn simulate_connector_info(connector_id: &str) -> Result<ConnectorInfo> {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Static connector simulation is inherently verbose
 fn simulate_introspection(
     connector_id: &str,
     operations_filter: Option<&str>,

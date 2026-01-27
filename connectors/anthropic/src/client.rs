@@ -397,14 +397,16 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
 
     // Parse based on event type
     match event_type {
-        Some("message_start")
-        | Some("content_block_start")
-        | Some("content_block_delta")
-        | Some("content_block_stop")
-        | Some("message_delta")
-        | Some("message_stop")
-        | Some("ping")
-        | Some("error") => match serde_json::from_str::<StreamEvent>(data) {
+        Some(
+            "message_start"
+            | "content_block_start"
+            | "content_block_delta"
+            | "content_block_stop"
+            | "message_delta"
+            | "message_stop"
+            | "ping"
+            | "error",
+        ) => match serde_json::from_str::<StreamEvent>(data) {
             Ok(event) => Some(Ok(event)),
             Err(e) => Some(Err(AnthropicError::Json(e))),
         },

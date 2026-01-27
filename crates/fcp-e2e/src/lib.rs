@@ -7,21 +7,29 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
+#![allow(clippy::cast_possible_truncation)] // duration_ms fits in u64
+#![allow(clippy::too_many_arguments)] // test harness functions need many parameters
+#![allow(clippy::needless_pass_by_value)] // API ergonomics for TimedResult/TimedValue
 
 mod logging;
+mod subprocess;
 
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use fcp_conformance::run_all_interop_tests;
+use fcp_conformance::{
+    CheckStatus, ComplianceFinding, DynamicSuite, StaticCompliance, run_all_interop_tests,
+    run_dynamic_checks,
+};
 use fcp_core::{
     CorrelationId, FcpConnector, FcpError, HandshakeRequest, HealthSnapshot, Introspection,
-    InvokeRequest,
+    InvokeRequest, InvokeResponse, InvokeStatus, ObjectId,
 };
 use serde::{Deserialize, Serialize};
 
 pub use logging::{AssertionsSummary, E2eLogEntry, E2eLogger};
+pub use subprocess::ConnectorProcessRunner;
 
 /// Errors returned by the E2E harness.
 #[derive(Debug, thiserror::Error)]
@@ -70,6 +78,45 @@ impl E2eReport {
     }
 }
 
+/// Combined report for multiple connector suites.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct E2eBatchReport {
+    /// Whether all suites passed.
+    pub passed: bool,
+    /// Total duration in milliseconds.
+    pub duration_ms: u64,
+    /// Individual suite reports.
+    pub reports: Vec<E2eReport>,
+    /// Flattened structured logs.
+    pub logs: Vec<E2eLogEntry>,
+}
+
+impl E2eBatchReport {
+    /// Serialize all logs to JSON lines.
+    #[must_use]
+    pub fn to_json_lines(&self) -> String {
+        self.logs
+            .iter()
+            .filter_map(|entry| serde_json::to_string(entry).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Write JSONL logs to a file.
+    ///
+    /// # Errors
+    /// Returns an IO error if the file cannot be written.
+    pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        for entry in &self.logs {
+            let line = serde_json::to_string(entry)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+            writeln!(file, "{line}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Scenario configuration for a connector suite run.
 #[derive(Debug, Clone)]
 pub struct ConnectorSuite {
@@ -81,8 +128,8 @@ pub struct ConnectorSuite {
     pub handshake: HandshakeRequest,
     /// Optional invoke request to test operation handling.
     pub invoke: Option<InvokeRequest>,
-    /// Expect the invoke call to fail (default deny paths).
-    pub expect_invoke_error: bool,
+    /// Invoke expectations for error and receipts.
+    pub invoke_expectations: InvokeExpectations,
 }
 
 impl ConnectorSuite {
@@ -94,9 +141,51 @@ impl ConnectorSuite {
             config: serde_json::json!({}),
             handshake,
             invoke: None,
-            expect_invoke_error: false,
+            invoke_expectations: InvokeExpectations::default(),
         }
     }
+}
+
+/// Scenario configuration for a compliance suite run.
+#[derive(Debug, Clone)]
+pub struct ComplianceSuite {
+    /// Name for the scenario (used in logs).
+    pub test_name: String,
+    /// Manifest TOML payload to validate.
+    pub manifest_toml: String,
+    /// Dynamic compliance suite (standard methods).
+    pub dynamic: DynamicSuite,
+}
+
+impl ComplianceSuite {
+    /// Create a new compliance suite.
+    #[must_use]
+    pub fn new(
+        test_name: impl Into<String>,
+        manifest_toml: impl Into<String>,
+        dynamic: DynamicSuite,
+    ) -> Self {
+        Self {
+            test_name: test_name.into(),
+            manifest_toml: manifest_toml.into(),
+            dynamic,
+        }
+    }
+}
+
+/// Expectations for invoke results.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InvokeExpectations {
+    /// Expect an invoke error (default deny or policy denial).
+    pub expect_error: bool,
+    /// Expect a decision receipt ID on denial.
+    pub expect_decision_receipt: bool,
+    /// Expect an audit event ID on success.
+    pub expect_audit_event: bool,
+    /// Expect an operation receipt ID on success.
+    pub expect_receipt: bool,
+    /// Expected reason code when denial occurs.
+    pub expected_reason_code: Option<String>,
 }
 
 /// Runner for connector E2E suites.
@@ -166,6 +255,69 @@ impl E2eRunner {
         }
     }
 
+    /// Run compliance checks (static + dynamic) and emit a report.
+    ///
+    /// # Errors
+    /// Returns [`E2eError`] if the connector returns an error in a required phase.
+    pub async fn run_compliance_suite<C: FcpConnector>(
+        &mut self,
+        connector: &mut C,
+        suite: ComplianceSuite,
+    ) -> Result<E2eReport, E2eError> {
+        let start = Instant::now();
+        let correlation_id = CorrelationId::new().to_string();
+
+        let static_checks = StaticCompliance::run_manifest(&suite.manifest_toml);
+        let dynamic_checks = run_dynamic_checks(connector, suite.dynamic).await;
+
+        let passed = static_checks.passed && dynamic_checks.passed;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let (static_passed, static_failed, static_skipped) =
+            summarize_findings(&static_checks.findings);
+        let (dynamic_passed, dynamic_failed, dynamic_skipped) =
+            summarize_findings(&dynamic_checks.findings);
+
+        let entry = E2eLogEntry::new(
+            if passed { "info" } else { "error" },
+            suite.test_name.clone(),
+            self.module.clone(),
+            "verify",
+            correlation_id,
+            if passed { "pass" } else { "fail" },
+            duration_ms,
+            AssertionsSummary::new(static_passed + dynamic_passed, static_failed + dynamic_failed),
+            serde_json::json!({
+                "static": {
+                    "passed": static_checks.passed,
+                    "counts": {
+                        "passed": static_passed,
+                        "failed": static_failed,
+                        "skipped": static_skipped,
+                    },
+                    "findings": findings_to_json(&static_checks.findings),
+                },
+                "dynamic": {
+                    "passed": dynamic_checks.passed,
+                    "counts": {
+                        "passed": dynamic_passed,
+                        "failed": dynamic_failed,
+                        "skipped": dynamic_skipped,
+                    },
+                    "findings": findings_to_json(&dynamic_checks.findings),
+                },
+            }),
+        );
+        self.logger.push(entry);
+
+        Ok(E2eReport {
+            test_name: suite.test_name,
+            passed,
+            duration_ms,
+            logs: self.logger.drain(),
+        })
+    }
+
     /// Execute a connector suite and return a report.
     ///
     /// # Errors
@@ -183,7 +335,7 @@ impl E2eRunner {
 
         let config_result = timed_async(|| connector.configure(suite.config.clone()))
             .await
-            .map_value(|_| serde_json::json!({}));
+            .map_value(|()| serde_json::json!({}));
         passed &= log_result(
             &mut self.logger,
             &suite.test_name,
@@ -199,7 +351,7 @@ impl E2eRunner {
 
         let handshake_result = timed_async(|| connector.handshake(suite.handshake.clone()))
             .await
-            .map_value(|_| serde_json::json!({ "status": "accepted" }));
+            .map_value(|resp| serde_json::json!({ "status": resp.status }));
         passed &= log_result(
             &mut self.logger,
             &suite.test_name,
@@ -224,7 +376,7 @@ impl E2eRunner {
             &mut assertions_failed,
         );
 
-        let introspect = timed_sync(|| connector.introspect()).await;
+        let introspect = timed_sync(|| connector.introspect());
         passed &= log_introspection(
             &mut self.logger,
             &suite.test_name,
@@ -236,18 +388,14 @@ impl E2eRunner {
         );
 
         if let Some(invoke) = suite.invoke.clone() {
-            let invoke_result = timed_async(|| connector.invoke(invoke.clone()))
-                .await
-                .map_value(|_| serde_json::json!({ "status": "ok" }));
-            let ok = log_result(
+            let invoke_result = timed_async(|| connector.invoke(invoke.clone())).await;
+            let ok = log_invoke_result(
                 &mut self.logger,
                 &suite.test_name,
                 &self.module,
-                "execute",
                 &correlation_id,
-                "invoke",
                 invoke_result,
-                suite.expect_invoke_error,
+                suite.invoke_expectations,
                 &mut assertions_passed,
                 &mut assertions_failed,
             );
@@ -278,6 +426,35 @@ impl E2eRunner {
             logs: self.logger.drain(),
         })
     }
+
+    /// Run multiple connector suites and return a combined report.
+    ///
+    /// # Errors
+    /// Returns [`E2eError`] if any suite returns an unexpected connector error.
+    pub async fn run_connector_suites<C: FcpConnector>(
+        &mut self,
+        connector: &mut C,
+        suites: Vec<ConnectorSuite>,
+    ) -> Result<E2eBatchReport, E2eError> {
+        let start = Instant::now();
+        let mut passed = true;
+        let mut reports = Vec::new();
+        let mut logs = Vec::new();
+
+        for suite in suites {
+            let report = self.run_connector_suite(connector, suite).await?;
+            passed &= report.passed;
+            logs.extend(report.logs.iter().cloned());
+            reports.push(report);
+        }
+
+        Ok(E2eBatchReport {
+            passed,
+            duration_ms: start.elapsed().as_millis() as u64,
+            reports,
+            logs,
+        })
+    }
 }
 
 async fn timed_async<T, F, Fut>(f: F) -> TimedResult<T>
@@ -293,7 +470,7 @@ where
     }
 }
 
-async fn timed_sync<T, F>(f: F) -> TimedValue<T>
+fn timed_sync<T, F>(f: F) -> TimedValue<T>
 where
     F: FnOnce() -> T,
 {
@@ -397,6 +574,162 @@ fn log_result(
     passed
 }
 
+fn log_invoke_result(
+    logger: &mut E2eLogger,
+    test_name: &str,
+    module: &str,
+    correlation_id: &str,
+    result: TimedResult<InvokeResponse>,
+    expectations: InvokeExpectations,
+    assertions_passed: &mut u32,
+    assertions_failed: &mut u32,
+) -> bool {
+    let mut passed = true;
+    let mut decision: Option<String> = None;
+    let mut reason_code: Option<String> = None;
+    let mut reason_message: Option<String> = None;
+    let mut error_details: Option<serde_json::Value> = None;
+    let mut retryable: Option<bool> = None;
+    let mut retry_after_ms: Option<u64> = None;
+    let mut invoke_status: Option<InvokeStatus> = None;
+    let mut receipt_id: Option<String> = None;
+    let mut audit_event_id: Option<String> = None;
+    let mut decision_receipt_id: Option<String> = None;
+
+    match &result.result {
+        Ok(resp) => {
+            invoke_status = Some(resp.status);
+            receipt_id = resp.receipt_id.as_ref().map(ObjectId::to_string);
+            audit_event_id = resp.audit_event_id.as_ref().map(ObjectId::to_string);
+            decision_receipt_id = resp.decision_receipt_id.as_ref().map(ObjectId::to_string);
+
+            let invoke_error = resp.status == InvokeStatus::Error;
+            let error_check_ok = if expectations.expect_error {
+                invoke_error
+            } else {
+                !invoke_error
+            };
+            if !error_check_ok {
+                passed = false;
+            }
+
+            if expectations.expect_decision_receipt && resp.decision_receipt_id.is_none() {
+                passed = false;
+            }
+            if expectations.expect_audit_event && resp.audit_event_id.is_none() {
+                passed = false;
+            }
+            if expectations.expect_receipt && resp.receipt_id.is_none() {
+                passed = false;
+            }
+
+            if invoke_error {
+                decision = Some("deny".to_string());
+                if let Some(err) = resp.error.as_ref() {
+                    let response = err.to_response();
+                    reason_code = Some(response.code);
+                    reason_message = Some(response.message);
+                    error_details = response.details;
+                    retryable = Some(response.retryable);
+                    retry_after_ms = response.retry_after_ms;
+                }
+            }
+        }
+        Err(err) => {
+            let error_check_ok = expectations.expect_error;
+            if !error_check_ok {
+                passed = false;
+            }
+
+            if expectations.expect_decision_receipt {
+                passed = false;
+            }
+            if expectations.expect_audit_event {
+                passed = false;
+            }
+            if expectations.expect_receipt {
+                passed = false;
+            }
+
+            decision = Some("deny".to_string());
+            let response = err.to_response();
+            reason_code = Some(response.code);
+            reason_message = Some(response.message);
+            error_details = response.details;
+            retryable = Some(response.retryable);
+            retry_after_ms = response.retry_after_ms;
+        }
+    }
+
+    if passed {
+        *assertions_passed += 1;
+    } else {
+        *assertions_failed += 1;
+    }
+
+    let entry = E2eLogEntry::new(
+        if passed { "info" } else { "error" },
+        test_name.to_string(),
+        module.to_string(),
+        "execute".to_string(),
+        correlation_id.to_string(),
+        if passed { "pass" } else { "fail" },
+        result.duration_ms,
+        AssertionsSummary::new(*assertions_passed, *assertions_failed),
+        serde_json::json!({
+            "operation": "invoke",
+            "expected_error": expectations.expect_error,
+            "expected_decision_receipt": expectations.expect_decision_receipt,
+            "expected_audit_event": expectations.expect_audit_event,
+            "expected_receipt": expectations.expect_receipt,
+            "invoke_status": invoke_status.map(|status| format!("{status:?}")),
+            "decision": decision,
+            "reason_code": reason_code,
+            "reason_message": reason_message,
+            "error_details": error_details,
+            "retryable": retryable,
+            "retry_after_ms": retry_after_ms,
+            "receipt_id": receipt_id,
+            "audit_event_id": audit_event_id,
+            "decision_receipt_id": decision_receipt_id,
+        }),
+    );
+    logger.push(entry);
+
+    passed
+}
+
+fn summarize_findings(findings: &[ComplianceFinding]) -> (u32, u32, u32) {
+    let mut passed = 0_u32;
+    let mut failed = 0_u32;
+    let mut skipped = 0_u32;
+    for finding in findings {
+        match finding.status {
+            CheckStatus::Pass => passed += 1,
+            CheckStatus::Fail => failed += 1,
+            CheckStatus::Skipped => skipped += 1,
+        }
+    }
+    (passed, failed, skipped)
+}
+
+fn findings_to_json(findings: &[ComplianceFinding]) -> Vec<serde_json::Value> {
+    findings
+        .iter()
+        .map(|finding| {
+            serde_json::json!({
+                "check": finding.check,
+                "status": match finding.status {
+                    CheckStatus::Pass => "pass",
+                    CheckStatus::Fail => "fail",
+                    CheckStatus::Skipped => "skipped",
+                },
+                "message": finding.message,
+            })
+        })
+        .collect()
+}
+
 fn log_health(
     logger: &mut E2eLogger,
     test_name: &str,
@@ -470,9 +803,10 @@ mod tests {
     use super::*;
     use fcp_core::{
         AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps,
-        HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, OperationId, OperationInfo,
-        RiskLevel, SafetyTier, SessionId, ZoneId,
+        HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, ObjectId, OperationId,
+        OperationInfo, RiskLevel, SafetyTier, SessionId, ZoneId,
     };
+    use fcp_manifest::ConnectorManifest;
     use fcp_testkit::MockApiServer;
 
     #[derive(Debug)]
@@ -564,16 +898,41 @@ mod tests {
         }
 
         async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
-            if req.operation.as_str() == "dummy.echo" {
-                Ok(InvokeResponse::ok(
+            match req.operation.as_str() {
+                "dummy.echo" => Ok(InvokeResponse::ok(
                     req.id,
                     serde_json::json!({ "ok": true }),
-                ))
-            } else {
-                Err(FcpError::Unauthorized {
+                )),
+                "dummy.denied" => Ok(InvokeResponse::error(
+                    req.id,
+                    FcpError::CapabilityDenied {
+                        capability: "dummy.denied".to_string(),
+                        reason: "missing capability".to_string(),
+                    },
+                )
+                .with_decision_receipt_id(ObjectId::from_unscoped_bytes(b"decision"))),
+                _ => Err(FcpError::Unauthorized {
                     code: 2101,
                     message: "Missing capability".to_string(),
-                })
+                }),
+            }
+        }
+
+        async fn simulate(
+            &self,
+            req: fcp_core::SimulateRequest,
+        ) -> fcp_core::FcpResult<fcp_core::SimulateResponse> {
+            if req.operation.as_str() == "dummy.denied" {
+                Ok(
+                    fcp_core::SimulateResponse::denied(
+                        req.id,
+                        "missing capability",
+                        "FCP-3001",
+                    )
+                    .with_missing_capabilities(vec!["dummy.denied".to_string()]),
+                )
+            } else {
+                Ok(fcp_core::SimulateResponse::allowed(req.id))
             }
         }
 
@@ -601,6 +960,18 @@ mod tests {
             transport_caps: None,
             requested_instance_id: Some(InstanceId::new()),
         }
+    }
+
+    fn with_computed_interface_hash(raw: &str) -> String {
+        let unchecked =
+            ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
+        let computed = unchecked
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        raw.replace(
+            &unchecked.manifest.interface_hash.to_string(),
+            &computed.to_string(),
+        )
     }
 
     #[tokio::test]
@@ -642,7 +1013,12 @@ mod tests {
             config: serde_json::json!({}),
             handshake: test_handshake(),
             invoke: Some(invoke),
-            expect_invoke_error: true,
+            invoke_expectations: InvokeExpectations {
+                expect_error: true,
+                expect_decision_receipt: true,
+                expect_audit_event: false,
+                expect_receipt: false,
+            },
         };
 
         let mut runner = E2eRunner::new("fcp-e2e");
@@ -654,6 +1030,77 @@ mod tests {
         assert!(report.passed, "deny suite should pass when error expected");
         let json_lines = report.to_json_lines();
         assert!(json_lines.contains("deny_invoke"));
+    }
+
+    #[tokio::test]
+    async fn runs_compliance_suite() {
+        let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
+        let manifest = with_computed_interface_hash(raw);
+        let dynamic = DynamicSuite::minimal(test_handshake());
+        let suite = ComplianceSuite::new("dummy_compliance", manifest, dynamic);
+
+        let mut connector = DummyConnector::new();
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
+            .run_compliance_suite(&mut connector, suite)
+            .await
+            .expect("compliance runs");
+
+        assert!(report.passed, "compliance suite should pass");
+        assert!(!report.logs.is_empty(), "logs should be emitted");
+    }
+
+    #[tokio::test]
+    async fn compliance_checks_simulate_and_decision_receipt() {
+        let raw = include_str!("../../../tests/vectors/manifest/manifest_valid.toml");
+        let manifest = with_computed_interface_hash(raw);
+
+        let invoke = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: fcp_core::RequestId::from("req-2"),
+            connector_id: ConnectorId::from_static("fcp.dummy:request_response:0.1.0"),
+            operation: OperationId::from_static("dummy.denied"),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: vec![],
+        };
+        let simulate = fcp_core::SimulateRequest::new(
+            invoke.connector_id.clone(),
+            invoke.operation.clone(),
+            invoke.zone_id.clone(),
+            invoke.input.clone(),
+            invoke.capability_token.clone(),
+        );
+
+        let dynamic = DynamicSuite {
+            config: serde_json::json!({}),
+            handshake: test_handshake(),
+            invoke: Some(invoke),
+            expect_invoke_error: true,
+            simulate: Some(simulate),
+            expect_simulate_would_succeed: Some(false),
+            require_simulate_denial_details: true,
+            require_capability_denial: true,
+            require_decision_receipt: true,
+        };
+        let suite = ComplianceSuite::new("dummy_compliance_denied", manifest, dynamic);
+
+        let mut connector = DummyConnector::new();
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
+            .run_compliance_suite(&mut connector, suite)
+            .await
+            .expect("compliance runs");
+
+        assert!(report.passed, "compliance should pass with expected denial");
     }
 
     #[tokio::test]
@@ -672,5 +1119,24 @@ mod tests {
 
         assert_eq!(body, serde_json::json!({ "ok": true }));
         mock.assert_request_count(1).await;
+    }
+
+    #[tokio::test]
+    async fn runs_batch_suites() {
+        let mut connector = DummyConnector::new();
+        let suites = vec![
+            ConnectorSuite::minimal("batch_one", test_handshake()),
+            ConnectorSuite::minimal("batch_two", test_handshake()),
+        ];
+
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
+            .run_connector_suites(&mut connector, suites)
+            .await
+            .expect("batch runs");
+
+        assert!(report.passed, "batch should pass");
+        assert_eq!(report.reports.len(), 2);
+        assert!(!report.logs.is_empty());
     }
 }

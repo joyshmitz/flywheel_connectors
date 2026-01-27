@@ -14,7 +14,7 @@ use fcp_core::{FcpError, FcpResult, HealthSnapshot, HealthState, InvokeResponse}
 ///
 /// Panics if the result is an error.
 pub fn assert_ok<T: std::fmt::Debug>(result: &FcpResult<T>) {
-    assert!(result.is_ok(), "Expected Ok but got: {:?}", result);
+    assert!(result.is_ok(), "Expected Ok but got: {result:?}");
 }
 
 /// Assert that a result is an error.
@@ -23,7 +23,7 @@ pub fn assert_ok<T: std::fmt::Debug>(result: &FcpResult<T>) {
 ///
 /// Panics if the result is Ok.
 pub fn assert_err<T: std::fmt::Debug>(result: &FcpResult<T>) {
-    assert!(result.is_err(), "Expected Err but got: {:?}", result);
+    assert!(result.is_err(), "Expected Err but got: {result:?}");
 }
 
 /// Assert that a result is a specific error type.
@@ -33,14 +33,12 @@ pub fn assert_err<T: std::fmt::Debug>(result: &FcpResult<T>) {
 /// Panics if the result is Ok or a different error type.
 pub fn assert_error_type<T: std::fmt::Debug>(result: &FcpResult<T>, expected: &str) {
     match result {
-        Ok(v) => panic!("Expected error '{}' but got Ok({:?})", expected, v),
+        Ok(v) => panic!("Expected error '{expected}' but got Ok({v:?})"),
         Err(e) => {
-            let error_str = format!("{:?}", e);
+            let error_str = format!("{e:?}");
             assert!(
                 error_str.contains(expected),
-                "Expected error containing '{}' but got: {}",
-                expected,
-                error_str
+                "Expected error containing '{expected}' but got: {error_str}",
             );
         }
     }
@@ -54,7 +52,7 @@ pub fn assert_error_type<T: std::fmt::Debug>(result: &FcpResult<T>, expected: &s
 pub fn assert_not_configured<T: std::fmt::Debug>(result: &FcpResult<T>) {
     match result {
         Err(FcpError::NotConfigured) => {}
-        other => panic!("Expected NotConfigured error but got: {:?}", other),
+        other => panic!("Expected NotConfigured error but got: {other:?}"),
     }
 }
 
@@ -66,7 +64,7 @@ pub fn assert_not_configured<T: std::fmt::Debug>(result: &FcpResult<T>) {
 pub fn assert_not_handshaken<T: std::fmt::Debug>(result: &FcpResult<T>) {
     match result {
         Err(FcpError::NotHandshaken) => {}
-        other => panic!("Expected NotHandshaken error but got: {:?}", other),
+        other => panic!("Expected NotHandshaken error but got: {other:?}"),
     }
 }
 
@@ -80,10 +78,10 @@ pub fn assert_not_handshaken<T: std::fmt::Debug>(result: &FcpResult<T>) {
 ///
 /// Panics if the status is not Ready.
 pub fn assert_healthy(snapshot: &HealthSnapshot) {
+    let status = &snapshot.status;
     assert!(
         snapshot.is_ready(),
-        "Expected Ready status but got: {:?}",
-        snapshot.status
+        "Expected Ready status but got: {status:?}"
     );
 }
 
@@ -93,10 +91,10 @@ pub fn assert_healthy(snapshot: &HealthSnapshot) {
 ///
 /// Panics if the status is not Degraded.
 pub fn assert_degraded(snapshot: &HealthSnapshot) {
+    let status = &snapshot.status;
     assert!(
         matches!(snapshot.status, HealthState::Degraded { .. }),
-        "Expected Degraded status but got: {:?}",
-        snapshot.status
+        "Expected Degraded status but got: {status:?}",
     );
 }
 
@@ -106,10 +104,10 @@ pub fn assert_degraded(snapshot: &HealthSnapshot) {
 ///
 /// Panics if the status is not Error.
 pub fn assert_unhealthy(snapshot: &HealthSnapshot) {
+    let status = &snapshot.status;
     assert!(
         matches!(snapshot.status, HealthState::Error { .. }),
-        "Expected Error status but got: {:?}",
-        snapshot.status
+        "Expected Error status but got: {status:?}",
     );
 }
 

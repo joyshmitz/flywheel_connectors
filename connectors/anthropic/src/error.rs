@@ -50,7 +50,7 @@ impl AnthropicError {
             Self::RateLimited { .. } => true,
             Self::Overloaded { .. } => true,
             Self::Api { status_code, .. } => {
-                matches!(status_code, Some(500..=599) | Some(429))
+                matches!(status_code, Some(500..=599 | 429))
             }
             _ => false,
         }

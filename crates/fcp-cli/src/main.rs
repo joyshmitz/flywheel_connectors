@@ -147,13 +147,11 @@ pub(crate) fn output_with_pager(
         return Ok(());
     }
 
-    let mut child = if let Ok(child) = std::process::Command::new(&config.command)
+    let Ok(mut child) = std::process::Command::new(&config.command)
         .args(&config.args)
         .stdin(Stdio::piped())
         .spawn()
-    {
-        child
-    } else {
+    else {
         print!("{content}");
         return Ok(());
     };
