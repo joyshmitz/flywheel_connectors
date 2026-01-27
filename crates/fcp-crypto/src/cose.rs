@@ -448,6 +448,24 @@ impl CoseToken {
         CwtClaims::from_cbor(payload)
     }
 
+    /// Extract claims without verifying the signature.
+    ///
+    /// **DANGER:** This MUST NOT be used for security-critical decisions.
+    /// Intended only for simulation tools and tests that need to inspect
+    /// claims without access to the issuer public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the payload is missing or cannot be decoded.
+    pub fn claims_unverified(&self) -> CryptoResult<CwtClaims> {
+        let payload = self
+            .inner
+            .payload
+            .as_ref()
+            .ok_or_else(|| CryptoError::MissingField("payload".into()))?;
+        CwtClaims::from_cbor(payload)
+    }
+
     /// Verify using a key lookup function.
     ///
     /// The lookup function receives the KID from the protected header
