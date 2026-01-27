@@ -164,7 +164,7 @@ impl ColdRecovery {
 
 /// Interactive prompts for CLI cold recovery flow.
 pub mod cli {
-    use super::*;
+    use super::ColdRecoveryWarning;
 
     /// Prompts and responses for the cold recovery CLI flow.
     #[derive(Debug, Clone)]
@@ -222,7 +222,7 @@ If you have a backup of your .fcp directory, restore it instead.
 
 #[cfg(test)]
 mod tests {
-    use super::{ColdRecovery, ColdRecoveryWarning};
+    use super::{ColdRecovery, ColdRecoveryError, ColdRecoveryWarning};
     use crate::recovery_phrase::RecoveryPhrase;
 
     fn test_phrase() -> RecoveryPhrase {
