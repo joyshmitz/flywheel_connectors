@@ -186,17 +186,18 @@ pub struct OAuth2Client {
 
 impl OAuth2Client {
     /// Create a new OAuth 2.0 client.
-    #[must_use]
-    pub fn new(config: OAuth2Config) -> Self {
+    ///
+    /// # Errors
+    /// Returns `OAuthError::HttpError` if the HTTP client fails to build.
+    pub fn new(config: OAuth2Config) -> OAuthResult<Self> {
         let http_client = Client::builder()
             .timeout(config.timeout)
-            .build()
-            .expect("Failed to create HTTP client");
+            .build()?;
 
-        Self {
+        Ok(Self {
             config,
             http_client,
-        }
+        })
     }
 
     /// Create with a custom HTTP client.
@@ -532,7 +533,7 @@ mod tests {
     #[test]
     fn test_authorization_url_with_pkce() {
         let config = test_config();
-        let client = OAuth2Client::new(config);
+        let client = OAuth2Client::new(config).unwrap();
 
         let (url, _state, pkce) = client.authorization_url_with_pkce(&["read"]).unwrap();
 
