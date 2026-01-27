@@ -1523,7 +1523,7 @@ mod tests {
             .collect();
 
         // Sort by score descending
-        scores.sort_by(|a, b| b.1.cmp(&a.1));
+        scores.sort_by_key(|score| std::cmp::Reverse(score.1));
 
         assert_eq!(scores[0].0, "best", "Best device should rank first");
         assert_eq!(scores[1].0, "medium", "Medium device should rank second");

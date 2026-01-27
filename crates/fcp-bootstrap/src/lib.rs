@@ -50,7 +50,7 @@
 //!     .build()?;
 //!
 //! let workflow = BootstrapWorkflow::new(config)?;
-//! let genesis = workflow.run().await?;
+//! let genesis = workflow.run()?;
 //!
 //! println!("Genesis fingerprint: {}", genesis.fingerprint());
 //! ```

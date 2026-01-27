@@ -441,8 +441,8 @@ fn test_recovery_phrase_rejects_invalid_words() {
 // Bootstrap Workflow Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn test_bootstrap_workflow_single_device() {
+#[test]
+fn test_bootstrap_workflow_single_device() {
     let mut log = TestLogEntry::new("test_bootstrap_workflow_single_device", "execute");
 
     let temp_dir = TempDir::new().expect("create temp dir");
@@ -456,7 +456,7 @@ async fn test_bootstrap_workflow_single_device() {
     let workflow = BootstrapWorkflow::new(config).expect("create workflow");
 
     // Run the bootstrap workflow
-    let result = workflow.run().await;
+    let result = workflow.run();
 
     match result {
         Ok(genesis) => {
@@ -475,8 +475,8 @@ async fn test_bootstrap_workflow_single_device() {
     }
 }
 
-#[tokio::test]
-async fn test_bootstrap_workflow_detects_existing_genesis() {
+#[test]
+fn test_bootstrap_workflow_detects_existing_genesis() {
     let mut log = TestLogEntry::new(
         "test_bootstrap_workflow_detects_existing_genesis",
         "execute",
@@ -492,7 +492,7 @@ async fn test_bootstrap_workflow_detects_existing_genesis() {
         .expect("build config");
 
     let workflow1 = BootstrapWorkflow::new(config1).expect("create workflow 1");
-    let genesis1 = workflow1.run().await.expect("first bootstrap succeeds");
+    let genesis1 = workflow1.run().expect("first bootstrap succeeds");
 
     // Second bootstrap attempt should detect existing genesis
     let config2 = BootstrapConfig::builder()
