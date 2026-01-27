@@ -396,9 +396,9 @@ pub fn simulate_policy_decision(
         .clone()
         .unwrap_or_else(|| provenance_from_request(invoke));
 
-    let now_ms = input
-        .now_ms
-        .unwrap_or_else(|| Utc::now().timestamp_millis() as u64);
+    let now_ms = input.now_ms.unwrap_or_else(|| {
+        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
+    });
 
     let decision_input = PolicyDecisionInput {
         request_object_id,
@@ -440,15 +440,15 @@ pub fn simulate_policy_decision(
     Ok(decision.to_receipt(header, request_object_id, signature))
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_transport_mode() -> TransportMode {
+const fn default_transport_mode() -> TransportMode {
     TransportMode::Lan
 }
 
-fn default_safety_tier() -> SafetyTier {
+const fn default_safety_tier() -> SafetyTier {
     SafetyTier::Safe
 }
 
@@ -456,8 +456,7 @@ fn provenance_from_request(req: &InvokeRequest) -> ProvenanceRecord {
     let origin = req
         .provenance
         .as_ref()
-        .map(|p| p.origin_zone.clone())
-        .unwrap_or_else(|| req.zone_id.clone());
+        .map_or_else(|| req.zone_id.clone(), |p| p.origin_zone.clone());
     let mut record = ProvenanceRecord::new(origin);
 
     if let Some(prov) = &req.provenance {
