@@ -3,7 +3,10 @@
 //! Static checks validate connector manifests. Dynamic checks execute standard
 //! methods against an in-process connector implementation.
 
-use fcp_core::{FcpConnector, HandshakeRequest, HealthState, InvokeRequest};
+use fcp_core::{
+    FcpConnector, FcpError, HandshakeRequest, HealthState, InvokeRequest, InvokeStatus,
+    SimulateRequest,
+};
 use fcp_manifest::ConnectorManifest;
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +103,16 @@ pub struct DynamicSuite {
     pub invoke: Option<InvokeRequest>,
     /// Whether invoke is expected to error.
     pub expect_invoke_error: bool,
+    /// Optional simulate request for preflight checks.
+    pub simulate: Option<SimulateRequest>,
+    /// Expected `would_succeed` flag from simulate (if provided).
+    pub expect_simulate_would_succeed: Option<bool>,
+    /// Require simulate denial details when `would_succeed` is false.
+    pub require_simulate_denial_details: bool,
+    /// Require capability-denied style error on invoke denial.
+    pub require_capability_denial: bool,
+    /// Require a decision receipt ID on invoke denial.
+    pub require_decision_receipt: bool,
 }
 
 impl DynamicSuite {
@@ -111,6 +124,11 @@ impl DynamicSuite {
             handshake,
             invoke: None,
             expect_invoke_error: false,
+            simulate: None,
+            expect_simulate_would_succeed: None,
+            require_simulate_denial_details: false,
+            require_capability_denial: false,
+            require_decision_receipt: false,
         }
     }
 }
@@ -220,22 +238,149 @@ pub async fn run_dynamic_checks<C: FcpConnector>(
         }
     }
 
+    if let Some(simulate) = suite.simulate {
+        if configured && handshaken {
+            let simulate_result = connector.simulate(simulate).await;
+            match simulate_result {
+                Ok(response) => {
+                    if let Some(expected) = suite.expect_simulate_would_succeed {
+                        if response.would_succeed == expected {
+                            findings.push(ComplianceFinding::pass(
+                                "simulate",
+                                format!("would_succeed={}", response.would_succeed),
+                            ));
+                        } else {
+                            passed = false;
+                            findings.push(ComplianceFinding::fail(
+                                "simulate",
+                                format!(
+                                    "expected would_succeed={} but got {}",
+                                    expected, response.would_succeed
+                                ),
+                            ));
+                        }
+                    } else {
+                        findings.push(ComplianceFinding::pass(
+                            "simulate",
+                            format!("would_succeed={}", response.would_succeed),
+                        ));
+                    }
+
+                    if !response.would_succeed && suite.require_simulate_denial_details {
+                        let has_details = response
+                            .denial_code
+                            .as_ref()
+                            .is_some_and(|code| !code.is_empty())
+                            || response
+                                .failure_reason
+                                .as_ref()
+                                .is_some_and(|reason| !reason.is_empty())
+                            || !response.missing_capabilities.is_empty();
+                        if has_details {
+                            findings.push(ComplianceFinding::pass(
+                                "simulate.denial_details",
+                                "denial details present",
+                            ));
+                        } else {
+                            passed = false;
+                            findings.push(ComplianceFinding::fail(
+                                "simulate.denial_details",
+                                "missing denial code/reason/capabilities",
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    passed = false;
+                    findings.push(ComplianceFinding::fail("simulate", err.to_string()));
+                }
+            }
+        } else {
+            findings.push(ComplianceFinding::skipped(
+                "simulate",
+                "skipped due to configure/handshake failure",
+            ));
+        }
+    }
+
     if let Some(invoke) = suite.invoke {
         if configured && handshaken {
             let invoke_result = connector.invoke(invoke).await;
             match (suite.expect_invoke_error, invoke_result) {
-                (true, Ok(_)) => {
-                    passed = false;
-                    findings.push(ComplianceFinding::fail(
-                        "invoke",
-                        "expected error but got success",
-                    ));
+                (true, Ok(response)) => {
+                    if response.status == InvokeStatus::Error {
+                        findings.push(ComplianceFinding::pass("invoke", "expected error observed"));
+                    } else {
+                        passed = false;
+                        findings.push(ComplianceFinding::fail(
+                            "invoke",
+                            "expected error but got success",
+                        ));
+                    }
+
+                    if suite.require_decision_receipt {
+                        if response.decision_receipt_id.is_some() {
+                            findings.push(ComplianceFinding::pass(
+                                "invoke.decision_receipt",
+                                "decision receipt present",
+                            ));
+                        } else {
+                            passed = false;
+                            findings.push(ComplianceFinding::fail(
+                                "invoke.decision_receipt",
+                                "missing decision receipt",
+                            ));
+                        }
+                    }
+
+                    if suite.require_capability_denial {
+                        let is_capability_denial =
+                            response.error.as_ref().is_some_and(is_capability_denial);
+                        if is_capability_denial {
+                            findings.push(ComplianceFinding::pass(
+                                "invoke.capability_denial",
+                                "capability denial reported",
+                            ));
+                        } else {
+                            passed = false;
+                            findings.push(ComplianceFinding::fail(
+                                "invoke.capability_denial",
+                                "expected capability denial error",
+                            ));
+                        }
+                    }
                 }
-                (true, Err(_)) => {
+                (true, Err(err)) => {
                     findings.push(ComplianceFinding::pass("invoke", "expected error observed"));
+                    if suite.require_decision_receipt {
+                        passed = false;
+                        findings.push(ComplianceFinding::fail(
+                            "invoke.decision_receipt",
+                            "missing decision receipt (error returned)",
+                        ));
+                    }
+                    if suite.require_capability_denial {
+                        if is_capability_denial(&err) {
+                            findings.push(ComplianceFinding::pass(
+                                "invoke.capability_denial",
+                                "capability denial reported",
+                            ));
+                        } else {
+                            passed = false;
+                            findings.push(ComplianceFinding::fail(
+                                "invoke.capability_denial",
+                                "expected capability denial error",
+                            ));
+                        }
+                    }
                 }
-                (false, Ok(_)) => {
-                    findings.push(ComplianceFinding::pass("invoke", "invoke ok"));
+                (false, Ok(response)) => {
+                    if response.status == InvokeStatus::Ok {
+                        findings.push(ComplianceFinding::pass("invoke", "invoke ok"));
+                    } else {
+                        passed = false;
+                        findings.push(ComplianceFinding::fail("invoke", "unexpected invoke error"));
+                    }
                 }
                 (false, Err(err)) => {
                     passed = false;
@@ -251,6 +396,13 @@ pub async fn run_dynamic_checks<C: FcpConnector>(
     }
 
     DynamicCompliance { passed, findings }
+}
+
+fn is_capability_denial(err: &FcpError) -> bool {
+    matches!(
+        err,
+        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+    )
 }
 
 #[cfg(test)]
