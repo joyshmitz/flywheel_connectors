@@ -536,6 +536,22 @@ impl MeshNode {
             ));
         }
 
+        // Fetch metadata first to get accurate symbol size for admission control
+        let meta = self
+            .symbol_store
+            .get_object_meta(&request.object_id)
+            .await
+            .map_err(|err| match err {
+                fcp_store::SymbolStoreError::ObjectNotFound(_) => {
+                    SymbolRequestError::ObjectNotFound {
+                        object_id: request.object_id.to_string(),
+                    }
+                }
+                other => SymbolRequestError::InvalidRequest {
+                    reason: format!("symbol store error: {other}"),
+                },
+            })?;
+
         let authenticated = is_authenticated || self.is_peer_authenticated(peer);
         self.admission
             .set_authenticated(peer, authenticated, now_ms);
@@ -546,6 +562,7 @@ impl MeshNode {
             &mut self.admission,
             peer,
             now_ms,
+            meta.oti.symbol_size,
         ) {
             Ok(validated) => {
                 self.symbol_metrics.record_validated();
@@ -567,21 +584,6 @@ impl MeshNode {
             }
             Err(err) => return Err(err),
         };
-
-        let meta = self
-            .symbol_store
-            .get_object_meta(&request.object_id)
-            .await
-            .map_err(|err| match err {
-                fcp_store::SymbolStoreError::ObjectNotFound(_) => {
-                    SymbolRequestError::ObjectNotFound {
-                        object_id: request.object_id.to_string(),
-                    }
-                }
-                other => SymbolRequestError::InvalidRequest {
-                    reason: format!("symbol store error: {other}"),
-                },
-            })?;
 
         let symbols = self.symbol_store.get_all_symbols(&request.object_id).await;
         let mut available = HashSet::new();
