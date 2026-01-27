@@ -1812,9 +1812,11 @@ name = "fcp-e2e"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fcp-conformance",
  "fcp-core",
  "fcp-testkit",
  "pretty_assertions",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
