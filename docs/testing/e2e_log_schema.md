@@ -3,42 +3,78 @@ E2E Log Schema (JSONL)
 
 This document defines the single structured logging schema used by:
 - fcp-e2e harness logs (`crates/fcp-e2e`)
+- conformance harness logs (`crates/fcp-conformance`)
 - shell-based E2E scripts (`scripts/e2e/*.sh`)
 
 The goal is **machine-parseable, uniform logs** with minimal required fields and
 clear compatibility between harness and script outputs.
 
-Required Fields (All Logs)
---------------------------
+Canonical Schema
+----------------
+
+The canonical JSON Schema lives at:
+
+- `crates/fcp-conformance/src/schemas/E2E_Log_v1.schema.json`
+
+It accepts **three entry shapes** (all are valid under the single schema).
+
+1. Conformance Harness Entry (fcp-conformance)
+----------------------------------------------
+
+Required fields:
 
 - `timestamp` (string, RFC3339 UTC)
+- `real_time` (string, RFC3339 UTC)
+- `node_id` (string)
+- `test_name` (string)
+- `phase` (string)
+- `correlation_id` (string)
+- `event_type` (string)
+- `details` (object/array/string/number/boolean/null)
+
+2. fcp-e2e Harness Entry (fcp-e2e)
+----------------------------------
+
+Required fields:
+
+- `timestamp` (string, RFC3339 UTC)
+- `test_name` (string)
+- `module` (string)
+- `phase` (string)
+- `correlation_id` (string)
 - `result` (string: `pass` | `fail`)
 - `duration_ms` (u64)
-- `correlation_id` (string, UUID)
-- `test_name` OR `script` (non-empty string)
-- `phase` OR `step` (non-empty string)
+- `assertions` (object: `passed`, `failed`)
 
-Optional Fields
----------------
+3. Script Entry (scripts/e2e/*.sh)
+----------------------------------
+
+Required fields:
+
+- `timestamp` (string, RFC3339 UTC)
+- `script` (string)
+- `step` (string)
+- `correlation_id` (string)
+- `duration_ms` (u64)
+- `result` (string: `pass` | `fail`)
+
+Optional Fields (All Shapes)
+----------------------------
 
 - `level` (string: info|warn|error)
-- `module` (string, e.g., `fcp-e2e`)
 - `step_number` (u64)
-- `assertions` (object):
-  - `passed` (u64)
-  - `failed` (u64)
 - `artifacts` (array of strings)
-- `context` (object; free-form for connector_id, zone_id, operation_id, etc.)
+- `context` (object/array/string/number/boolean/null; free-form context)
 - `error_code` (string; stable FCP error code when `result=fail`)
-- `details` (object; extra error metadata)
+- `details` (object/array/string/number/boolean/null; extra error metadata)
 
 Compatibility Rules
 -------------------
 
-1. Harness logs use `test_name` + `phase`.
-2. Script logs use `script` + `step`.
-3. Both MUST include the required base fields above.
-4. `result` is strictly `pass` or `fail` (no other values).
+1. fcp-e2e harness logs use `test_name` + `phase`.
+2. Conformance harness logs use `test_name` + `phase` plus `event_type`.
+3. Script logs use `script` + `step`.
+4. `result` is strictly `pass` or `fail` where present.
 5. Any secrets in `context`/`details` are redacted by the harness.
 
 Harness Example (fcp-e2e)
@@ -78,7 +114,11 @@ Script Example (scripts/e2e/*.sh)
 Validator
 ---------
 
-The validator lives in `crates/fcp-e2e/src/logging.rs` as:
+The canonical validator lives in `crates/fcp-conformance/src/schemas/` as:
+- `fcp_conformance::schemas::validate_e2e_log_entry`
+- `fcp_conformance::schemas::validate_e2e_log_jsonl`
+
+The fcp-e2e wrapper lives in `crates/fcp-e2e/src/logging.rs` as:
 - `validate_log_entry_value(value: &serde_json::Value)`
 - `E2eLogEntry::validate()`
 

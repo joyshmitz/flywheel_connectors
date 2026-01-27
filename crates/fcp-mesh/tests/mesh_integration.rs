@@ -53,8 +53,11 @@ mod meshnode {
     use fcp_cbor::SchemaId;
     use fcp_core::{ObjectHeader, Provenance, ZoneKeyId};
     use fcp_mesh::{
-        ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig,
+        ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig, MeshSession,
         RetentionClass, SymbolRequestError,
+    };
+    use fcp_protocol::session::{
+        MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
     use fcp_protocol::{
         DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
@@ -63,7 +66,7 @@ mod meshnode {
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
-        StoredSymbol, SymbolMeta, SymbolStore,
+        StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
     };
     use raptorq::ObjectTransmissionInformation;
     use semver::Version;
@@ -458,6 +461,289 @@ mod meshnode {
 
         assert_eq!(handler.count(), 1);
         assert!(handler.get(&object_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn meshnode_multi_node_symbol_transfer() {
+        const TEST_NAME: &str = "meshnode_multi_node_symbol_transfer";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([7u8; 8]);
+        let object_id = test_object_id("meshnode-multi-node-symbols");
+
+        let object_store_a = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store_a = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            local_node_id: 1,
+            ..MemorySymbolStoreConfig::default()
+        }));
+        let quarantine_store_a = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let object_store_b = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store_b = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            local_node_id: 2,
+            ..MemorySymbolStoreConfig::default()
+        }));
+        let quarantine_store_b = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node_a = MeshNode::new(
+            MeshNodeConfig::new("node-a").with_sender_instance_id(21),
+            object_store_a,
+            symbol_store_a.clone(),
+            quarantine_store_a,
+        );
+        let node_b = MeshNode::new(
+            MeshNodeConfig::new("node-b").with_sender_instance_id(22),
+            object_store_b,
+            symbol_store_b.clone(),
+            quarantine_store_b,
+        );
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        symbol_store_a.put_object_meta(meta.clone()).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; 16]),
+            };
+            symbol_store_a.put_symbol(symbol).await.unwrap();
+        }
+
+        let sender_store = node_a.symbol_store().clone();
+        let receiver_store = node_b.symbol_store().clone();
+
+        let mut attempts = 0;
+        while !receiver_store.can_reconstruct(&object_id).await && attempts < 5 {
+            attempts += 1;
+
+            let received = receiver_store.get_all_symbols(&object_id).await;
+            let have: HashSet<u32> = received.iter().map(|symbol| symbol.meta.esi).collect();
+            let missing: Vec<u32> = (0..meta.source_symbols)
+                .filter(|esi| !have.contains(esi))
+                .collect();
+
+            let request = SymbolRequest::new(
+                test_header(&zone_id),
+                object_id,
+                zone_id.clone(),
+                zone_key_id,
+                1,
+                2,
+                1,
+            )
+            .with_missing_hint(missing.clone());
+
+            let response = node_a
+                .handle_symbol_request(request, &NodeId::new("node-b"), true, 0)
+                .await
+                .expect("symbol request should succeed");
+
+            assert!(
+                !response.symbol_esis.is_empty(),
+                "expected symbols from node-a"
+            );
+
+            if let Err(SymbolStoreError::ObjectNotFound(_)) =
+                receiver_store.get_object_meta(&object_id).await
+            {
+                receiver_store.put_object_meta(meta.clone()).await.unwrap();
+            }
+
+            for esi in response.symbol_esis {
+                let symbol = sender_store.get_symbol(&object_id, esi).await.unwrap();
+                receiver_store.put_symbol(symbol).await.unwrap();
+            }
+        }
+
+        assert!(
+            receiver_store.can_reconstruct(&object_id).await,
+            "node-b should reconstruct after transfer"
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "attempts": attempts,
+                "symbols_received": receiver_store.symbol_count(&object_id).await,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn meshnode_multi_node_control_plane_roundtrip() {
+        const TEST_NAME: &str = "meshnode_multi_node_control_plane_roundtrip";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([8u8; 8]);
+        let object_id = test_object_id("meshnode-multi-node-control-plane");
+
+        let object_store_a = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store_a = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store_a = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let object_store_b = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store_b = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store_b = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node_a = MeshNode::new(
+            MeshNodeConfig::new("node-a").with_sender_instance_id(31),
+            object_store_a,
+            symbol_store_a,
+            quarantine_store_a,
+        );
+        let mut node_b = MeshNode::new(
+            MeshNodeConfig::new("node-b").with_sender_instance_id(32),
+            object_store_b,
+            symbol_store_b,
+            quarantine_store_b,
+        );
+
+        let payload = vec![0xEF; 64];
+        let schema_hash = SchemaId::new("fcp.mesh", "ControlPlane", Version::new(1, 0, 0))
+            .hash()
+            .as_bytes()
+            .to_owned();
+        let mut schema_hash_bytes = [0u8; 32];
+        schema_hash_bytes.copy_from_slice(&schema_hash);
+
+        let envelope = ControlPlaneEnvelope::new(
+            payload.clone(),
+            schema_hash_bytes,
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            RetentionClass::Required,
+        );
+
+        let frames = node_a
+            .encode_control_plane(&envelope, 99)
+            .expect("encode control plane");
+
+        let handler = InMemoryControlPlaneHandler::new();
+        for frame in frames {
+            let _ = node_b
+                .process_control_plane_frame(&frame, &zone_id, RetentionClass::Required, &handler)
+                .expect("process control plane");
+        }
+
+        let stored = handler.get(&object_id).expect("control plane stored");
+        assert_eq!(stored.payload, payload);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "object_id": object_id.to_string(),
+                "payload_bytes": payload.len(),
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn meshnode_session_auth_allows_larger_request() {
+        const TEST_NAME: &str = "meshnode_session_auth_allows_larger_request";
+        const CATEGORY: &str = "meshnode";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([9u8; 8]);
+        let object_id = test_object_id("meshnode-session-auth");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let mut node = MeshNode::new(
+            MeshNodeConfig::new("node-auth").with_sender_instance_id(41),
+            object_store,
+            symbol_store.clone(),
+            quarantine_store,
+        );
+
+        let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![0xA5; 16]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let session = MeshSession::new(
+            MeshSessionId::new(),
+            NodeId::new("peer-1"),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [1u8; 32],
+                k_mac_r2i: [2u8; 32],
+                k_ctx: [3u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            0,
+            SessionReplayPolicy::default(),
+        );
+        node.register_session(session, 0);
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 1,
+            1,
+        );
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), false, 0)
+            .await
+            .expect("authenticated session should allow request");
+
+        assert!(!response.symbol_esis.is_empty());
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "symbols_sent": response.symbol_esis.len(),
+                "authenticated": true,
+            }),
+        );
     }
 }
 

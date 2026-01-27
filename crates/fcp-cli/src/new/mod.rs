@@ -801,6 +801,7 @@ pub struct {struct_name}Connector {{
     base: BaseConnector,
     configured: bool,
     started_at: Instant,
+    verifier: Option<CapabilityVerifier>,
 }}
 
 impl {struct_name}Connector {{
@@ -810,6 +811,7 @@ impl {struct_name}Connector {{
             base: BaseConnector::new(ConnectorId::from_static("{connector_id}")),
             configured: false,
             started_at: Instant::now(),
+            verifier: None,
         }}
     }}
 
@@ -856,6 +858,13 @@ impl FcpConnector for {struct_name}Connector {{
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {{
         self.base.set_handshaken(true);
+
+        // Initialize capability verifier with host key and zone
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
 
         let capabilities_granted = req
             .capabilities_requested
@@ -924,7 +933,15 @@ impl FcpConnector for {struct_name}Connector {{
             }});
         }}
 
-        // TODO: Validate capability tokens, enforce network constraints, emit receipts.
+        // Verify capability token
+        if let Some(verifier) = &self.verifier {{
+            // TODO: Pass actual resource URIs if the operation targets specific resources
+            verifier.verify(&req.capability_token, &req.operation, &[])?;
+        }} else {{
+            return Err(FcpError::NotConfigured);
+        }}
+
+        // TODO: Enforce network constraints, emit receipts.
         Ok(InvokeResponse::ok(
             req.id,
             serde_json::json!({{
@@ -1011,7 +1028,10 @@ mod tests {{
 
     #[tokio::test]
     async fn test_invoke_placeholder() {{
-        let connector = {struct_name}Connector::new();
+        let mut connector = {struct_name}Connector::new();
+        // Must handshake first to initialize verifier
+        connector.handshake(base_handshake()).await.expect("handshake");
+        
         let req = base_invoke(connector.id(), OP_PLACEHOLDER);
         let response = connector.invoke(req).await.expect("invoke");
         assert_eq!(response.status, InvokeStatus::Ok);

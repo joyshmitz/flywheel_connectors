@@ -285,6 +285,41 @@ Key verified test counts:
 - fcp-core:     650+ tests
 - fcp-sdk:      300+ tests
 - fcp-sandbox:  132 tests
+
+---
+
+## Manual Connector Integration Suites (bd-3m2a)
+
+These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use the E2E JSONL schema in `docs/testing/e2e_log_schema.md` and validate with `fcp-e2e --validate-log`.
+
+### Common Setup (All Connectors)
+- Provision a dedicated sandbox account (no production data).
+- Acquire scoped API keys/tokens for the connector capabilities under test.
+- Configure a minimal zone (e.g., `z:work`) with only the required caps.
+- Set `CORRELATION_ID` for each run and log it in every step.
+- Store logs in `./artifacts/e2e/<connector>/<date>/run.jsonl`.
+
+### Required Scenarios (Minimum)
+- **Discovery/Introspection**: list connector, introspect tools, verify schemas.
+- **Happy Path Invoke**: execute one safe operation and verify receipt/audit event.
+- **Denial Path**: attempt operation without capability, verify DecisionReceipt.
+- **Health**: health ready/degraded status with clear reason.
+- **Rate Limits**: exceed rate limit in a controlled way and verify response.
+
+### Connector-Specific Notes
+- **Twitter/X**: verify post + read timeline in sandbox; ensure rate limit handling.
+- **Telegram**: bot token only; validate send_message + polling or webhook flow.
+- **Discord**: bot token only; test send_message + edit_message minimal.
+- **Gmail**: use a sandbox Gmail account; test list + search; avoid deletes.
+- **OpenAI/Anthropic**: use low-cost model; test minimal prompt invoke.
+
+### Logging Checklist
+- Every step emits a JSONL entry with `timestamp`, `script`, `step`, `correlation_id`, `result`.
+- Attach artifacts (response payloads, receipts, decision receipts) in `artifacts`.
+- Validate log schema after each run:
+  ```bash
+  fcp-e2e --validate-log artifacts/e2e/<connector>/<date>/run.jsonl
+  ```
 ```
 
 ---

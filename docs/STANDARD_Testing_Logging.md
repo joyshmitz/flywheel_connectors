@@ -305,10 +305,14 @@ Validation helpers are available via:
 - `fcp_conformance::schemas::validate_e2e_log_jsonl`
 
 All E2E harness outputs MUST validate against the v1 schema.
+The schema supports multiple entry shapes (conformance harness, fcp-e2e harness,
+and shell scripts). See `docs/testing/e2e_log_schema.md` for the required
+fields by entry shape.
 
 ### 6.2 Required Log Fields
 
-Every log entry MUST include:
+Required fields depend on the entry shape (see `docs/testing/e2e_log_schema.md`).
+The example below shows a typical structured entry:
 
 ```json
 {

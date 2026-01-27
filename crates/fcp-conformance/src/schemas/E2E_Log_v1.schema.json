@@ -2,57 +2,126 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://flywheel.dev/schemas/fcp-e2e-log-1.schema.json",
   "title": "FCP2 E2E Log Entry",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "timestamp",
-    "real_time",
-    "node_id",
-    "test_name",
-    "phase",
-    "correlation_id",
-    "event_type",
-    "details"
+  "description": "Canonical JSONL schema for E2E logs across harnesses and scripts.",
+  "anyOf": [
+    { "$ref": "#/$defs/conformance_entry" },
+    { "$ref": "#/$defs/fcp_e2e_entry" },
+    { "$ref": "#/$defs/script_entry" }
   ],
-  "properties": {
+  "$defs": {
     "timestamp": {
       "type": "string",
-      "format": "date-time",
-      "description": "Simulated timestamp (RFC3339 UTC)."
+      "format": "date-time"
     },
-    "real_time": {
+    "non_empty_string": {
       "type": "string",
-      "format": "date-time",
-      "description": "Wall-clock timestamp (RFC3339 UTC)."
+      "minLength": 1
     },
-    "node_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Node identifier emitting the log entry."
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
     },
-    "test_name": {
+    "result": {
       "type": "string",
-      "minLength": 1,
-      "description": "Scenario or test name."
-    },
-    "phase": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Phase within the test scenario."
-    },
-    "correlation_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Correlation identifier for tracing."
-    },
-    "event_type": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Event category (e.g., session_established, symbol_routed, denial)."
+      "enum": ["pass", "fail"]
     },
     "details": {
       "description": "Optional structured details payload.",
       "type": ["object", "array", "string", "number", "boolean", "null"]
+    },
+    "context": {
+      "description": "Optional structured context payload.",
+      "type": ["object", "array", "string", "number", "boolean", "null"]
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "assertions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failed"],
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "conformance_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp",
+        "real_time",
+        "node_id",
+        "test_name",
+        "phase",
+        "correlation_id",
+        "event_type",
+        "details"
+      ],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "real_time": { "$ref": "#/$defs/timestamp" },
+        "node_id": { "$ref": "#/$defs/non_empty_string" },
+        "test_name": { "$ref": "#/$defs/non_empty_string" },
+        "phase": { "$ref": "#/$defs/non_empty_string" },
+        "correlation_id": { "$ref": "#/$defs/non_empty_string" },
+        "event_type": { "$ref": "#/$defs/non_empty_string" },
+        "details": { "$ref": "#/$defs/details" }
+      }
+    },
+    "fcp_e2e_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp",
+        "test_name",
+        "module",
+        "phase",
+        "correlation_id",
+        "result",
+        "duration_ms",
+        "assertions"
+      ],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "level": { "$ref": "#/$defs/non_empty_string" },
+        "test_name": { "$ref": "#/$defs/non_empty_string" },
+        "module": { "$ref": "#/$defs/non_empty_string" },
+        "phase": { "$ref": "#/$defs/non_empty_string" },
+        "correlation_id": { "$ref": "#/$defs/non_empty_string" },
+        "result": { "$ref": "#/$defs/result" },
+        "duration_ms": { "$ref": "#/$defs/duration_ms" },
+        "assertions": { "$ref": "#/$defs/assertions" },
+        "context": { "$ref": "#/$defs/context" },
+        "artifacts": { "$ref": "#/$defs/artifacts" },
+        "error_code": { "$ref": "#/$defs/non_empty_string" },
+        "details": { "$ref": "#/$defs/details" }
+      }
+    },
+    "script_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timestamp",
+        "script",
+        "step",
+        "correlation_id",
+        "duration_ms",
+        "result"
+      ],
+      "properties": {
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "script": { "$ref": "#/$defs/non_empty_string" },
+        "step": { "$ref": "#/$defs/non_empty_string" },
+        "step_number": { "type": "integer", "minimum": 0 },
+        "correlation_id": { "$ref": "#/$defs/non_empty_string" },
+        "duration_ms": { "$ref": "#/$defs/duration_ms" },
+        "result": { "$ref": "#/$defs/result" },
+        "artifacts": { "$ref": "#/$defs/artifacts" },
+        "error_code": { "$ref": "#/$defs/non_empty_string" },
+        "details": { "$ref": "#/$defs/details" }
+      }
     }
   }
 }

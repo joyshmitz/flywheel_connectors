@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use fcp_conformance::schemas::validate_e2e_log_entry;
 use serde::{Deserialize, Serialize};
 
 /// Summary of assertions for a test phase.
@@ -165,135 +166,10 @@ pub enum LogSchemaError {
 /// This accepts both harness logs (`test_name`, `phase`) and script logs
 /// (`script`, `step`) as long as the required base fields are present.
 pub fn validate_log_entry_value(value: &serde_json::Value) -> Result<(), LogSchemaError> {
-    let obj = value.as_object().ok_or(LogSchemaError::InvalidField {
-        field: "root",
-        message: "expected object".to_string(),
-    })?;
-
-    require_string(obj, "timestamp")?;
-    require_string(obj, "result")?;
-    require_string(obj, "correlation_id")?;
-    require_u64(obj, "duration_ms")?;
-
-    let result = obj.get("result").and_then(|val| val.as_str()).unwrap_or("");
-    if result != "pass" && result != "fail" {
-        return Err(LogSchemaError::InvalidField {
-            field: "result",
-            message: "must be 'pass' or 'fail'".to_string(),
-        });
-    }
-
-    let has_test_name = obj
-        .get("test_name")
-        .and_then(|val| val.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let has_script = obj
-        .get("script")
-        .and_then(|val| val.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if !has_test_name && !has_script {
-        return Err(LogSchemaError::MissingField {
-            field: "test_name|script",
-        });
-    }
-
-    let has_phase = obj
-        .get("phase")
-        .and_then(|val| val.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let has_step = obj
-        .get("step")
-        .and_then(|val| val.as_str())
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if !has_phase && !has_step {
-        return Err(LogSchemaError::MissingField {
-            field: "phase|step",
-        });
-    }
-
-    if let Some(level) = obj.get("level") {
-        if level.as_str().is_none() {
-            return Err(LogSchemaError::InvalidField {
-                field: "level",
-                message: "must be string".to_string(),
-            });
-        }
-    }
-
-    if let Some(assertions) = obj.get("assertions") {
-        let assertions_obj = assertions.as_object().ok_or(LogSchemaError::InvalidField {
-            field: "assertions",
-            message: "expected object".to_string(),
-        })?;
-        require_u64_from(assertions_obj, "passed", "assertions.passed")?;
-        require_u64_from(assertions_obj, "failed", "assertions.failed")?;
-    }
-
-    if let Some(artifacts) = obj.get("artifacts") {
-        let array = artifacts.as_array().ok_or(LogSchemaError::InvalidField {
-            field: "artifacts",
-            message: "expected array".to_string(),
-        })?;
-        for (idx, item) in array.iter().enumerate() {
-            if item.as_str().is_none() {
-                return Err(LogSchemaError::InvalidField {
-                    field: "artifacts",
-                    message: format!("entry {idx} must be string"),
-                });
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn require_string(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-) -> Result<(), LogSchemaError> {
-    let value = obj
-        .get(field)
-        .and_then(|val| val.as_str())
-        .ok_or(LogSchemaError::MissingField { field })?;
-    if value.is_empty() {
-        return Err(LogSchemaError::InvalidField {
-            field,
-            message: "must be non-empty".to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn require_u64(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-) -> Result<(), LogSchemaError> {
-    require_u64_from(obj, field, field)
-}
-
-fn require_u64_from(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-    display_field: &'static str,
-) -> Result<(), LogSchemaError> {
-    let value = obj.get(field).ok_or(LogSchemaError::MissingField {
-        field: display_field,
-    })?;
-    let ok = match value {
-        serde_json::Value::Number(num) => num.as_u64().is_some(),
-        _ => false,
-    };
-    if !ok {
-        return Err(LogSchemaError::InvalidField {
-            field: display_field,
-            message: "must be unsigned integer".to_string(),
-        });
-    }
-    Ok(())
+    validate_e2e_log_entry(value).map_err(|err| LogSchemaError::InvalidField {
+        field: "schema",
+        message: err.to_string(),
+    })
 }
 
 fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
