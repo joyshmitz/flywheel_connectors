@@ -443,6 +443,20 @@ impl DiscordConnector {
         })
     }
 
+    /// Handle simulate method.
+    pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid simulate request: {e}"),
+            })?;
+
+        let response = SimulateResponse::allowed(req.id);
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
     /// Validate input structure and limits before capability token verification.
     /// This is an optimization to avoid wasting resources on capability verification
     /// for requests that will fail validation anyway.

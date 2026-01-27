@@ -85,6 +85,7 @@ async fn handle_message(connector: &mut OpenAIConnector, message: &str) -> serde
         "health" => connector.handle_health().await,
         "introspect" => connector.handle_introspect().await,
         "invoke" => connector.handle_invoke(params).await,
+        "simulate" => connector.handle_simulate(params).await,
         "shutdown" => connector.handle_shutdown(params).await,
         _ => Err(fcp_core::FcpError::InvalidRequest {
             code: 1002,
