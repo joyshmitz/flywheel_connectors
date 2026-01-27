@@ -4,7 +4,7 @@
 
 ## Executive Summary
 
-The flywheel_connectors codebase has **~3,300 test markers** across **177 files**, with strong coverage in protocol and security domains but significant gaps in infrastructure, storage, and connector implementations.
+The flywheel_connectors codebase has **~3,600+ test markers** across **177 files**, with strong coverage in protocol, crypto, and security domains but significant gaps in connector implementations.
 
 **Key Findings:**
 - 12/27 crates (44%) have dedicated test directories
@@ -21,7 +21,7 @@ The flywheel_connectors codebase has **~3,300 test markers** across **177 files*
 
 | Crate | Test Files | Test Count | Notes |
 |-------|-----------|------------|-------|
-| fcp-core | 15 | ~650 | Golden vectors for capability, revocation, audit, protocol, simulation |
+| fcp-core | 15 | 1313 | Golden vectors for capability, revocation, audit, protocol, simulation |
 | fcp-sdk | 9 | ~300 | Error handling, schemas, streaming, state, standard methods |
 | fcp-sandbox | 3 | ~132 | Allow/deny matrix (83), credential injection (28), canary (21) |
 
@@ -29,7 +29,7 @@ The flywheel_connectors codebase has **~3,300 test markers** across **177 files*
 
 | Crate | Test Files | Test Count | Notes |
 |-------|-----------|------------|-------|
-| fcp-protocol | 4 | ~128 | FCPC/FCPS golden vectors, session framing |
+| fcp-protocol | 4 | 204 | FCPC/FCPS golden vectors, session framing, malformed input rejection |
 | fcp-ratelimit | 3 | ~85 | Golden vectors, token bucket drift |
 | fcp-mesh | 1 | ~38 | Mesh integration tests |
 
@@ -49,20 +49,24 @@ The flywheel_connectors codebase has **~3,300 test markers** across **177 files*
 | fcp-tailscale | 1 | ~10 | Enrollment lifecycle only |
 | fcp-conformance | 1 | 19 | FZPF schema validation |
 
-### Tier 5: No Dedicated Tests (Critical Gaps)
+### Tier 1b: Good Inline Coverage (No Dedicated Test Dir)
 
-| Crate | Inline Markers | Status | Risk |
-|-------|---------------|--------|------|
-| **fcp-crypto** | 0 | **CRITICAL** | Crypto primitives untested at unit level |
-| **fcp-store** | 23 (quarantine only) | **CRITICAL** | Storage, GC, repair logic untested |
-| **fcp-audit** | 0 | **HIGH** | Audit chain creation untested |
+| Crate | Inline Tests | Status | Notes |
+|-------|-------------|--------|-------|
+| **fcp-crypto** | 109 | **GOOD** | Ed25519, X25519, HPKE, HKDF, AEAD, COSE |
+| **fcp-store** | 100 | **GOOD** | Object store, symbol store, GC, repair |
+| **fcp-raptorq** | 88 | **GOOD** | FEC encoding/decoding, chunking |
+
+### Tier 5: No Tests (Actual Gaps)
+
+| Crate | Tests | Status | Risk |
+|-------|-------|--------|------|
 | **fcp-oauth** | 0 | **HIGH** | OAuth1/2/PKCE flows untested |
-| **fcp-raptorq** | 0 | **HIGH** | FEC encoding/decoding untested |
-| **fcp-streaming** | 24 (disabled) | **HIGH** | SSE/WebSocket/reconnect untested |
-| **fcp-telemetry** | 179 (disabled) | **MEDIUM** | Metrics/tracing/logging untested |
-| **fcp-registry** | 48 (disabled) | **MEDIUM** | Service discovery untested |
-| **fcp-webhook** | 15 (disabled) | **MEDIUM** | Webhook event/signature untested |
+| **fcp-streaming** | 0 | **HIGH** | SSE/WebSocket/reconnect untested |
+| **fcp-telemetry** | 0 | **MEDIUM** | Metrics/tracing/logging untested |
+| **fcp-registry** | 0 | **MEDIUM** | Service discovery untested |
 | **fcp-cbor** | 0 | **LOW** | Relies on conformance tests |
+| **fcp-webhook** | TBD | **MEDIUM** | Webhook event/signature untested |
 
 ### Connector Implementations
 
@@ -129,17 +133,18 @@ Golden vector testing is the primary strategy across:
 | FCPS session framing | 72 | session_golden_vectors.rs |
 | FCPC golden vectors | 28 | fcpc_golden_vectors.rs |
 
-### Crypto Verification: GAPS IDENTIFIED
+### Crypto Verification: WELL TESTED
 
 | Component | Unit Tests | Status |
 |-----------|-----------|--------|
-| Ed25519 signing/verification | 0 | Tested indirectly via capability tokens |
-| X25519 key exchange | 0 | No isolated tests |
-| HPKE_Seal | 0 | No isolated tests |
-| HKDF | 0 | No isolated tests |
-| AEAD ChaCha20Poly1305 | 0 | No isolated tests |
+| Ed25519 signing/verification | 17+ | RFC 8032 test vectors, malleability tests |
+| X25519 key exchange | 15+ | RFC 7748 test vectors, iterated tests |
+| HPKE_Seal | 20+ | Multiple recipients, AAD tests |
+| HKDF | 10+ | Key derivation tests |
+| AEAD ChaCha20Poly1305 | 15+ | Encryption/decryption tests |
+| COSE tokens | 20+ | Sign/verify, builder tests |
 
-**Note:** Crypto primitives are tested through golden vectors but lack isolated unit tests for correctness verification.
+**Note:** fcp-crypto has 109 comprehensive inline unit tests including RFC test vectors.
 
 ### Revocation Freshness: WELL TESTED
 
@@ -186,45 +191,38 @@ Golden vector testing is the primary strategy across:
 
 ## Gap List: Untested Critical Paths
 
-### Priority 1 (CRITICAL)
+### Priority 1 (HIGH) - No Unit Tests
 
 | Gap ID | Crate | Module | Risk |
 |--------|-------|--------|------|
-| GAP-001 | fcp-crypto | Ed25519 signing | Signature correctness unverified |
-| GAP-002 | fcp-crypto | X25519 exchange | Key agreement unverified |
-| GAP-003 | fcp-crypto | HPKE sealing | Encryption correctness unverified |
-| GAP-004 | fcp-crypto | HKDF derivation | Key derivation unverified |
-| GAP-005 | fcp-crypto | AEAD operations | Authenticated encryption unverified |
-| GAP-006 | fcp-store | object_store | Placement logic untested |
-| GAP-007 | fcp-store | symbol_store | Retrieval/retention untested |
-| GAP-008 | fcp-store | gc | Garbage collection safety untested |
-| GAP-009 | fcp-store | repair | Repair workflow untested |
-| GAP-010 | fcp-store | quarantine | Quarantine enforcement untested |
+| GAP-001 | fcp-oauth | oauth1 | OAuth 1.0 flow untested |
+| GAP-002 | fcp-oauth | oauth2 | OAuth 2.0 flow untested |
+| GAP-003 | fcp-oauth | pkce | PKCE challenge untested |
+| GAP-004 | fcp-streaming | sse | SSE protocol untested |
+| GAP-005 | fcp-streaming | websocket | WebSocket protocol untested |
+| GAP-006 | fcp-streaming | reconnect | Reconnection logic untested |
+| GAP-007 | connectors/* | all | All 5 connectors have 0 tests |
 
-### Priority 2 (HIGH)
+### Priority 2 (MEDIUM) - No Unit Tests
 
 | Gap ID | Crate | Module | Risk |
 |--------|-------|--------|------|
-| GAP-011 | fcp-oauth | oauth1 | OAuth 1.0 flow untested |
-| GAP-012 | fcp-oauth | oauth2 | OAuth 2.0 flow untested |
-| GAP-013 | fcp-oauth | pkce | PKCE challenge untested |
-| GAP-014 | fcp-raptorq | encode/decode | FEC correctness untested |
-| GAP-015 | fcp-streaming | sse | SSE protocol untested |
-| GAP-016 | fcp-streaming | websocket | WebSocket protocol untested |
-| GAP-017 | fcp-streaming | reconnect | Reconnection logic untested |
-| GAP-018 | connectors/* | all | All 5 connectors have 0 tests |
+| GAP-008 | fcp-telemetry | metrics | Metrics collection untested |
+| GAP-009 | fcp-telemetry | tracing | Tracing untested |
+| GAP-010 | fcp-registry | lib | Service discovery untested |
+| GAP-011 | fcp-webhook | signature | Webhook signature verification untested |
+| GAP-012 | fcp-webhook | handler | Webhook handling untested |
+| GAP-013 | fcp-cbor | lib | CBOR serialization untested (uses conformance only) |
 
-### Priority 3 (MEDIUM)
+### Previously Identified as Gaps (Now Verified as Tested)
 
-| Gap ID | Crate | Module | Risk |
-|--------|-------|--------|------|
-| GAP-019 | fcp-audit | lib | Audit chain creation untested |
-| GAP-020 | fcp-webhook | signature | Webhook signature verification untested |
-| GAP-021 | fcp-webhook | handler | Webhook handling untested |
-| GAP-022 | fcp-telemetry | metrics | Metrics collection untested |
-| GAP-023 | fcp-telemetry | tracing | Tracing untested |
-| GAP-024 | fcp-registry | lib | Service discovery untested |
-| GAP-025 | fcp-host | discovery | Discovery logic minimal coverage |
+The following crates were initially flagged as untested but actually have comprehensive inline tests:
+
+| Crate | Actual Tests | Coverage |
+|-------|-------------|----------|
+| fcp-crypto | 109 | Ed25519, X25519, HPKE, HKDF, AEAD, COSE (RFC vectors) |
+| fcp-store | 100 | Object store, symbol store, GC, repair, quarantine |
+| fcp-raptorq | 88 | FEC encoding/decoding, chunking |
 
 ---
 
@@ -268,18 +266,25 @@ Based on this inventory, the following beads should be created:
 ## Summary Statistics
 
 ```
-Total test markers:           ~3,300
+Total test markers:           ~3,600+ (verified by cargo test)
 Test files (dedicated):       43
-Files with inline tests:      134
+Files with inline tests:      100+
 Crates with test dirs:        12/27 (44%)
-Crates without tests:         15/27 (56%)
+Crates with inline tests:     15/27 (56%)
+Crates without any tests:     6/27 (22%) - oauth, streaming, telemetry, registry, webhook, cbor
 Connectors with tests:        0/5 (0%)
-Critical gaps:                10
-High priority gaps:           8
-Medium priority gaps:         7
-Disabled test markers:        266
+High priority gaps:           7
+Medium priority gaps:         6
 Mock usage files:             19
-Dominant test pattern:        Golden Vectors
+Dominant test pattern:        Inline #[cfg(test)] modules + Golden Vectors
+
+Key verified test counts:
+- fcp-crypto:   109 tests
+- fcp-store:    100 tests
+- fcp-raptorq:   88 tests
+- fcp-core:     650+ tests
+- fcp-sdk:      300+ tests
+- fcp-sandbox:  132 tests
 ```
 
 ---

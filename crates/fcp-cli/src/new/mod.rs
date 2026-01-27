@@ -24,8 +24,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+use fcp_core::validate_canonical_id;
 use fcp_manifest::ConnectorManifest;
 
 use types::{
@@ -136,7 +137,13 @@ fn run_scaffold(connector_id: &str, args: &NewArgs) -> Result<()> {
     validate_connector_id(connector_id)?;
 
     let archetype: ConnectorArchetype = args.archetype.into();
-    let result = scaffold_connector(connector_id, archetype, &args.zone, args.no_e2e, args.dry_run)?;
+    let result = scaffold_connector(
+        connector_id,
+        archetype,
+        &args.zone,
+        args.no_e2e,
+        args.dry_run,
+    )?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -162,15 +169,7 @@ fn validate_connector_id(id: &str) -> Result<()> {
         anyhow::bail!("connector ID must have a name after 'fcp.'");
     }
 
-    // Check for valid characters (alphanumeric, dots, underscores, hyphens)
-    if !suffix
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
-        anyhow::bail!(
-            "connector ID must contain only alphanumeric characters, dots, underscores, or hyphens"
-        );
-    }
+    validate_canonical_id(id).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // Check for consecutive dots
     if id.contains("..") {
@@ -193,14 +192,87 @@ fn normalize_crate_slug(short_name: &str) -> String {
         if ch.is_ascii_alphanumeric() {
             slug.push(ch.to_ascii_lowercase());
             last_dash = false;
-        } else {
-            if !last_dash {
-                slug.push('-');
-                last_dash = true;
-            }
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
         }
     }
     slug.trim_matches('-').to_string()
+}
+
+fn find_workspace_root() -> Result<PathBuf> {
+    let mut dir = std::env::current_dir()?;
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() {
+            let content = fs::read_to_string(&manifest)?;
+            if content.contains("[workspace]") {
+                return Ok(dir);
+            }
+        }
+        if !dir.pop() {
+            bail!("workspace Cargo.toml not found (expected [workspace] section)");
+        }
+    }
+}
+
+fn update_workspace_members(
+    workspace_root: &Path,
+    member_path: &str,
+    dry_run: bool,
+) -> Result<Option<CreatedFile>> {
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let content = fs::read_to_string(&manifest_path)?;
+    let needle = format!("\"{member_path}\"");
+    if content.contains(&needle) {
+        return Ok(None);
+    }
+
+    let updated = insert_workspace_member(&content, member_path)?;
+    if !dry_run {
+        fs::write(&manifest_path, updated.as_bytes())?;
+    }
+
+    Ok(Some(CreatedFile {
+        path: "Cargo.toml".to_string(),
+        purpose: "Workspace members update".to_string(),
+        size: updated.len(),
+    }))
+}
+
+fn insert_workspace_member(content: &str, member_path: &str) -> Result<String> {
+    let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
+    let mut in_workspace = false;
+    let mut in_members = false;
+    let mut inserted = false;
+
+    for i in 0..lines.len() {
+        let trimmed = lines[i].trim_start();
+        if trimmed.starts_with("[workspace]") {
+            in_workspace = true;
+            continue;
+        }
+        if in_workspace && trimmed.starts_with('[') && !trimmed.starts_with("[workspace]") {
+            in_workspace = false;
+        }
+        if in_workspace && trimmed.starts_with("members") && trimmed.contains('[') {
+            in_members = true;
+            continue;
+        }
+        if in_members && trimmed.starts_with(']') {
+            lines.insert(i, format!("    \"{member_path}\","));
+            inserted = true;
+            break;
+        }
+    }
+
+    if !inserted {
+        bail!("failed to locate [workspace].members list in Cargo.toml");
+    }
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
 }
 
 /// Scaffold a new connector.
@@ -213,17 +285,28 @@ fn scaffold_connector(
 ) -> Result<ScaffoldResult> {
     let short_name = extract_short_name(connector_id);
     let crate_slug = normalize_crate_slug(short_name);
+    if crate_slug.is_empty() {
+        anyhow::bail!("connector ID must include at least one alphanumeric character");
+    }
     let crate_name = format!("fcp-{crate_slug}");
     let crate_path = format!("connectors/{crate_slug}");
+    let workspace_root = find_workspace_root()?;
+    let base_path = workspace_root.join(&crate_path);
 
     let mut files_created = Vec::new();
 
     // Generate all files
-    let files = generate_files(connector_id, short_name, &crate_name, archetype, zone, no_e2e)?;
+    let files = generate_files(
+        connector_id,
+        short_name,
+        &crate_name,
+        archetype,
+        zone,
+        no_e2e,
+    )?;
 
     if !dry_run {
         // Create directory structure
-        let base_path = Path::new(&crate_path);
         fs::create_dir_all(base_path.join("src"))?;
         fs::create_dir_all(base_path.join("tests"))?;
 
@@ -239,6 +322,8 @@ fn scaffold_connector(
         }
     }
 
+    let workspace_update = update_workspace_members(&workspace_root, &crate_path, dry_run)?;
+
     // Record created files
     for (rel_path, content, purpose) in &files {
         files_created.push(CreatedFile {
@@ -246,6 +331,9 @@ fn scaffold_connector(
             purpose: purpose.clone(),
             size: content.len(),
         });
+    }
+    if let Some(update) = workspace_update {
+        files_created.push(update);
     }
 
     // Run prechecks on generated content
@@ -315,7 +403,7 @@ fn generate_files(
     if !no_e2e {
         files.push((
             "tests/e2e_tests.rs".to_string(),
-            generate_e2e_tests_rs(connector_id, crate_name),
+            generate_e2e_tests_rs(connector_id, short_name, crate_name),
             "E2E test scaffolding".to_string(),
         ));
     }
@@ -359,6 +447,7 @@ sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
+assert_cmd = "2.0"
 wiremock.workspace = true
 tokio = {{ workspace = true, features = ["macros", "rt-multi-thread"] }}
 "#
@@ -433,23 +522,22 @@ capability = "{short_name}.placeholder"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
-idempotency = "idempotent"
+idempotency = "best_effort"
 input_schema = {{ type = "object", properties = {{ }} }}
 output_schema = {{ type = "object", properties = {{ }} }}
 # Default-deny network constraints (replace with real endpoints)
-network_constraints = {{
-  host_allow = ["example.invalid"],
-  port_allow = [443],
-  require_sni = true,
-  deny_ip_literals = true,
-  deny_localhost = true,
-  deny_private_ranges = true,
-  deny_tailnet_ranges = true,
-  max_redirects = 0,
-  connect_timeout_ms = 5000,
-  total_timeout_ms = 60000,
-  max_response_bytes = 1048576
-}}
+[provides.operations.placeholder_operation.network_constraints]
+host_allow = ["example.invalid"]
+port_allow = [443]
+require_sni = true
+deny_ip_literals = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
 
 [provides.operations.placeholder_operation.ai_hints]
 when_to_use = "TODO: Describe when an AI agent should use this operation"
@@ -474,7 +562,7 @@ deny_ptrace = true
     finalize_manifest_toml(&template)
 }
 
-fn manifest_archetype(archetype: ConnectorArchetype) -> &'static str {
+const fn manifest_archetype(archetype: ConnectorArchetype) -> &'static str {
     match archetype {
         ConnectorArchetype::RequestResponse
         | ConnectorArchetype::Polling
@@ -498,7 +586,8 @@ fn finalize_manifest_toml(template: &str) -> Result<String> {
 }
 
 /// Generate main.rs content.
-fn generate_main_rs(short_name: &str) -> String {
+#[allow(clippy::too_many_lines)]
+fn generate_main_rs(short_name: &str, crate_ident: &str) -> String {
     let struct_name = to_pascal_case(short_name);
 
     format!(
@@ -511,12 +600,10 @@ fn generate_main_rs(short_name: &str) -> String {
 use std::io::{{BufRead, Write}};
 
 use anyhow::Result;
+use fcp_sdk::prelude::*;
 use tracing_subscriber::{{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt}};
 
-mod connector;
-mod types;
-
-use connector::{struct_name}Connector;
+use {crate_ident}::{struct_name}Connector;
 
 fn main() -> Result<()> {{
     // Initialize tracing to stderr (stdout is for JSON-RPC protocol)
@@ -558,6 +645,12 @@ fn run_fcp_loop() -> Result<()> {{
     Ok(())
 }}
 
+fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {{
+    serde_json::to_value(value).map_err(|e| FcpError::Internal {{
+        message: format!("Failed to serialize response: {{e}}"),
+    }})
+}}
+
 /// Handle a single FCP message.
 async fn handle_message(connector: &mut {struct_name}Connector, message: &str) -> serde_json::Value {{
     let request: serde_json::Value = match serde_json::from_str(message) {{
@@ -580,14 +673,50 @@ async fn handle_message(connector: &mut {struct_name}Connector, message: &str) -
         .unwrap_or(serde_json::json!({{}}));
 
     let result = match method {{
-        "configure" => connector.handle_configure(params).await,
-        "handshake" => connector.handle_handshake(params).await,
-        "health" => connector.handle_health().await,
-        "introspect" => connector.handle_introspect().await,
-        "invoke" => connector.handle_invoke(params).await,
-        "subscribe" => connector.handle_subscribe(params).await,
-        "shutdown" => connector.handle_shutdown(params).await,
-        _ => Err(fcp_core::FcpError::InvalidRequest {{
+        "configure" => {{
+            connector.configure(params).await?;
+            Ok(serde_json::json!({{ "status": "configured" }}))
+        }}
+        "handshake" => {{
+            let req: HandshakeRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
+                code: 1003,
+                message: format!("Invalid handshake request: {{e}}"),
+            }})?;
+            encode(&connector.handshake(req).await?)
+        }}
+        "health" => encode(&connector.health().await),
+        "introspect" => encode(&connector.introspect()),
+        "invoke" => {{
+            let req: InvokeRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
+                code: 1003,
+                message: format!("Invalid invoke request: {{e}}"),
+            }})?;
+            encode(&connector.invoke(req).await?)
+        }}
+        "subscribe" => {{
+            let req: SubscribeRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
+                code: 1003,
+                message: format!("Invalid subscribe request: {{e}}"),
+            }})?;
+            encode(&connector.subscribe(req).await?)
+        }}
+        "unsubscribe" => {{
+            let req: UnsubscribeRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
+                code: 1003,
+                message: format!("Invalid unsubscribe request: {{e}}"),
+            }})?;
+            connector.unsubscribe(req).await?;
+            Ok(serde_json::json!({{ "status": "unsubscribed" }}))
+        }}
+        "shutdown" => {{
+            let req: ShutdownRequest = serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {{
+                code: 1003,
+                message: format!("Invalid shutdown request: {{e}}"),
+            }})?;
+            connector.shutdown(req).await?;
+            Ok(serde_json::json!({{ "status": "shutdown_accepted" }}))
+        }}
+        _ => Err(FcpError::InvalidRequest {{
             code: 1002,
             message: format!("Unknown method: {{method}}"),
         }}),
@@ -625,7 +754,7 @@ async fn handle_message(connector: &mut {struct_name}Connector, message: &str) -
 fn generate_lib_rs(short_name: &str) -> String {
     let struct_name = to_pascal_case(short_name);
     format!(
-        r#"//! Library exports for {struct_name} connector.
+        r"//! Library exports for {struct_name} connector.
 
 #![forbid(unsafe_code)]
 
@@ -633,186 +762,197 @@ pub mod connector;
 pub mod types;
 
 pub use connector::{struct_name}Connector;
-"#
+"
     )
 }
 
 /// Generate connector.rs content.
 #[allow(clippy::too_many_lines)] // Template generation is inherently verbose
-fn generate_connector_rs(connector_id: &str, short_name: &str, archetype: ConnectorArchetype) -> String {
+fn generate_connector_rs(
+    connector_id: &str,
+    short_name: &str,
+    archetype: ConnectorArchetype,
+) -> String {
     let struct_name = to_pascal_case(short_name);
-    let archetype_trait = match archetype {
-        ConnectorArchetype::Streaming => "Streaming",
-        ConnectorArchetype::Bidirectional => "Bidirectional",
-        ConnectorArchetype::Polling => "Polling",
-        ConnectorArchetype::Webhook => "Webhook",
-        _ => "RequestResponse",
-    };
+    let supports_streaming = matches!(
+        archetype,
+        ConnectorArchetype::Streaming
+            | ConnectorArchetype::Bidirectional
+            | ConnectorArchetype::Webhook
+            | ConnectorArchetype::Queue
+    );
 
     format!(
         r#"//! {struct_name} connector implementation.
 
-use fcp_core::{{
-    BaseConnector, CapabilityToken, ConnectorId, FcpError, FcpResult, Introspection,
-}};
-use serde_json::Value;
+use std::time::Instant;
 
-use crate::types::*;
+use fcp_sdk::prelude::*;
+use sha2::{{Digest, Sha256}};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OP_PLACEHOLDER: &str = "{short_name}.placeholder";
+const CAP_PLACEHOLDER: &str = "{short_name}.placeholder";
+const SUPPORTS_STREAMING: bool = {supports_streaming};
 
 /// {struct_name} connector state.
 #[derive(Debug)]
 pub struct {struct_name}Connector {{
     base: BaseConnector,
-    // TODO: Add connector-specific state
-    // Example: client: Option<{struct_name}Client>,
+    configured: bool,
+    started_at: Instant,
 }}
 
 impl {struct_name}Connector {{
     /// Create a new connector instance.
     pub fn new() -> Self {{
         Self {{
-            base: BaseConnector::new(
-                ConnectorId::new("{connector_id}").expect("valid connector id"),
-            ),
+            base: BaseConnector::new(ConnectorId::from_static("{connector_id}")),
+            configured: false,
+            started_at: Instant::now(),
         }}
     }}
 
-    /// Handle the `configure` method.
-    pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {{
-        tracing::info!(connector_id = %self.base.id, "Configuring connector");
+    fn manifest_hash() -> String {{
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{{}}", hex::encode(hasher.finalize()))
+    }}
 
-        // TODO: Parse and validate configuration
-        // Example:
-        // let config: {struct_name}Config = serde_json::from_value(params)
-        //     .map_err(|e| FcpError::InvalidRequest {{
-        //         code: 1003,
-        //         message: format!("Invalid configuration: {{e}}"),
-        //     }})?;
+    fn placeholder_operation(&self) -> OperationInfo {{
+        OperationInfo {{
+            id: OperationId::from_static(OP_PLACEHOLDER),
+            summary: "Placeholder operation".to_string(),
+            description: Some("TODO: Replace with real operation".to_string()),
+            input_schema: serde_json::json!({{ "type": "object" }}),
+            output_schema: serde_json::json!({{ "type": "object" }}),
+            capability: CapabilityId::from_static(CAP_PLACEHOLDER),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {{
+                when_to_use: "TODO: describe when to use".to_string(),
+                common_mistakes: vec!["TODO: add common mistakes".to_string()],
+                examples: Vec::new(),
+                related: Vec::new(),
+            }},
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        }}
+    }}
+}}
 
+#[async_trait]
+impl FcpConnector for {struct_name}Connector {{
+    fn id(&self) -> &ConnectorId {{
+        &self.base.id
+    }}
+
+    async fn configure(&mut self, _config: serde_json::Value) -> FcpResult<()> {{
+        self.configured = true;
         self.base.set_configured(true);
-
-        Ok(serde_json::json!({{
-            "status": "configured"
-        }}))
+        Ok(())
     }}
 
-    /// Handle the `handshake` method.
-    pub async fn handle_handshake(&self, _params: Value) -> FcpResult<Value> {{
-        tracing::debug!(connector_id = %self.base.id, "Handshake request");
+    async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {{
+        self.base.set_handshaken(true);
 
-        Ok(serde_json::json!({{
-            "connector_id": self.base.id.as_str(),
-            "version": "0.1.0",
-            "archetype": "{archetype_trait}",
-            "capabilities": [
-                "{short_name}.placeholder"
-            ]
-        }}))
+        let capabilities_granted = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {{
+                capability: cap,
+                operation: None,
+            }})
+            .collect();
+
+        Ok(HandshakeResponse {{
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id: SessionId::new(),
+            manifest_hash: Self::manifest_hash(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {{
+                streaming: SUPPORTS_STREAMING,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }}),
+            auth_caps: None,
+            op_catalog_hash: None,
+        }})
     }}
 
-    /// Handle the `health` method.
-    pub async fn handle_health(&self) -> FcpResult<Value> {{
-        // TODO: Implement actual health checks
-        let healthy = self.base.is_configured();
-
-        Ok(serde_json::json!({{
-            "healthy": healthy,
-            "message": if healthy {{ "Connector is healthy" }} else {{ "Connector not configured" }}
-        }}))
+    async fn health(&self) -> HealthSnapshot {{
+        let mut snapshot = if self.configured {{
+            HealthSnapshot::ready()
+        }} else {{
+            HealthSnapshot::degraded("not configured")
+        }};
+        snapshot.uptime_ms = self.started_at.elapsed().as_millis() as u64;
+        snapshot
     }}
 
-    /// Handle the `introspect` method.
-    pub async fn handle_introspect(&self) -> FcpResult<Value> {{
-        // TODO: Return full introspection data with operation schemas
-        Ok(serde_json::json!({{
-            "connector_id": self.base.id.as_str(),
-            "version": "0.1.0",
-            "operations": [
-                {{
-                    "id": "{short_name}.placeholder",
-                    "summary": "TODO: Placeholder operation",
-                    "input_schema": {{ "type": "object" }},
-                    "output_schema": {{ "type": "object" }},
-                    "capability": "{short_name}.placeholder",
-                    "risk_level": "low",
-                    "safety_tier": "safe"
-                }}
-            ]
-        }}))
+    fn metrics(&self) -> ConnectorMetrics {{
+        self.base.metrics()
     }}
 
-    /// Handle the `invoke` method.
-    pub async fn handle_invoke(&self, params: Value) -> FcpResult<Value> {{
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {{
-                code: 1004,
-                message: "Missing 'operation' field".to_string(),
-            }})?;
+    async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {{
+        Ok(())
+    }}
 
-        // TODO: Add capability verification
-        // let capability = params.get("capability_token")...;
-
-        tracing::info!(
-            connector_id = %self.base.id,
-            operation = %operation,
-            "Invoking operation"
-        );
-
-        match operation {{
-            "{short_name}.placeholder" => self.invoke_placeholder(params).await,
-            _ => Err(FcpError::OperationNotFound {{
-                operation: operation.to_string(),
+    fn introspect(&self) -> Introspection {{
+        Introspection {{
+            operations: vec![self.placeholder_operation()],
+            events: Vec::new(),
+            resource_types: Vec::new(),
+            auth_caps: None,
+            event_caps: Some(EventCaps {{
+                streaming: SUPPORTS_STREAMING,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
             }}),
         }}
     }}
 
-    /// Placeholder operation implementation.
-    async fn invoke_placeholder(&self, _params: Value) -> FcpResult<Value> {{
-        // TODO: Implement actual operation logic
-        // Remember:
-        // - Never log secrets
-        // - Emit structured traces with correlation_id
-        // - Return proper error taxonomy codes
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {{
+        if req.operation.as_str() != OP_PLACEHOLDER {{
+            return Err(FcpError::InvalidRequest {{
+                code: 1004,
+                message: format!("Unknown operation: {{}}", req.operation.as_str()),
+            }});
+        }}
 
-        Ok(serde_json::json!({{
-            "status": "ok",
-            "message": "Placeholder operation executed"
-        }}))
+        // TODO: Validate capability tokens, enforce network constraints, emit receipts.
+        Ok(InvokeResponse::ok(
+            req.id,
+            serde_json::json!({{
+                "status": "ok",
+                "message": "Placeholder operation executed"
+            }}),
+        ))
     }}
 
-    /// Handle the `subscribe` method.
-    pub async fn handle_subscribe(&mut self, params: Value) -> FcpResult<Value> {{
-        let topic = params
-            .get("topic")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FcpError::InvalidRequest {{
-                code: 1005,
-                message: "Missing 'topic' field".to_string(),
-            }})?;
+    async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {{
+        if !SUPPORTS_STREAMING {{
+            return Err(FcpError::StreamingNotSupported);
+        }}
 
-        tracing::info!(
-            connector_id = %self.base.id,
-            topic = %topic,
-            "Subscribe request"
-        );
-
-        // TODO: Implement subscription logic
-        Err(FcpError::OperationNotFound {{
-            operation: format!("subscribe:{{topic}}"),
+        Ok(SubscribeResponse {{
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {{
+                confirmed_topics: req.topics,
+                cursors: std::collections::HashMap::new(),
+                replay_supported: false,
+                buffer: None,
+            }},
         }})
     }}
 
-    /// Handle the `shutdown` method.
-    pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {{
-        tracing::info!(connector_id = %self.base.id, "Shutdown request");
-
-        // TODO: Clean up resources, close connections
-
-        Ok(serde_json::json!({{
-            "status": "shutdown_accepted"
-        }}))
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {{
+        Ok(())
     }}
 }}
 
@@ -826,40 +966,55 @@ impl Default for {struct_name}Connector {{
 mod tests {{
     use super::*;
 
-    #[tokio::test]
-    async fn test_configure() {{
-        let mut connector = {struct_name}Connector::new();
-        let result = connector.handle_configure(serde_json::json!({{}})).await;
-        assert!(result.is_ok());
+    fn base_handshake() -> HandshakeRequest {{
+        HandshakeRequest {{
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key: [0u8; 32],
+            nonce: [0u8; 32],
+            capabilities_requested: vec![CapabilityId::from_static(CAP_PLACEHOLDER)],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        }}
+    }}
+
+    fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
+        InvokeRequest {{
+            r#type: "invoke".into(),
+            id: RequestId::new("req_1"),
+            connector_id: connector_id.clone(),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input: serde_json::json!({{}}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }}
     }}
 
     #[tokio::test]
     async fn test_handshake() {{
-        let connector = {struct_name}Connector::new();
-        let result = connector.handle_handshake(serde_json::json!({{}})).await;
+        let mut connector = {struct_name}Connector::new();
+        let result = connector.handshake(base_handshake()).await;
         assert!(result.is_ok());
         let response = result.unwrap();
-        assert_eq!(response["connector_id"], "{connector_id}");
+        assert_eq!(response.status, "accepted");
     }}
 
     #[tokio::test]
-    async fn test_health_unconfigured() {{
+    async fn test_invoke_placeholder() {{
         let connector = {struct_name}Connector::new();
-        let result = connector.handle_health().await;
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response["healthy"], false);
-    }}
-
-    #[tokio::test]
-    async fn test_invoke_unknown_operation() {{
-        let connector = {struct_name}Connector::new();
-        let result = connector
-            .handle_invoke(serde_json::json!({{
-                "operation": "unknown.operation"
-            }}))
-            .await;
-        assert!(result.is_err());
+        let req = base_invoke(connector.id(), OP_PLACEHOLDER);
+        let response = connector.invoke(req).await.expect("invoke");
+        assert_eq!(response.status, InvokeStatus::Ok);
     }}
 }}
 "#
@@ -956,13 +1111,36 @@ mod tests {{
 }
 
 /// Generate unit tests content.
-fn generate_unit_tests_rs(short_name: &str) -> String {
+fn generate_unit_tests_rs(short_name: &str, crate_ident: &str) -> String {
     let struct_name = to_pascal_case(short_name);
 
     format!(
         r#"//! Unit tests for {struct_name} connector.
 
-use fcp_{short_name}::connector::{struct_name}Connector;
+use fcp_sdk::prelude::*;
+use {crate_ident}::{struct_name}Connector;
+
+const OP_PLACEHOLDER: &str = "{short_name}.placeholder";
+
+fn base_invoke(connector_id: &ConnectorId, operation: &str) -> InvokeRequest {{
+    InvokeRequest {{
+        r#type: "invoke".into(),
+        id: RequestId::new("req_1"),
+        connector_id: connector_id.clone(),
+        operation: OperationId::from_static(operation),
+        zone_id: ZoneId::work(),
+        input: serde_json::json!({{}}),
+        capability_token: CapabilityToken::test_token(),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }}
+}}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Happy path tests
@@ -973,14 +1151,14 @@ async fn test_happy_path_placeholder() {{
     let mut connector = {struct_name}Connector::new();
 
     // Configure the connector
-    let config_result = connector.handle_configure(serde_json::json!({{}})).await;
-    assert!(config_result.is_ok(), "Configuration should succeed");
+    connector
+        .configure(serde_json::json!({{}}))
+        .await
+        .expect("configure");
 
     // Invoke placeholder operation
     let invoke_result = connector
-        .handle_invoke(serde_json::json!({{
-            "operation": "{short_name}.placeholder"
-        }}))
+        .invoke(base_invoke(connector.id(), OP_PLACEHOLDER))
         .await;
     assert!(invoke_result.is_ok(), "Placeholder operation should succeed");
 }}
@@ -1034,9 +1212,7 @@ async fn test_error_codes_correct() {{
 
     // Test unknown operation returns correct error
     let result = connector
-        .handle_invoke(serde_json::json!({{
-            "operation": "unknown.operation"
-        }}))
+        .invoke(base_invoke(connector.id(), "unknown.operation"))
         .await;
 
     assert!(result.is_err());
@@ -1047,7 +1223,8 @@ async fn test_error_codes_correct() {{
 }
 
 /// Generate E2E tests content.
-fn generate_e2e_tests_rs(connector_id: &str, short_name: &str) -> String {
+#[allow(clippy::too_many_lines)]
+fn generate_e2e_tests_rs(connector_id: &str, short_name: &str, crate_name: &str) -> String {
     let struct_name = to_pascal_case(short_name);
 
     format!(
@@ -1061,6 +1238,7 @@ fn generate_e2e_tests_rs(connector_id: &str, short_name: &str) -> String {
 
 use std::process::{{Command, Stdio}};
 use std::io::{{BufRead, BufReader, Write}};
+use assert_cmd::cargo::cargo_bin;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // E2E test harness
@@ -1068,7 +1246,7 @@ use std::io::{{BufRead, BufReader, Write}};
 
 /// Spawn the connector binary and return handles for communication.
 fn spawn_connector() -> std::io::Result<ConnectorProcess> {{
-    let child = Command::new(env!("CARGO_BIN_EXE_fcp-{short_name}"))
+    let child = Command::new(cargo_bin("{crate_name}"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1211,6 +1389,7 @@ fn test_e2e_audit_event_shape() {{
 }
 
 /// Run compliance prechecks on generated files.
+#[allow(clippy::too_many_lines)]
 fn run_prechecks(
     files: &[(String, String, String)],
     connector_id: &str,
@@ -1224,45 +1403,106 @@ fn run_prechecks(
         .find(|(path, _, _)| path == "manifest.toml")
         .map(|(_, content, _)| content.as_str());
 
-    // Check 1: Manifest is valid TOML
+    let mut parsed_manifest: Option<ConnectorManifest> = None;
+
+    // Check 1: Manifest passes FCP validation
     if let Some(content) = manifest_content {
-        let toml_valid = toml::from_str::<toml::Value>(content).is_ok();
+        match ConnectorManifest::parse_str(content) {
+            Ok(manifest) => {
+                parsed_manifest = Some(manifest);
+                checks.push(PrecheckItem {
+                    id: "manifest.valid".to_string(),
+                    description: "Manifest passes FCP validation".to_string(),
+                    passed: true,
+                    message: None,
+                    severity: CheckSeverity::Error,
+                });
+            }
+            Err(e) => {
+                checks.push(PrecheckItem {
+                    id: "manifest.valid".to_string(),
+                    description: "Manifest passes FCP validation".to_string(),
+                    passed: false,
+                    message: Some(e.to_string()),
+                    severity: CheckSeverity::Error,
+                });
+            }
+        }
+    } else {
         checks.push(PrecheckItem {
-            id: "manifest.valid_toml".to_string(),
-            description: "Manifest is valid TOML".to_string(),
-            passed: toml_valid,
-            message: if toml_valid {
-                None
-            } else {
-                Some("Manifest failed TOML parsing".to_string())
-            },
+            id: "manifest.exists".to_string(),
+            description: "Manifest file exists".to_string(),
+            passed: false,
+            message: Some("manifest.toml not found".to_string()),
             severity: CheckSeverity::Error,
         });
     }
 
     // Check 2: Single-zone binding
+    let single_zone_ok = parsed_manifest.as_ref().is_some_and(|manifest| {
+        let home = &manifest.zones.home;
+        manifest.zones.allowed_sources.len() == 1
+            && manifest.zones.allowed_targets.len() == 1
+            && manifest.zones.allowed_sources[0] == *home
+            && manifest.zones.allowed_targets[0] == *home
+    });
     checks.push(PrecheckItem {
         id: "manifest.single_zone".to_string(),
         description: "Connector uses single-zone binding".to_string(),
-        passed: true, // We generate compliant manifests
+        passed: single_zone_ok,
         message: Some(format!("Home zone: {zone}")),
         severity: CheckSeverity::Error,
     });
 
     // Check 3: Default-deny NetworkConstraints
+    let mut missing_constraints = Vec::new();
+    let mut weak_defaults = Vec::new();
+    if let Some(manifest) = &parsed_manifest {
+        for (op_id, op) in &manifest.provides.operations {
+            match &op.network_constraints {
+                Some(nc) => {
+                    if nc.host_allow.is_empty() || nc.port_allow.is_empty() {
+                        missing_constraints.push(op_id.clone());
+                    }
+                    if !(nc.deny_localhost
+                        && nc.deny_private_ranges
+                        && nc.deny_tailnet_ranges
+                        && nc.deny_ip_literals)
+                    {
+                        weak_defaults.push(op_id.clone());
+                    }
+                }
+                None => missing_constraints.push(op_id.clone()),
+            }
+        }
+    }
+    let network_ok = missing_constraints.is_empty() && weak_defaults.is_empty();
     checks.push(PrecheckItem {
         id: "manifest.network_default_deny".to_string(),
         description: "NetworkConstraints use default-deny".to_string(),
-        passed: true, // Generated with empty host_allow
-        message: Some("Generated with empty host_allow (default-deny)".to_string()),
+        passed: network_ok,
+        message: if network_ok {
+            Some("NetworkConstraints present with deny-by-default flags".to_string())
+        } else {
+            Some(format!(
+                "Missing/weak constraints in ops: missing={missing_constraints:?} weak={weak_defaults:?}"
+            ))
+        },
         severity: CheckSeverity::Error,
     });
 
     // Check 4: Forbidden capabilities include system.exec
+    let forbids_exec = parsed_manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .capabilities
+            .forbidden
+            .iter()
+            .any(|cap| cap.as_str() == "system.exec")
+    });
     checks.push(PrecheckItem {
         id: "manifest.forbidden_exec".to_string(),
         description: "system.exec is in forbidden capabilities".to_string(),
-        passed: true, // We generate this
+        passed: forbids_exec,
         message: None,
         severity: CheckSeverity::Error,
     });
@@ -1288,7 +1528,12 @@ fn run_prechecks(
         .iter()
         .find(|(path, _, _)| path == "src/main.rs")
         .map(|(_, content, _)| content.as_str());
-    let forbids_unsafe = main_rs.is_some_and(|c| c.contains("#![forbid(unsafe_code)]"));
+    let lib_rs = files
+        .iter()
+        .find(|(path, _, _)| path == "src/lib.rs")
+        .map(|(_, content, _)| content.as_str());
+    let forbids_unsafe = main_rs.is_some_and(|c| c.contains("#![forbid(unsafe_code)]"))
+        && lib_rs.is_some_and(|c| c.contains("#![forbid(unsafe_code)]"));
     checks.push(PrecheckItem {
         id: "code.forbid_unsafe".to_string(),
         description: "Code forbids unsafe Rust".to_string(),
@@ -1298,7 +1543,9 @@ fn run_prechecks(
     });
 
     // Check 7: Has unit tests
-    let has_unit_tests = files.iter().any(|(path, _, _)| path.contains("tests/"));
+    let has_unit_tests = files
+        .iter()
+        .any(|(path, _, _)| path == "tests/unit_tests.rs");
     checks.push(PrecheckItem {
         id: "tests.unit_scaffold".to_string(),
         description: "Unit test scaffolding present".to_string(),
@@ -1308,7 +1555,7 @@ fn run_prechecks(
     });
 
     // Check 8: Connector ID format
-    let valid_id = connector_id.starts_with("fcp.") && !connector_id.contains("..");
+    let valid_id = validate_connector_id(connector_id).is_ok();
     checks.push(PrecheckItem {
         id: "manifest.connector_id_format".to_string(),
         description: "Connector ID follows naming convention".to_string(),
@@ -1325,6 +1572,7 @@ fn run_prechecks(
 }
 
 /// Check an existing connector directory for compliance.
+#[allow(clippy::too_many_lines)]
 fn check_connector(path: &Path) -> Result<CheckResult> {
     let mut checks = Vec::new();
     let mut suggested_fixes = Vec::new();
@@ -1336,38 +1584,34 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
 
     // Try to read manifest.toml
     let manifest_path = path.join("manifest.toml");
+    let mut parsed_manifest: Option<ConnectorManifest> = None;
     let connector_id = if manifest_path.exists() {
         let content = fs::read_to_string(&manifest_path)?;
 
-        // Check TOML validity
-        match toml::from_str::<toml::Value>(&content) {
+        match ConnectorManifest::parse_str(&content) {
             Ok(manifest) => {
                 checks.push(PrecheckItem {
-                    id: "manifest.valid_toml".to_string(),
-                    description: "Manifest is valid TOML".to_string(),
+                    id: "manifest.valid".to_string(),
+                    description: "Manifest passes FCP validation".to_string(),
                     passed: true,
                     message: None,
                     severity: CheckSeverity::Error,
                 });
-
-                // Extract connector ID
-                manifest
-                    .get("connector")
-                    .and_then(|c| c.get("id"))
-                    .and_then(|id| id.as_str())
-                    .map(String::from)
+                let id = manifest.connector.id.to_string();
+                parsed_manifest = Some(manifest);
+                Some(id)
             }
             Err(e) => {
                 checks.push(PrecheckItem {
-                    id: "manifest.valid_toml".to_string(),
-                    description: "Manifest is valid TOML".to_string(),
+                    id: "manifest.valid".to_string(),
+                    description: "Manifest passes FCP validation".to_string(),
                     passed: false,
                     message: Some(e.to_string()),
                     severity: CheckSeverity::Error,
                 });
                 suggested_fixes.push(SuggestedFix {
-                    check_id: "manifest.valid_toml".to_string(),
-                    action: "Fix TOML syntax errors in manifest".to_string(),
+                    check_id: "manifest.valid".to_string(),
+                    action: "Fix manifest validation errors".to_string(),
                     file: Some("manifest.toml".to_string()),
                 });
                 None
@@ -1389,31 +1633,134 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
         None
     };
 
-    // Check for #![forbid(unsafe_code)] in main.rs
-    let main_rs_path = path.join("src/main.rs");
-    if main_rs_path.exists() {
-        let content = fs::read_to_string(&main_rs_path)?;
-        let forbids_unsafe = content.contains("#![forbid(unsafe_code)]");
+    if let Some(id) = &connector_id {
+        let valid = validate_connector_id(id).is_ok();
         checks.push(PrecheckItem {
-            id: "code.forbid_unsafe".to_string(),
-            description: "Code forbids unsafe Rust".to_string(),
-            passed: forbids_unsafe,
-            message: if forbids_unsafe {
+            id: "manifest.connector_id_format".to_string(),
+            description: "Connector ID follows naming convention".to_string(),
+            passed: valid,
+            message: if valid {
                 None
             } else {
-                Some("Add #![forbid(unsafe_code)] to main.rs".to_string())
+                Some(format!("Invalid connector ID: {id}"))
             },
             severity: CheckSeverity::Error,
         });
+    }
 
-        if !forbids_unsafe {
+    // Check single-zone binding
+    let single_zone_ok = parsed_manifest.as_ref().is_some_and(|manifest| {
+        let home = &manifest.zones.home;
+        manifest.zones.allowed_sources.len() == 1
+            && manifest.zones.allowed_targets.len() == 1
+            && manifest.zones.allowed_sources[0] == *home
+            && manifest.zones.allowed_targets[0] == *home
+    });
+    checks.push(PrecheckItem {
+        id: "manifest.single_zone".to_string(),
+        description: "Connector uses single-zone binding".to_string(),
+        passed: single_zone_ok,
+        message: None,
+        severity: CheckSeverity::Error,
+    });
+
+    // Check default-deny NetworkConstraints
+    let mut missing_constraints = Vec::new();
+    let mut weak_defaults = Vec::new();
+    if let Some(manifest) = &parsed_manifest {
+        for (op_id, op) in &manifest.provides.operations {
+            match &op.network_constraints {
+                Some(nc) => {
+                    if nc.host_allow.is_empty() || nc.port_allow.is_empty() {
+                        missing_constraints.push(op_id.clone());
+                    }
+                    if !(nc.deny_localhost
+                        && nc.deny_private_ranges
+                        && nc.deny_tailnet_ranges
+                        && nc.deny_ip_literals)
+                    {
+                        weak_defaults.push(op_id.clone());
+                    }
+                }
+                None => missing_constraints.push(op_id.clone()),
+            }
+        }
+    }
+    let network_ok = missing_constraints.is_empty() && weak_defaults.is_empty();
+    checks.push(PrecheckItem {
+        id: "manifest.network_default_deny".to_string(),
+        description: "NetworkConstraints use default-deny".to_string(),
+        passed: network_ok,
+        message: if network_ok {
+            None
+        } else {
+            Some(format!(
+                "Missing/weak constraints in ops: missing={missing_constraints:?} weak={weak_defaults:?}"
+            ))
+        },
+        severity: CheckSeverity::Error,
+    });
+
+    // Check forbidden capabilities include system.exec
+    let forbids_exec = parsed_manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .capabilities
+            .forbidden
+            .iter()
+            .any(|cap| cap.as_str() == "system.exec")
+    });
+    checks.push(PrecheckItem {
+        id: "manifest.forbidden_exec".to_string(),
+        description: "system.exec is in forbidden capabilities".to_string(),
+        passed: forbids_exec,
+        message: None,
+        severity: CheckSeverity::Error,
+    });
+
+    // Check for #![forbid(unsafe_code)] in main.rs and lib.rs
+    let main_rs_path = path.join("src/main.rs");
+    let lib_rs_path = path.join("src/lib.rs");
+    let mut forbids_unsafe = true;
+
+    if main_rs_path.exists() {
+        let content = fs::read_to_string(&main_rs_path)?;
+        if !content.contains("#![forbid(unsafe_code)]") {
+            forbids_unsafe = false;
             suggested_fixes.push(SuggestedFix {
                 check_id: "code.forbid_unsafe".to_string(),
                 action: "Add #![forbid(unsafe_code)] at the top of main.rs".to_string(),
                 file: Some("src/main.rs".to_string()),
             });
         }
+    } else {
+        forbids_unsafe = false;
     }
+
+    if lib_rs_path.exists() {
+        let content = fs::read_to_string(&lib_rs_path)?;
+        if !content.contains("#![forbid(unsafe_code)]") {
+            forbids_unsafe = false;
+            suggested_fixes.push(SuggestedFix {
+                check_id: "code.forbid_unsafe".to_string(),
+                action: "Add #![forbid(unsafe_code)] at the top of lib.rs".to_string(),
+                file: Some("src/lib.rs".to_string()),
+            });
+        }
+    } else {
+        forbids_unsafe = false;
+    }
+
+    checks.push(PrecheckItem {
+        id: "code.forbid_unsafe".to_string(),
+        description: "Code forbids unsafe Rust".to_string(),
+        passed: forbids_unsafe,
+        message: if forbids_unsafe {
+            None
+        } else {
+            Some("Add #![forbid(unsafe_code)] to src/main.rs and src/lib.rs".to_string())
+        },
+        severity: CheckSeverity::Error,
+    });
 
     // Check for test directory
     let tests_dir = path.join("tests");
@@ -1476,14 +1823,15 @@ fn generate_next_steps(
     }
 
     steps.push(format!("Validate: fcp new --check {crate_path}"));
-    steps.push(format!("Build: cargo build -p fcp-{}", extract_short_name(connector_id)));
+    let crate_slug = normalize_crate_slug(extract_short_name(connector_id));
+    steps.push(format!("Build: cargo build -p fcp-{crate_slug}"));
 
     steps
 }
 
 /// Convert `snake_case` to `PascalCase`.
 fn to_pascal_case(s: &str) -> String {
-    s.split(['_', '-'])
+    s.split(['_', '-', '.'])
         .filter(|part| !part.is_empty())
         .map(|part| {
             let mut chars = part.chars();
@@ -1625,6 +1973,7 @@ mod tests {
         assert!(validate_connector_id("myservice").is_err());
         assert!(validate_connector_id("fcp.").is_err());
         assert!(validate_connector_id("fcp..service").is_err());
+        assert!(validate_connector_id("fcp.MyService").is_err());
         assert!(validate_connector_id("fcp.my service").is_err());
     }
 
@@ -1640,6 +1989,7 @@ mod tests {
         assert_eq!(to_pascal_case("my_service"), "MyService");
         assert_eq!(to_pascal_case("myservice"), "Myservice");
         assert_eq!(to_pascal_case("my-service"), "MyService");
+        assert_eq!(to_pascal_case("my.service"), "MyService");
         assert_eq!(to_pascal_case("MY_SERVICE"), "MyService");
     }
 
@@ -1655,10 +2005,15 @@ mod tests {
         .expect("scaffold should succeed");
 
         // Check expected files
-        let file_paths: Vec<&str> = result.files_created.iter().map(|f| f.path.as_str()).collect();
+        let file_paths: Vec<&str> = result
+            .files_created
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
         assert!(file_paths.contains(&"Cargo.toml"));
         assert!(file_paths.contains(&"manifest.toml"));
         assert!(file_paths.contains(&"src/main.rs"));
+        assert!(file_paths.contains(&"src/lib.rs"));
         assert!(file_paths.contains(&"src/connector.rs"));
         assert!(file_paths.contains(&"src/types.rs"));
         assert!(file_paths.contains(&"tests/unit_tests.rs"));
@@ -1676,8 +2031,12 @@ mod tests {
         )
         .expect("scaffold should succeed");
 
-        let file_paths: Vec<&str> = result.files_created.iter().map(|f| f.path.as_str()).collect();
-        assert!(!file_paths.contains(&"tests/e2e_tests.rs"));
+        assert!(
+            !result
+                .files_created
+                .iter()
+                .any(|f| f.path.as_str() == "tests/e2e_tests.rs")
+        );
     }
 
     #[test]
@@ -1691,6 +2050,9 @@ mod tests {
         )
         .expect("scaffold should succeed");
 
-        assert!(result.prechecks.passed, "Prechecks should pass for generated scaffold");
+        assert!(
+            result.prechecks.passed,
+            "Prechecks should pass for generated scaffold"
+        );
     }
 }
