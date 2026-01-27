@@ -213,9 +213,7 @@ impl BootstrapWorkflow {
                 device_count,
                 threshold,
             } => self.run_multi_device_bootstrap(threshold, device_count)?,
-            BootstrapMode::HardwareToken { token } => {
-                self.run_hardware_token_bootstrap(&token)?
-            }
+            BootstrapMode::HardwareToken { token } => self.run_hardware_token_bootstrap(&token)?,
             BootstrapMode::Import { phrase } => self.run_import_bootstrap(&phrase)?,
         };
 
