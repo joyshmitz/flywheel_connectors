@@ -81,15 +81,11 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
     let zone_id: ZoneId = args.zone.parse()?;
 
     // Check for real mesh endpoint (future functionality)
-    let mesh_endpoint = std::env::var("FCP_MESH_ENDPOINT").ok();
-    let report = if let Some(_endpoint) = mesh_endpoint {
+    if std::env::var("FCP_MESH_ENDPOINT").is_ok() {
         // TODO: Connect to real mesh node when available
-        // For now, fall back to simulation with a note
         eprintln!("Note: Real mesh connectivity not yet implemented, using simulation");
-        simulate_report(&zone_id, args.scenario)
-    } else {
-        simulate_report(&zone_id, args.scenario)
-    };
+    }
+    let report = simulate_report(&zone_id, args.scenario);
 
     if args.json {
         let output = serde_json::to_string_pretty(&report)?;
@@ -566,6 +562,7 @@ fn build_critical_report(zone_id: &ZoneId, now: u64) -> DoctorReport {
         .build()
 }
 
+#[allow(clippy::too_many_lines)] // Output formatting is clearer as a single function
 fn print_human_readable(report: &DoctorReport) {
     let reset = "\x1b[0m";
     let green = "\x1b[32m";
@@ -691,7 +688,7 @@ fn print_human_readable(report: &DoctorReport) {
         }
         if let Some(since) = report.degraded_mode.since {
             let duration = report.generated_at.timestamp() as u64 - since;
-            println!("  {dim}Duration: {}s{reset}", duration);
+            println!("  {dim}Duration: {duration}s{reset}");
         }
         println!();
     }
