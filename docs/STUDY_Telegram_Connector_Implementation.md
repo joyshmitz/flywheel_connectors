@@ -1,7 +1,7 @@
 # Study: Clawdbot Telegram Connector Implementation
 
 **Bead**: `flywheel_connectors-w1g`
-**Status**: In Progress
+**Status**: Complete
 **Date**: 2026-01-27
 
 ## Executive Summary
@@ -196,4 +196,3 @@ This document analyzes the Clawdbot Telegram connector implementation (TypeScrip
 - Map the above patterns to FCP2 SDK primitives and connector manifests.
 - Define Telegram capability families and event schemas in `fcp_model_connectors_rust.md` if missing.
 - Add tests for update dedupe + 409 conflict handling in the Rust Telegram connector.
-
