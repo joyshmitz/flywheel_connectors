@@ -425,7 +425,7 @@ impl TelegramConnector {
         })?;
 
         let mut resource_uris = Vec::new();
-        
+
         // Extract chat_id (can be string or integer)
         if let Some(val) = input.get("chat_id") {
             if let Some(s) = val.as_str() {
@@ -434,11 +434,11 @@ impl TelegramConnector {
                 resource_uris.push(format!("telegram:chat:{i}"));
             }
         }
-        
+
         if let Some(file_id) = input.get("file_id").and_then(|v| v.as_str()) {
             resource_uris.push(format!("telegram:file:{file_id}"));
         }
-        
+
         if let Some(cb_id) = input.get("callback_query_id").and_then(|v| v.as_str()) {
             resource_uris.push(format!("telegram:callback:{cb_id}"));
         }
