@@ -16,7 +16,7 @@
 //! The spec calls for XOR filters + IBLT for efficient set reconciliation. This baseline
 //! implementation uses simpler set-based structures that can be upgraded to XOR/IBLT later.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -168,7 +168,7 @@ impl XorFilterPlaceholder {
 pub struct IbltPlaceholder {
     /// Recent changes (object_id, esi) for reconciliation.
     /// Bounded to prevent unbounded growth.
-    recent_changes: Vec<(ObjectId, Option<u32>)>,
+    recent_changes: VecDeque<(ObjectId, Option<u32>)>,
     /// Maximum recent changes to track.
     max_changes: usize,
     /// Sequence number for change ordering.
@@ -178,15 +178,15 @@ pub struct IbltPlaceholder {
 impl IbltPlaceholder {
     /// Create a new IBLT placeholder with default capacity.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_max_changes(DEFAULT_RECONCILIATION_BATCH_SIZE)
     }
 
     /// Create with a custom change limit.
     #[must_use]
-    pub const fn with_max_changes(max_changes: usize) -> Self {
+    pub fn with_max_changes(max_changes: usize) -> Self {
         Self {
-            recent_changes: Vec::new(),
+            recent_changes: VecDeque::new(),
             max_changes,
             change_seq: 0,
         }
@@ -196,16 +196,16 @@ impl IbltPlaceholder {
     pub fn note_local_change(&mut self, object_id: &ObjectId, esi: Option<u32>) {
         if self.recent_changes.len() >= self.max_changes {
             // Remove oldest
-            self.recent_changes.remove(0);
+            self.recent_changes.pop_front();
         }
-        self.recent_changes.push((*object_id, esi));
+        self.recent_changes.push_back((*object_id, esi));
         self.change_seq += 1;
     }
 
     /// Get recent changes for reconciliation.
     #[must_use]
-    pub fn recent_changes(&self) -> &[(ObjectId, Option<u32>)] {
-        &self.recent_changes
+    pub fn recent_changes(&self) -> Vec<(ObjectId, Option<u32>)> {
+        self.recent_changes.iter().copied().collect()
     }
 
     /// Get current change sequence.
@@ -379,9 +379,24 @@ impl GossipState {
     pub fn remove_object(&mut self, object_id: &ObjectId, now: u64) {
         self.admitted_objects.remove(object_id);
         self.symbol_availability.remove(object_id);
-        // Note: filters are not updated (bloom/xor filters don't support removal)
-        // This is acceptable as it only increases false positives
+        self.rebuild_filters();
         self.last_updated = now;
+    }
+
+    /// Rebuild filters from authoritative sets.
+    fn rebuild_filters(&mut self) {
+        self.object_filter = XorFilterPlaceholder::new();
+        self.symbol_filter = XorFilterPlaceholder::new();
+
+        for object_id in &self.admitted_objects {
+            self.object_filter.insert(object_id.as_bytes());
+        }
+
+        for (object_id, esis) in &self.symbol_availability {
+            for esi in esis {
+                self.symbol_filter.insert(&symbol_key(object_id, *esi));
+            }
+        }
     }
 
     /// Get list of admitted objects (bounded).

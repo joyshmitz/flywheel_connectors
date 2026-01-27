@@ -1037,18 +1037,12 @@ mod tests {
             provenance: None,
             approval_tokens: vec![],
         };
-        let suite = ConnectorSuite {
-            test_name: "deny_invoke".to_string(),
-            config: serde_json::json!({}),
-            handshake: test_handshake(),
-            invoke: Some(invoke),
-            invoke_expectations: InvokeExpectations {
-                expect_error: true,
-                expect_decision_receipt: true,
-                expect_audit_event: false,
-                expect_receipt: false,
-            },
-        };
+        let suite = ConnectorSuite::default_deny(
+            "deny_invoke",
+            test_handshake(),
+            invoke,
+            "FCP-3001",
+        );
 
         let mut runner = E2eRunner::new("fcp-e2e");
         let report = runner
@@ -1057,8 +1051,19 @@ mod tests {
             .expect("suite runs");
 
         assert!(report.passed, "deny suite should pass when error expected");
-        let json_lines = report.to_json_lines();
-        assert!(json_lines.contains("deny_invoke"));
+        let invoke_entry = report
+            .logs
+            .iter()
+            .find(|entry| entry.context.get("operation") == Some(&serde_json::json!("invoke")))
+            .expect("invoke log entry");
+        assert_eq!(
+            invoke_entry.context.get("reason_code"),
+            Some(&serde_json::json!("FCP-3001"))
+        );
+        assert!(
+            invoke_entry.context.get("decision_receipt_id").is_some(),
+            "decision receipt should be logged"
+        );
     }
 
     #[tokio::test]

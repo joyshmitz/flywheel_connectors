@@ -1815,6 +1815,7 @@ dependencies = [
  "chrono",
  "fcp-conformance",
  "fcp-core",
+ "fcp-manifest",
  "fcp-testkit",
  "pretty_assertions",
  "reqwest",

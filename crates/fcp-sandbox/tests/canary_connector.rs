@@ -70,7 +70,7 @@ fn test_compile_strict_policy() {
     assert_eq!(policy.profile, SandboxProfile::Strict);
     assert_eq!(policy.memory_limit_bytes, 256 * 1024 * 1024);
     assert_eq!(policy.cpu_percent, 50);
-    assert_eq!(policy.wall_clock_timeout, Duration::from_millis(30_000));
+    assert_eq!(policy.wall_clock_timeout, Duration::from_secs(30));
     assert!(policy.deny_exec);
     assert!(policy.deny_ptrace);
     assert!(policy.block_direct_network);

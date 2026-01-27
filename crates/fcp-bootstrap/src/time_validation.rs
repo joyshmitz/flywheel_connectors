@@ -48,10 +48,10 @@ impl std::fmt::Display for TimeValidationResult {
         match self {
             Self::Valid => write!(f, "Time validated successfully"),
             Self::DriftWarning { drift } => {
-                write!(f, "Clock drift warning: {:?}", drift)
+                write!(f, "Clock drift warning: {drift:?}")
             }
             Self::DriftError { drift } => {
-                write!(f, "Clock drift error: {:?} (sync required)", drift)
+                write!(f, "Clock drift error: {drift:?} (sync required)")
             }
             Self::CannotValidate => write!(f, "Could not validate time (no network)"),
         }
@@ -79,20 +79,21 @@ impl TimeValidation {
     ///
     /// This attempts to query an NTP server to validate the system clock.
     /// If NTP is unreachable, returns `CannotValidate`.
+    #[must_use]
     pub fn check() -> Self {
         let system_time = Utc::now();
 
         // Try NTP check with short timeout
         let ntp_result = ntp_check_with_timeout(Duration::from_secs(2));
 
-        let (ntp_time, drift, result) = match ntp_result {
-            Some(ntp) => {
+        let (ntp_time, drift, result) = ntp_result.map_or(
+            (None, None, TimeValidationResult::CannotValidate),
+            |ntp| {
                 let drift = compute_drift(system_time, ntp);
                 let result = classify_drift(drift);
                 (Some(ntp), Some(drift), result)
-            }
-            None => (None, None, TimeValidationResult::CannotValidate),
-        };
+            },
+        );
 
         Self {
             system_time,

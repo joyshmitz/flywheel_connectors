@@ -148,6 +148,7 @@ impl ColdRecovery {
     }
 
     /// Check if verification was performed.
+    #[must_use]
     pub fn was_verified(&self) -> bool {
         !self
             .warnings
@@ -155,6 +156,7 @@ impl ColdRecovery {
     }
 
     /// Get the genesis fingerprint.
+    #[must_use]
     pub fn fingerprint(&self) -> String {
         self.genesis.fingerprint()
     }
@@ -178,6 +180,7 @@ pub mod cli {
     }
 
     /// Format a warning message for CLI display.
+    #[must_use]
     pub fn format_warning(warning: &ColdRecoveryWarning) -> String {
         match warning {
             ColdRecoveryWarning::NoAuditHistory => {
@@ -202,7 +205,8 @@ pub mod cli {
     }
 
     /// Format the cold recovery confirmation message.
-    pub fn format_confirmation_message() -> &'static str {
+    #[must_use]
+    pub const fn format_confirmation_message() -> &'static str {
         r"
 ⚠️  COLD START RECOVERY
 No existing mesh peers found. This will:
@@ -218,7 +222,8 @@ If you have a backup of your .fcp directory, restore it instead.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{ColdRecovery, ColdRecoveryWarning};
+    use crate::recovery_phrase::RecoveryPhrase;
 
     fn test_phrase() -> RecoveryPhrase {
         RecoveryPhrase::from_mnemonic(

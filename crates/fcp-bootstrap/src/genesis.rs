@@ -87,6 +87,7 @@ impl GenesisState {
     ///
     /// This creates the standard FCP2 zone hierarchy with default integrity
     /// and confidentiality levels.
+    #[must_use]
     pub fn create(owner_public_key: &Ed25519VerifyingKey) -> Self {
         let initial_zones = vec![
             InitialZone {
@@ -134,6 +135,11 @@ impl GenesisState {
     ///
     /// Used during cold recovery when we need to recreate a genesis with
     /// a predictable fingerprint.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the Unix epoch timestamp cannot be constructed (should never happen).
+    #[must_use]
     pub fn create_deterministic(owner_public_key: &Ed25519VerifyingKey) -> Self {
         // For deterministic recreation, use epoch as the timestamp.
         // The fingerprint is based on the owner key, so this ensures
@@ -147,6 +153,7 @@ impl GenesisState {
     ///
     /// The fingerprint is a stable identifier for the mesh, computed as:
     /// `SHA256:base64(blake3(owner_public_key || schema_version))`
+    #[must_use]
     pub fn fingerprint(&self) -> String {
         // Compute fingerprint from owner key and schema version
         let mut hasher = blake3::Hasher::new();
@@ -164,6 +171,10 @@ impl GenesisState {
     }
 
     /// Validate this genesis state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error if any required field is invalid or missing.
     pub fn validate(&self) -> Result<(), GenesisValidationError> {
         // Check schema version
         if self.schema_version != GENESIS_SCHEMA_VERSION {
@@ -208,6 +219,10 @@ impl GenesisState {
     }
 
     /// Get the owner's public key as a verifying key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored public key is invalid.
     pub fn owner_verifying_key(&self) -> Result<Ed25519VerifyingKey, GenesisValidationError> {
         Ed25519VerifyingKey::from_bytes(&self.owner_public_key)
             .map_err(|_| GenesisValidationError::InvalidOwnerKey)
