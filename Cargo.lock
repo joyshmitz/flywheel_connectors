@@ -1716,6 +1716,7 @@ name = "fcp-conformance"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "clap",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
@@ -1835,6 +1836,7 @@ dependencies = [
  "fcp-conformance",
  "fcp-core",
  "fcp-e2e",
+ "fcp-testkit",
  "semver",
  "serde",
  "serde_json",
@@ -2047,6 +2049,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wasmtime",
  "wasmtime-wasi",
@@ -2190,6 +2193,7 @@ dependencies = [
  "fcp-conformance",
  "fcp-core",
  "futures-util",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
