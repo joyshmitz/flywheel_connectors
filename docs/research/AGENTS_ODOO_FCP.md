@@ -1,6 +1,6 @@
 # AGENTS.md - Odoo v19 + FCP Integration Project
 
-**Версія:** 1.0.0
+**Версія:** 2.0.0
 **Дата:** 2026-01-27
 
 ---
@@ -15,7 +15,9 @@
 
 ### Що це за проект?
 
-Створення **fcp-odoo connector** - адаптера, який дозволяє FCP mesh network взаємодіяти з Odoo v19 ERP системою, зокрема з модулем Quality Management (PDCA).
+Створення **fcp-odoo connector** - адаптера для взаємодії FCP mesh network з Odoo v19 ERP системою.
+
+**Ключовий інсайт:** Odoo v19 Quality API - це **Enterprise Process Quality Framework**, не просто модуль якості виробництва. Контролює якість ВСІХ бізнес-процесів підприємства.
 
 ### Ключові репозиторії
 
@@ -27,8 +29,63 @@
 ### Статус проекту
 
 - **FCP:** Draft (активна розробка)
-- **fcp-odoo connector:** Research phase (ще не почато)
+- **fcp-odoo connector:** Research phase (v2.0)
 - **Odoo v19:** Production
+
+---
+
+## Ключові концепції (MUST READ)
+
+### 1. Process Decomposition Model
+
+**Бізнес-процес НЕ є монолітом.** Декомпозиція:
+
+```
+Business Process = Σ(Operations) + Σ(Gates) + Σ(Decisions)
+
+Operations:  атомарні дії (можуть бути Skills - автоматизовані)
+Gates:       Quality Checks (авто) або Approvals (human)
+Decisions:   Rule-based (авто) або Judgment (human)
+```
+
+**Візуалізація:**
+```
+[Operation] → [Gate] → [Operation] → [Gate] → [Decision]
+     ↓           ↓           ↓           ↓          ↓
+   Skill?    Quality     Skill?     Human      Rule or
+  (auto)     Check      (auto)     Approval   Judgment?
+```
+
+### 2. Operations як Skills
+
+**Skill** = атомарна, автоматизована операція:
+- Тривалість: секунди/хвилини
+- Stateless або мінімальний state
+- Один виконавець (AI/система)
+- Результат: Pass/Fail
+
+**Business Process** = оркестрація skills + gates + human decisions
+
+### 3. Policy Profiles
+
+**Автоматизація залежить від типу підприємства:**
+
+| Enterprise | Automation | Gates | Compliance |
+|------------|------------|-------|------------|
+| ФОП (спрощена) | 80-95% | 0-1 | Мінімальний |
+| ТОВ (загальна) | 50-70% | 3-5 | Бухоблік, ЕЦП |
+| ПАТ (публічне) | 30-50% | 7+ | Аудит, держконтроль |
+
+### 4. Три виміри автоматизації
+
+Для кожної Operation визнач:
+1. **CAN** - технічно можливо автоматизувати?
+2. **SHOULD** - compliance дозволяє?
+3. **IS** - поточний стан
+
+```
+Automatable = CAN ∧ SHOULD ∧ ¬HAS_BLOCKING_GATE
+```
 
 ---
 
@@ -36,31 +93,112 @@
 
 ### 1. Розуміння FCP Architecture
 
-**ОБОВ'ЯЗКОВО прочитати перед початком:**
+**ОБОВ'ЯЗКОВО прочитати:**
 - `/FCP_Specification_V2.md` - Специфікація протоколу
 - `/AGENTS.md` - Головний AGENTS.md flywheel_connectors
-- `/docs/fcp_model_connectors_rust.md` - Гайд розробника connectors
+- `/docs/fcp_model_connectors_rust.md` - Гайд розробника
 
-**Ключові концепції, які ТРЕБА розуміти:**
+**Ключові концепції:**
 - Zones (z:owner, z:private, z:work, z:community, z:public)
 - Capabilities (криптографічні дозволи)
 - OperationReceipt (ідемпотентність)
 - ZoneCheckpoint (audit trail)
-- Connector archetypes (Operational, Streaming, Bidirectional)
 
-### 2. Розуміння Odoo v19 Quality Module
+### 2. Розуміння Odoo v19 Quality API
 
 **ОБОВ'ЯЗКОВО прочитати:**
-- `/Users/sd/github/odoo19/odoov19/EXPLAIN.md`
-- `/Users/sd/github/odoo19/odoov19/docs/PRD.md`
+- `/Users/sd/projects/odoov19/EXPLAIN.md` - PDCA система
+- `/docs/research/ODOO_V19_FCP_INTEGRATION.md` - Дослідження v2.0
 
 **Ключові сутності:**
-- QCP (Quality Control Point)
-- Quality Check
-- Quality Alert
-- CAPA (Corrective and Preventive Action)
+- QCP (Quality Control Point) - для БУДЬ-ЯКОГО бізнес-процесу
+- Quality Check - фактична перевірка
+- Quality Alert - сигнал про відхилення
+- CAPA - Corrective and Preventive Action
+- SOP - Standard Operating Procedure (Knowledge Base)
+- Phase Gate - Go/No-Go точка
 
-### 3. Naming Conventions
+### 3. Policy Profile Awareness
+
+**При написанні коду ЗАВЖДИ враховуй:**
+- Код має працювати для ВСІХ enterprise types
+- Gates мають бути configurable через Policy Profile
+- Не hardcode рішення про автоматизацію
+
+```rust
+// НЕПРАВИЛЬНО - hardcoded automation
+async fn process_payment(&self) -> Result<()> {
+    self.auto_record_income().await // Що якщо ТОВ?
+}
+
+// ПРАВИЛЬНО - policy-aware
+async fn process_payment(&self, ctx: &Context) -> Result<()> {
+    self.receive_payment().await?;
+
+    if ctx.policy.requires_gate("accounting_entry") {
+        return Ok(PendingGate::AccountingReview);
+    }
+
+    self.record_income().await
+}
+```
+
+---
+
+## Архітектура fcp-odoo Connector
+
+### Файлова структура (v2.0)
+
+```
+connectors/odoo/
+├── Cargo.toml
+├── README.md
+├── src/
+│   ├── lib.rs                    # Public API
+│   ├── connector.rs              # Main Connector trait
+│   ├── config.rs                 # Configuration types
+│   │
+│   ├── policy_profiles/          # NEW: Enterprise profiles
+│   │   ├── mod.rs
+│   │   ├── profile.rs            # Profile trait
+│   │   ├── fop_simplified.rs     # ФОП спрощена
+│   │   ├── tov_general.rs        # ТОВ загальна
+│   │   └── pat_public.rs         # ПАТ публічне
+│   │
+│   ├── decomposition/            # NEW: Process decomposition
+│   │   ├── mod.rs
+│   │   ├── operation.rs          # Operation/Skill types
+│   │   ├── gate.rs               # Gate definitions
+│   │   ├── decision.rs           # Decision points
+│   │   └── patterns/             # Reusable patterns
+│   │       ├── mod.rs
+│   │       ├── capa_lifecycle.rs
+│   │       ├── inventory_receiving.rs
+│   │       └── payment_processing.rs
+│   │
+│   ├── operations/               # FCP Operations
+│   │   ├── mod.rs
+│   │   ├── quality.rs
+│   │   ├── capa.rs
+│   │   ├── knowledge.rs
+│   │   ├── inventory.rs
+│   │   └── kpi.rs
+│   │
+│   ├── auth.rs
+│   ├── client.rs
+│   ├── types/
+│   │   └── ...
+│   └── error.rs
+└── tests/
+    ├── unit/
+    ├── integration/
+    └── policy_profiles/          # NEW: Profile-specific tests
+        ├── fop_test.rs
+        ├── tov_test.rs
+        └── pat_test.rs
+```
+
+### Naming Conventions
 
 ```rust
 // Connector name
@@ -76,267 +214,312 @@ pub const CONNECTOR_NAME: &str = "odoo";
 "odoo.quality.write"
 "odoo.capa.draft"
 "odoo.capa.approve"
+
+// Policy Profile names
+"fop_simplified"
+"tov_general"
+"pat_public"
+
+// Gate names
+"gate.accounting_entry"
+"gate.tax_classification"
+"gate.quality_signoff"
 ```
 
-### 4. Code Style
+---
 
-**Rust code ПОВИНЕН:**
-- Використовувати `async/await` для I/O операцій
-- Мати proper error handling (`Result<T, E>`)
-- Включати documentation comments (`///`)
-- Проходити `cargo clippy` без warnings
-- Мати unit tests для всіх public функцій
+## Capability Mapping по Policy Profiles
 
-**Приклад:**
+### ФОП (спрощена система)
+
 ```rust
-/// Creates a draft CAPA document from a quality alert.
-///
-/// # Arguments
-/// * `alert_id` - The Odoo ID of the source quality alert
-/// * `analysis` - Root cause analysis content
-///
-/// # Returns
-/// * `Ok(CapaResult)` - Successfully created CAPA draft
-/// * `Err(OdooError)` - Failed to create CAPA
-///
-/// # Example
-/// ```
-/// let result = connector.create_capa_draft(12345, "Root cause...").await?;
-/// ```
-pub async fn create_capa_draft(
+// Максимальна автоматизація
+capabilities! {
+    auto_granted: [
+        "odoo.quality.*",
+        "odoo.capa.draft",
+        "odoo.kb.read",
+        "odoo.stock.*",
+        "odoo.income.record",  // Книга доходів - auto!
+    ],
+    requires_human: [
+        "odoo.capa.approve",   // Тільки approve
+    ]
+}
+```
+
+### ТОВ (загальна система)
+
+```rust
+// Баланс автоматизації та compliance
+capabilities! {
+    auto_granted: [
+        "odoo.quality.read",
+        "odoo.quality.write",
+        "odoo.capa.draft",
+        "odoo.kb.read",
+        "odoo.stock.read",
+    ],
+    requires_human: [
+        "odoo.capa.approve",
+        "odoo.accounting.entry",  // Gate: бухгалтер
+        "odoo.tax.classify",      // Gate: головбух
+        "odoo.stock.accounting",  // Gate: облік
+        "odoo.kb.sign",           // Gate: Sign
+    ]
+}
+```
+
+### ПАТ (публічне)
+
+```rust
+// Максимальні gates для compliance
+capabilities! {
+    auto_granted: [
+        "odoo.quality.read",
+        "odoo.kb.read",
+        "odoo.kpi.read",
+    ],
+    requires_human: [
+        "odoo.quality.write",     // Gate: QA review
+        "odoo.capa.*",            // All CAPA operations
+        "odoo.accounting.*",      // All accounting
+        "odoo.stock.write",       // Gate: inventory control
+        "odoo.kb.write",          // Gate: content review
+        "odoo.audit.sign",        // Gate: auditor
+        "odoo.board.approve",     // Gate: наглядова рада
+    ]
+}
+```
+
+---
+
+## Code Patterns
+
+### Pattern 1: Policy-Aware Operation
+
+```rust
+/// Operation that respects policy profile gates
+pub async fn create_stock_move(
     &self,
-    alert_id: u64,
-    analysis: &str,
-) -> Result<CapaResult, OdooError> {
-    // Implementation
+    ctx: &OperationContext,
+    data: StockMoveData,
+) -> Result<StockMoveResult, OdooError> {
+    // 1. Check base capability
+    ctx.require_capability("odoo.stock.write")?;
+
+    // 2. Execute the operation
+    let stock_move = self.client.create_stock_move(&data).await?;
+
+    // 3. Check if accounting gate is required by profile
+    if ctx.policy.requires_gate("stock_accounting") {
+        // Return pending state - human must approve
+        return Ok(StockMoveResult::PendingGate {
+            stock_move_id: stock_move.id,
+            gate: "accounting_entry",
+            required_role: "accountant",
+        });
+    }
+
+    // 4. Auto-complete if no gate required (e.g., ФОП)
+    self.client.confirm_stock_move(stock_move.id).await?;
+    Ok(StockMoveResult::Completed(stock_move))
 }
 ```
 
-### 5. Security Rules
+### Pattern 2: Decomposed Process
 
-**ЗАБОРОНЕНО:**
-- Hardcode credentials в коді
-- Log sensitive data (passwords, API keys, tokens)
-- Bypass capability checks
-- Direct database access (тільки через Odoo API)
+```rust
+/// Process decomposition pattern
+pub struct InventoryReceivingProcess {
+    operations: Vec<Operation>,
+    gates: Vec<Gate>,
+    policy: PolicyProfile,
+}
 
-**ОБОВ'ЯЗКОВО:**
-- Validate all input from Odoo API
-- Use environment variables for credentials
-- Check capabilities before operations
-- Log audit events
+impl InventoryReceivingProcess {
+    pub fn for_profile(profile: PolicyProfile) -> Self {
+        let mut process = Self::base_process();
 
-### 6. Testing Requirements
+        match profile {
+            PolicyProfile::FopSimplified => {
+                // Remove accounting gate
+                process.gates.retain(|g| g.name != "accounting_entry");
+            }
+            PolicyProfile::TovGeneral => {
+                // Standard gates
+            }
+            PolicyProfile::PatPublic => {
+                // Add extra gates
+                process.gates.push(Gate::new("audit_review"));
+                process.gates.push(Gate::new("board_notification"));
+            }
+        }
 
-**Кожен PR повинен включати:**
-- Unit tests для нових функцій
-- Integration tests (з mock Odoo server)
-- Documentation updates
-
-**Test structure:**
+        process
+    }
+}
 ```
-connectors/odoo/tests/
-├── unit/
-│   ├── auth_test.rs
-│   ├── quality_test.rs
-│   └── capa_test.rs
-├── integration/
-│   ├── mock_server.rs
-│   └── scenarios/
-│       ├── create_capa.rs
-│       └── phase_transition.rs
-└── fixtures/
-    ├── quality_alert.json
-    └── capa_draft.json
+
+### Pattern 3: Gate Handler
+
+```rust
+/// Gate that requires human approval
+#[derive(Debug)]
+pub struct Gate {
+    pub name: String,
+    pub required_capability: String,
+    pub required_role: String,
+    pub timeout: Duration,
+}
+
+impl Gate {
+    pub async fn check(&self, ctx: &OperationContext) -> GateResult {
+        if ctx.has_capability(&self.required_capability) {
+            // Capability granted - can proceed
+            GateResult::Proceed
+        } else {
+            // Need human approval
+            GateResult::Pending {
+                gate: self.name.clone(),
+                role: self.required_role.clone(),
+                expires_at: Utc::now() + self.timeout,
+            }
+        }
+    }
+}
 ```
 
 ---
 
-## Архітектура fcp-odoo Connector
+## Типові помилки
 
-### Файлова структура
+### Помилка 1: Hardcoded Automation Level
 
-```
-connectors/odoo/
-├── Cargo.toml
-├── README.md
-├── src/
-│   ├── lib.rs              # Public API exports
-│   ├── connector.rs        # Main Connector trait impl
-│   ├── config.rs           # Configuration types
-│   ├── auth.rs             # Odoo authentication
-│   ├── client.rs           # HTTP client wrapper
-│   ├── operations/
-│   │   ├── mod.rs
-│   │   ├── quality.rs      # QCP, Check, Alert ops
-│   │   ├── capa.rs         # CAPA operations
-│   │   ├── knowledge.rs    # KB operations
-│   │   └── kpi.rs          # Metrics operations
-│   ├── types/
-│   │   ├── mod.rs
-│   │   ├── quality.rs      # Quality domain types
-│   │   ├── capa.rs         # CAPA types
-│   │   └── common.rs       # Shared types
-│   └── error.rs            # Error types
-└── tests/
-    └── ...
-```
-
-### Cargo.toml Template
-
-```toml
-[package]
-name = "fcp-odoo"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-fcp-core = { path = "../../fcp-core" }
-fcp-traits = { path = "../../fcp-traits" }
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# HTTP client
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Error handling
-thiserror = "1"
-anyhow = "1"
-
-# Logging
-tracing = "0.1"
-
-[dev-dependencies]
-tokio-test = "0.4"
-mockito = "1"
-```
-
----
-
-## Capability Mapping
-
-### Zone → Capability Matrix
-
-| Zone | Capabilities |
-|------|-------------|
-| `z:owner` | All capabilities |
-| `z:private` | `odoo.capa.approve`, `odoo.accounting.read` |
-| `z:work` | `odoo.quality.*`, `odoo.capa.draft`, `odoo.kb.*`, `odoo.kpi.read` |
-| `z:community` | `odoo.quality.read`, `odoo.kb.read` |
-| `z:public` | None (webhook receive only) |
-
-### Capability Hierarchy
-
-```
-odoo.*                          (ALL)
-├── odoo.quality.*              (All quality)
-│   ├── odoo.quality.read       (Read QCP, Check, Alert)
-│   └── odoo.quality.write      (Create/Update)
-├── odoo.capa.*                 (All CAPA)
-│   ├── odoo.capa.draft         (Draft operations)
-│   └── odoo.capa.approve       (Approval, requires escalation)
-├── odoo.kb.*                   (Knowledge Base)
-│   ├── odoo.kb.read
-│   └── odoo.kb.write
-├── odoo.kpi.read               (Metrics, read-only)
-└── odoo.accounting.read        (Financial, read-only, restricted)
-```
-
----
-
-## Типові помилки та як їх уникати
-
-### Помилка 1: Ігнорування OperationReceipt
-
-**Неправильно:**
+**НЕПРАВИЛЬНО:**
 ```rust
-// Просто викликаємо API
-client.create_capa(data).await?;
-```
-
-**Правильно:**
-```rust
-// Перевіряємо ідемпотентність
-let receipt = OperationReceipt::new(&params)?;
-if let Some(existing) = self.check_receipt(&receipt).await? {
-    return Ok(existing);
-}
-client.create_capa(data).await?;
-self.store_receipt(receipt).await?;
-```
-
-### Помилка 2: Bypass Capability Check
-
-**Неправильно:**
-```rust
-// Просто виконуємо операцію
-async fn approve_capa(&self, id: u64) -> Result<()> {
-    self.client.approve(id).await
+// Assumes ФОП level of automation
+async fn receive_inventory(&self) -> Result<()> {
+    self.create_stock_move().await?;
+    self.update_inventory().await?;
+    self.record_income().await?;  // What if ТОВ needs approval?
+    Ok(())
 }
 ```
 
-**Правильно:**
+**ПРАВИЛЬНО:**
 ```rust
-async fn approve_capa(&self, ctx: &OperationContext, id: u64) -> Result<()> {
-    // Перевіряємо capability
-    ctx.require_capability("odoo.capa.approve")?;
+async fn receive_inventory(&self, ctx: &Context) -> Result<ProcessState> {
+    self.create_stock_move().await?;
+    self.update_inventory().await?;
 
-    // Тільки після перевірки
-    self.client.approve(id).await
+    // Check policy for next step
+    match ctx.policy.next_step("record_income") {
+        NextStep::Auto => {
+            self.record_income().await?;
+            Ok(ProcessState::Completed)
+        }
+        NextStep::Gate(gate) => {
+            Ok(ProcessState::PendingGate(gate))
+        }
+    }
 }
 ```
 
-### Помилка 3: Hardcoded Credentials
+### Помилка 2: Ignoring Enterprise Type in Tests
 
-**ЗАБОРОНЕНО:**
+**НЕПРАВИЛЬНО:**
 ```rust
-const API_KEY: &str = "sk-abc123..."; // НІКОЛИ!
+#[test]
+fn test_payment_processing() {
+    // Only tests one scenario
+    let result = process_payment(&data);
+    assert!(result.is_ok());
+}
 ```
 
-**Правильно:**
+**ПРАВИЛЬНО:**
 ```rust
-let api_key = std::env::var("FCP_ODOO_API_KEY")
-    .map_err(|_| ConfigError::MissingCredential("FCP_ODOO_API_KEY"))?;
+#[test]
+fn test_payment_processing_fop() {
+    let ctx = Context::with_profile(PolicyProfile::FopSimplified);
+    let result = process_payment(&ctx, &data);
+    assert!(matches!(result, ProcessState::Completed));
+}
+
+#[test]
+fn test_payment_processing_tov() {
+    let ctx = Context::with_profile(PolicyProfile::TovGeneral);
+    let result = process_payment(&ctx, &data);
+    // ТОВ requires accounting gate
+    assert!(matches!(result, ProcessState::PendingGate(_)));
+}
 ```
 
----
+### Помилка 3: Not Considering SOP as Skills Repository
 
-## Контакти та ресурси
+**НЕПРАВИЛЬНО:**
+```rust
+// Hardcoded process steps
+fn get_receiving_steps() -> Vec<Step> {
+    vec![
+        Step::new("check_documents"),
+        Step::new("measure_temperature"),
+        // ...
+    ]
+}
+```
 
-### Документація
-
-- FCP Specification: `/FCP_Specification_V2.md`
-- Research Document: `/docs/research/ODOO_V19_FCP_INTEGRATION.md`
-- Implementation Plan: `/docs/research/PLAN_FOR_ODOOv19_AND_FLYWHEEL.md`
-
-### Existing Connectors (для reference)
-
-Вивчіть існуючі connectors як приклади:
-- `connectors/twitter/` - Приклад Bidirectional connector
-- `connectors/telegram/` - Приклад Operational connector
-- `connectors/anthropic/` - Приклад простого API connector
+**ПРАВИЛЬНО:**
+```rust
+// Load from SOP/Knowledge Base
+async fn get_receiving_steps(&self, ctx: &Context) -> Result<Vec<Step>> {
+    let sop = self.kb.get_sop("receiving_process").await?;
+    let steps = sop.to_operations(ctx.policy)?;
+    Ok(steps)
+}
+```
 
 ---
 
 ## Checklist для AI Agent
 
-Перед кожним PR перевір:
+### Перед кожним PR:
 
-- [ ] Код компілюється (`cargo build`)
-- [ ] Clippy проходить (`cargo clippy -- -D warnings`)
-- [ ] Тести проходять (`cargo test`)
+**Code Quality:**
+- [ ] `cargo build` проходить
+- [ ] `cargo clippy -- -D warnings` проходить
+- [ ] `cargo test` проходить
 - [ ] Documentation оновлена
-- [ ] Capabilities правильно перевіряються
-- [ ] OperationReceipt використовується для мутацій
+
+**Policy Profile Awareness:**
+- [ ] Код працює для всіх enterprise types (ФОП, ТОВ, ПАТ)
+- [ ] Gates configurable через Policy Profile
+- [ ] Тести покривають різні profiles
+
+**FCP Compliance:**
+- [ ] Capabilities перевіряються
+- [ ] OperationReceipt для мутацій
 - [ ] Credentials НЕ hardcoded
 - [ ] Logging НЕ містить sensitive data
 
+**Process Decomposition:**
+- [ ] Operations атомарні та reusable
+- [ ] Gates clearly defined
+- [ ] Decisions documented
+
 ---
 
-*Цей документ є частиною дослідження інтеграції Odoo v19 + FCP*
-*Версія: 1.0.0 | Дата: 2026-01-27*
+## Ресурси
+
+| Document | Location |
+|----------|----------|
+| FCP Spec | `/FCP_Specification_V2.md` |
+| Research v2.0 | `/docs/research/ODOO_V19_FCP_INTEGRATION.md` |
+| Plan | `/docs/research/PLAN_FOR_ODOOv19_AND_FLYWHEEL.md` |
+| Odoo PDCA | `/Users/sd/projects/odoov19/EXPLAIN.md` |
+
+---
+
+*Версія: 2.0.0 | Дата: 2026-01-27*
+*Ключові зміни: Process Decomposition, Policy Profiles, Enterprise Types*

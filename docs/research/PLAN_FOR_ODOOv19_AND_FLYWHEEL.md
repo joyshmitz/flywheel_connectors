@@ -1,42 +1,49 @@
 # PLAN: Odoo v19 + Flywheel Connectors Integration
 
-**Версія:** 1.0.0
-**Дата створення:** 2026-01-27
+**Версія:** 2.0.0
+**Дата оновлення:** 2026-01-27
 **Статус:** Planning Phase
 
 ---
 
 ## Executive Summary
 
-Цей документ описує план інтеграції Odoo v19 PDCA Quality Management System з FCP (Flywheel Connector Protocol) через створення спеціалізованого `fcp-odoo` connector.
+Цей документ описує план інтеграції Odoo v19 з FCP (Flywheel Connector Protocol) через створення `fcp-odoo` connector.
 
-**Мета:** Забезпечити безпечну, аудитовану взаємодію AI-асистентів з Odoo v19, зокрема з модулем управління якістю.
+**Ключові інсайти v2.0:**
+- Odoo v19 Quality API = **Enterprise Process Quality Framework** (не тільки виробництво)
+- **Process Decomposition:** Operations + Gates + Decisions
+- **Policy Profiles:** Автоматизація залежить від типу підприємства (ФОП/ТОВ/ПАТ)
+- **Operations як Skills:** Атомарні, автоматизовані дії
+
+**Мета:** Забезпечити безпечну, policy-aware взаємодію AI-асистентів з Odoo v19.
 
 ---
 
 ## 1. Фази проекту
 
-### Phase 0: Research & Discovery (ПОТОЧНА)
+### Phase 0: Research & Discovery ✅ ЗАВЕРШЕНО
 **Тривалість:** 1-2 тижні
-**Статус:** В процесі
+**Статус:** Завершено (v2.0)
 
-| Завдання | Статус | Відповідальний |
-|----------|--------|----------------|
-| Вивчити FCP архітектуру | Завершено | - |
-| Вивчити Odoo v19 Quality API | Завершено | - |
-| Створити research документацію | Завершено | - |
-| Визначити capability mapping | Завершено | - |
-| Ідентифікувати ризики | Завершено | - |
+| Завдання | Статус |
+|----------|--------|
+| Вивчити FCP архітектуру | ✅ |
+| Вивчити Odoo v19 Quality API | ✅ |
+| Розробити Process Decomposition model | ✅ NEW |
+| Визначити Policy Profiles | ✅ NEW |
+| Визначити capability mapping | ✅ |
+| Ідентифікувати ризики | ✅ |
 
 **Deliverables:**
-- [x] `ODOO_V19_FCP_INTEGRATION.md` - Research document
-- [x] `AGENTS_ODOO_FCP.md` - AI agent guidelines
-- [x] `PLAN_FOR_ODOOv19_AND_FLYWHEEL.md` - This document
+- [x] `ODOO_V19_FCP_INTEGRATION.md` v2.0
+- [x] `AGENTS_ODOO_FCP.md` v2.0
+- [x] `PLAN_FOR_ODOOv19_AND_FLYWHEEL.md` v2.0
 
 ---
 
-### Phase 1: Foundation
-**Тривалість:** 1-2 тижні
+### Phase 1: Foundation + Policy Profiles
+**Тривалість:** 2-3 тижні
 **Статус:** Planned
 
 #### 1.1 Project Scaffold
@@ -44,356 +51,358 @@
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
 | Створити `connectors/odoo/` structure | High | 1 день |
-| Налаштувати Cargo.toml з dependencies | High | 0.5 дня |
+| Налаштувати Cargo.toml | High | 0.5 дня |
 | Імплементувати базовий Connector trait | High | 2 дні |
-| Створити config types | Medium | 1 день |
+| Створити config types з enterprise type | High | 1 день |
+
+#### 1.2 Policy Profiles System (NEW)
+
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| Створити PolicyProfile trait | High | 1 день |
+| Імплементувати FopSimplified profile | High | 1 день |
+| Імплементувати TovGeneral profile | High | 1 день |
+| Імплементувати PatPublic profile | Medium | 1 день |
+| Написати profile tests | High | 1 день |
 
 **Acceptance Criteria:**
-- [ ] `cargo build` проходить без помилок
-- [ ] `cargo test` проходить (базові тести)
-- [ ] Connector реєструється в FCP registry
+- [ ] `cargo build` проходить
+- [ ] Connector приймає enterprise type в config
+- [ ] Gates визначаються Policy Profile
+- [ ] Тести для всіх трьох profiles
 
-#### 1.2 Odoo Authentication
+#### 1.3 Odoo Authentication
 
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
 | Імплементувати API key auth | High | 1 день |
-| Імплементувати session auth (опціонально) | Low | 2 дні |
 | Написати auth tests | High | 1 день |
 
-**Acceptance Criteria:**
-- [ ] Успішна автентифікація з тестовим Odoo
-- [ ] Proper error handling для invalid credentials
-- [ ] Credentials НЕ логуються
-
-#### 1.3 HTTP Client Wrapper
+#### 1.4 HTTP Client Wrapper
 
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
 | Створити Odoo client struct | High | 1 день |
 | Імплементувати JSON-RPC calls | High | 2 дні |
 | Додати retry logic | Medium | 1 день |
-| Додати rate limiting | Medium | 1 день |
-
-**Acceptance Criteria:**
-- [ ] Successful API calls to Odoo
-- [ ] Automatic retries on transient failures
-- [ ] Rate limiting prevents 429 errors
 
 ---
 
-### Phase 2: Quality Operations
-**Тривалість:** 2-3 тижні
-**Статус:** Planned
-
-#### 2.1 Quality Read Operations
-
-| Operation | Capability | Пріоритет | Оцінка |
-|-----------|------------|-----------|--------|
-| `quality.qcp.list` | `odoo.quality.read` | High | 1 день |
-| `quality.qcp.get` | `odoo.quality.read` | High | 0.5 дня |
-| `quality.check.list` | `odoo.quality.read` | High | 1 день |
-| `quality.alert.list` | `odoo.quality.read` | High | 1 день |
-| `quality.alert.get` | `odoo.quality.read` | High | 0.5 дня |
-
-**Acceptance Criteria:**
-- [ ] All operations return correct data
-- [ ] Proper pagination support
-- [ ] Capability checks enforced
-
-#### 2.2 Quality Write Operations
-
-| Operation | Capability | Пріоритет | Оцінка |
-|-----------|------------|-----------|--------|
-| `quality.check.create` | `odoo.quality.write` | High | 2 дні |
-| `quality.check.update` | `odoo.quality.write` | Medium | 1 день |
-| `quality.alert.create` | `odoo.quality.write` | High | 2 дні |
-
-**Acceptance Criteria:**
-- [ ] OperationReceipt for all mutations
-- [ ] Idempotency via receipt checking
-- [ ] Proper validation of inputs
-
-#### 2.3 Integration Tests
-
-| Завдання | Пріоритет | Оцінка |
-|----------|-----------|--------|
-| Створити mock Odoo server | High | 2 дні |
-| Написати integration tests | High | 3 дні |
-| Створити test fixtures | Medium | 1 день |
-
----
-
-### Phase 3: CAPA Operations
+### Phase 2: Process Decomposition Engine (NEW)
 **Тривалість:** 2 тижні
 **Статус:** Planned
 
-#### 3.1 CAPA Draft Operations
+#### 2.1 Core Decomposition Types
 
-| Operation | Capability | Пріоритет | Оцінка |
-|-----------|------------|-----------|--------|
-| `capa.list` | `odoo.capa.draft` | High | 1 день |
-| `capa.get` | `odoo.capa.draft` | High | 0.5 дня |
-| `capa.draft.create` | `odoo.capa.draft` | High | 2 дні |
-| `capa.draft.update` | `odoo.capa.draft` | Medium | 1 день |
-| `capa.submit` | `odoo.capa.draft` | High | 1 день |
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| Створити Operation type | High | 1 день |
+| Створити Gate type | High | 1 день |
+| Створити Decision type | High | 1 день |
+| Створити Process orchestrator | High | 2 дні |
+
+#### 2.2 Gate System
+
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| Gate registry | High | 1 день |
+| Gate state machine | High | 2 дні |
+| Human approval workflow | High | 2 дні |
+| Gate timeout handling | Medium | 1 день |
 
 **Acceptance Criteria:**
-- [ ] Draft CAPA creation from Quality Alert
-- [ ] State machine transitions work correctly
-- [ ] Audit trail created
-
-#### 3.2 CAPA Approval (Restricted)
-
-| Operation | Capability | Пріоритет | Оцінка |
-|-----------|------------|-----------|--------|
-| `capa.approve` | `odoo.capa.approve` | Medium | 2 дні |
-| `capa.reject` | `odoo.capa.approve` | Medium | 1 день |
-
-**Notes:**
-- Потребує zone escalation (z:work → z:private)
-- Може потребувати human-in-the-loop
+- [ ] Operations can be marked as Skills (auto)
+- [ ] Gates stop execution until approved
+- [ ] Different profiles have different gates
+- [ ] Gate state persists across requests
 
 ---
 
-### Phase 4: Knowledge Base & KPI
+### Phase 3: Quality Operations
+**Тривалість:** 2 тижні
+**Статус:** Planned
+
+#### 3.1 Quality Read Operations
+
+| Operation | Capability | Skill? | Оцінка |
+|-----------|------------|--------|--------|
+| `quality.qcp.list` | `odoo.quality.read` | Yes | 1 день |
+| `quality.qcp.get` | `odoo.quality.read` | Yes | 0.5 дня |
+| `quality.check.list` | `odoo.quality.read` | Yes | 1 день |
+| `quality.alert.list` | `odoo.quality.read` | Yes | 1 день |
+| `quality.alert.get` | `odoo.quality.read` | Yes | 0.5 дня |
+
+#### 3.2 Quality Write Operations (Policy-Aware)
+
+| Operation | Capability | ФОП | ТОВ | ПАТ |
+|-----------|------------|-----|-----|-----|
+| `quality.check.create` | `odoo.quality.write` | Auto | Auto | Gate |
+| `quality.alert.create` | `odoo.quality.write` | Auto | Auto | Gate |
+| `quality.alert.classify` | `odoo.quality.write` | Auto | Auto | Gate |
+
+**Acceptance Criteria:**
+- [ ] All read operations work as Skills
+- [ ] Write operations respect Policy Profile
+- [ ] ПАТ profile requires QA review gate
+
+---
+
+### Phase 4: CAPA Operations
+**Тривалість:** 2 тижні
+**Статус:** Planned
+
+#### 4.1 CAPA Lifecycle (Decomposed)
+
+```yaml
+process: capa_lifecycle
+operations:
+  - draft.create      # Skill (AI)
+  - draft.update      # Skill
+  - submit            # Skill
+  - approve           # Gate (always human)
+  - execute           # Mixed
+  - verify            # Gate (human)
+  - close             # Gate (human)
+```
+
+| Operation | ФОП Gates | ТОВ Gates | ПАТ Gates |
+|-----------|-----------|-----------|-----------|
+| Create draft | 0 | 0 | 1 (QA review) |
+| Submit | 0 | 0 | 1 (manager) |
+| Approve | 1 | 1 | 2 (QA + director) |
+| Verify | 1 | 1 | 2 (QA + auditor) |
+| Close | 0 | 1 | 2 (manager + compliance) |
+
+---
+
+### Phase 5: Knowledge Base & KPI
 **Тривалість:** 1-2 тижні
 **Статус:** Planned
 
-#### 4.1 Knowledge Base Operations
+#### 5.1 SOP as Skills Repository (NEW)
 
-| Operation | Capability | Пріоритет | Оцінка |
-|-----------|------------|-----------|--------|
-| `kb.search` | `odoo.kb.read` | Medium | 1 день |
-| `kb.article.get` | `odoo.kb.read` | Medium | 0.5 дня |
-| `kb.article.create` | `odoo.kb.write` | Low | 2 дні |
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| SOP to Operations converter | High | 2 дні |
+| SOP versioning integration | Medium | 1 день |
+| Sign workflow integration | Medium | 2 дні |
 
-#### 4.2 KPI/Metrics Operations
+#### 5.2 KPI Operations
 
-| Operation | Capability | Пріоритет | Оцінка |
-|-----------|------------|-----------|--------|
-| `kpi.fpy.get` | `odoo.kpi.read` | Medium | 1 день |
-| `kpi.mttr.get` | `odoo.kpi.read` | Medium | 1 день |
-| `kpi.dashboard` | `odoo.kpi.read` | Low | 2 дні |
+| Operation | Capability | Skill? |
+|-----------|------------|--------|
+| `kpi.fpy.get` | `odoo.kpi.read` | Yes |
+| `kpi.mttr.get` | `odoo.kpi.read` | Yes |
+| `kpi.automation_ratio` | `odoo.kpi.read` | Yes (NEW) |
 
 ---
 
-### Phase 5: Advanced Features
+### Phase 6: Advanced Features
 **Тривалість:** 2-3 тижні
 **Статус:** Future
 
-#### 5.1 ZoneCheckpoint Integration
+#### 6.1 ZoneCheckpoint for Phase Gates
 
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
-| Phase transition checkpoints | High | 3-5 днів |
-| Quorum signature collection | High | 3-5 днів |
-| Checkpoint verification | High | 2-3 дні |
+| Phase Gate → ZoneCheckpoint mapping | High | 3 дні |
+| Quorum signature per enterprise type | High | 3 дні |
+| Checkpoint verification | High | 2 дні |
 
-#### 5.2 Webhook Support
+#### 6.2 Enterprise Type Migration
 
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
-| Incoming webhook handler | Medium | 2 дні |
-| Odoo event subscriptions | Medium | 2 дні |
-| Event routing to zones | Medium | 2 дні |
+| ФОП → ТОВ migration path | Medium | 2 дні |
+| Audit trail preservation | High | 2 дні |
+| Gate backfill strategy | Medium | 1 день |
 
 ---
 
 ## 2. Milestones
 
-### Milestone 1: MVP (Phase 1-2)
-**Target:** +4-5 тижнів від старту
+### Milestone 1: MVP with Policy Profiles
+**Target:** +5-6 тижнів
 **Scope:**
-- Basic connector working
+- Basic connector with Policy Profiles
 - Quality read/write operations
-- Integration tests passing
+- Gate system working
 
 **Success Criteria:**
-- [ ] `fcp connector test odoo` succeeds
-- [ ] Can list QCPs from Odoo
-- [ ] Can create Quality Check via FCP
+- [ ] Same operation behaves differently for ФОП vs ТОВ
+- [ ] Gates properly pause execution
+- [ ] Tests cover all three profiles
 
-### Milestone 2: CAPA Support (Phase 3)
-**Target:** +7-8 тижнів від старту
+### Milestone 2: Full CAPA with Decomposition
+**Target:** +9-10 тижнів
 **Scope:**
-- Full CAPA lifecycle (draft → submit)
-- Approval workflow (restricted)
+- Complete CAPA lifecycle
+- Process decomposition engine
+- SOP integration
 
 **Success Criteria:**
-- [ ] AI can create CAPA draft from alert
-- [ ] State transitions logged
-- [ ] Approval requires escalation
+- [ ] AI can create CAPA draft (Skill)
+- [ ] Approval gates work per profile
+- [ ] SOP defines process steps
 
-### Milestone 3: Full Feature Set (Phase 4-5)
-**Target:** +10-12 тижнів від старту
+### Milestone 3: Production Ready
+**Target:** +12-14 тижнів
 **Scope:**
-- KB integration
-- KPI dashboards
-- Phase gate checkpoints
+- ZoneCheckpoints for phase gates
+- Enterprise migration support
+- Full documentation
 
 **Success Criteria:**
-- [ ] End-to-end PDCA cycle support
-- [ ] ZoneCheckpoints for phase transitions
-- [ ] Production-ready documentation
+- [ ] End-to-end PDCA with proper gates
+- [ ] Audit trail complete
+- [ ] Migration ФОП→ТОВ tested
 
 ---
 
-## 3. Технічні рішення
+## 3. Architecture Decisions
 
-### 3.1 Architecture Decisions
+### 3.1 Decisions Made
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Odoo API | JSON-RPC | Standard, well-documented |
-| Auth method | API Key first | Simplest, most secure |
-| Async runtime | Tokio | Standard for Rust async |
-| HTTP client | Reqwest | Feature-rich, async support |
-| Serialization | Serde | De-facto standard |
+| Process model | Decomposition | Flexibility per enterprise type |
+| Automation control | Policy Profiles | Compliance requirements vary |
+| Gate persistence | Database | State survives restarts |
+| SOP integration | As Skills source | Single source of truth |
 
 ### 3.2 Open Questions
 
-| Question | Options | Decision Needed By |
-|----------|---------|-------------------|
-| Single vs multi-connector? | Monolithic / Micro | Phase 1 start |
-| Mock server approach | Mockito / Docker Odoo | Phase 2 start |
-| Capability granularity | Fine / Coarse | Phase 1 |
+| Question | Options | Decision By |
+|----------|---------|-------------|
+| Gate timeout default | 24h / 48h / configurable | Phase 2 |
+| Hybrid enterprise handling | Strict / Flexible | Phase 1 |
+| Profile switching runtime | Allowed / Restart required | Phase 1 |
 
 ---
 
-## 4. Ресурси
+## 4. Automation Matrix by Enterprise Type
 
-### 4.1 Required Skills
+### Таблиця процесів
 
-- Rust (intermediate+)
-- FCP protocol knowledge
-- Odoo API knowledge
-- Async programming
+| Процес | ФОП | ТОВ | ПАТ |
+|--------|-----|-----|-----|
+| **Quality Check** | 95% | 80% | 60% |
+| **Quality Alert** | 90% | 75% | 55% |
+| **CAPA Lifecycle** | 75% | 60% | 45% |
+| **Inventory Receiving** | 90% | 65% | 50% |
+| **Payment Processing** | 100% | 55% | 40% |
+| **SOP Publication** | 60% | 50% | 40% |
 
-### 4.2 Documentation
+### Таблиця gates
 
-| Document | Location | Purpose |
-|----------|----------|---------|
-| FCP Spec | `/FCP_Specification_V2.md` | Protocol reference |
-| Connector Guide | `/docs/fcp_model_connectors_rust.md` | Development guide |
-| Odoo PDCA | `/Users/sd/github/odoo19/odoov19/EXPLAIN.md` | Domain knowledge |
-| Research | `/docs/research/ODOO_V19_FCP_INTEGRATION.md` | Integration analysis |
-
-### 4.3 External Dependencies
-
-| Dependency | Purpose | Risk |
-|------------|---------|------|
-| Odoo v19 API | Target system | API changes |
-| Tailscale | Mesh network | Service availability |
-| FCP core | Protocol implementation | Breaking changes |
+| Gate Type | ФОП | ТОВ | ПАТ |
+|-----------|-----|-----|-----|
+| QA Review | - | Optional | Required |
+| Accounting Entry | - | Required | Required |
+| Tax Classification | - | Required | Required |
+| Manager Approval | - | Some | Most |
+| Director Approval | - | - | Required |
+| Auditor Sign-off | - | - | Required |
+| Board Notification | - | - | Some |
 
 ---
 
-## 5. Ризик-менеджмент
+## 5. Testing Strategy
 
-### 5.1 Risk Register
+### 5.1 Profile-Specific Tests
+
+```
+tests/
+├── policy_profiles/
+│   ├── fop_simplified/
+│   │   ├── quality_test.rs      # No gates
+│   │   ├── capa_test.rs         # Minimal gates
+│   │   └── payment_test.rs      # Full auto
+│   ├── tov_general/
+│   │   ├── quality_test.rs
+│   │   ├── capa_test.rs         # Standard gates
+│   │   └── accounting_test.rs   # Gate required
+│   └── pat_public/
+│       ├── quality_test.rs      # Extra gates
+│       ├── capa_test.rs         # Many gates
+│       └── audit_test.rs        # Audit gates
+└── cross_profile/
+    ├── migration_test.rs        # ФОП → ТОВ
+    └── consistency_test.rs      # Same data, different gates
+```
+
+### 5.2 Test Coverage Goals
+
+| Component | Target |
+|-----------|--------|
+| Policy Profiles | 95% |
+| Gate System | 90% |
+| Operations | 85% |
+| Integration | 80% |
+
+---
+
+## 6. Risk Management
+
+### 6.1 Updated Risks
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| Odoo API breaking changes | Medium | High | Version detection, adapter pattern |
-| FCP spec changes | Medium | Medium | Track upstream, adapt quickly |
-| Performance issues | Low | Medium | Profiling, optimization |
-| Security vulnerabilities | Low | High | Security review, audits |
+| Profile complexity | Medium | Medium | Start with 3 core profiles |
+| Gate state corruption | Low | High | Transaction-based state |
+| Enterprise type mismatch | Medium | Medium | Validation at startup |
+| Regulatory changes | Medium | High | Profile versioning |
 
-### 5.2 Contingency Plans
+### 6.2 Contingency
 
-**If Odoo API changes:**
-- Implement version detection
-- Maintain compatibility layer
-- Document minimum supported version
+**If profile system too complex:**
+- Start with ФОП only (simplest)
+- Add ТОВ in phase 2
+- ПАТ in phase 3
 
-**If FCP spec changes:**
-- Monitor CHANGELOG
-- Allocate time for updates
-- Use feature flags for new capabilities
-
----
-
-## 6. Definition of Done
-
-### For each operation:
-- [ ] Implementation complete
-- [ ] Unit tests passing
-- [ ] Integration tests passing
-- [ ] Documentation updated
-- [ ] Capability checks enforced
-- [ ] OperationReceipt used (for mutations)
-- [ ] Error handling complete
-- [ ] Logging appropriate (no sensitive data)
-
-### For each phase:
-- [ ] All operations in phase complete
-- [ ] Code review passed
-- [ ] All tests green
-- [ ] Documentation reviewed
-- [ ] Demo to stakeholders
+**If gate system performance issues:**
+- In-memory cache for active gates
+- Async gate state updates
 
 ---
 
-## 7. Наступні дії (Immediate Actions)
-
-### Сьогодні / Завтра:
-1. [ ] Review this plan
-2. [ ] Confirm Phase 0 complete
-3. [ ] Set up development environment
-
-### Цей тиждень:
-1. [ ] Create `connectors/odoo/` scaffold
-2. [ ] Implement basic Connector trait
-3. [ ] Set up test infrastructure
-
-### Наступний тиждень:
-1. [ ] Implement Odoo authentication
-2. [ ] Create HTTP client wrapper
-3. [ ] First working API call to Odoo
-
----
-
-## 8. Tracking
-
-### Progress Tracker
+## 7. Progress Tracker
 
 ```
-Phase 0: Research     [████████████████████] 100%
+Phase 0: Research     [████████████████████] 100% ✅
 Phase 1: Foundation   [                    ]   0%
-Phase 2: Quality      [                    ]   0%
-Phase 3: CAPA         [                    ]   0%
-Phase 4: KB & KPI     [                    ]   0%
-Phase 5: Advanced     [                    ]   0%
+Phase 2: Decomposition[                    ]   0%
+Phase 3: Quality      [                    ]   0%
+Phase 4: CAPA         [                    ]   0%
+Phase 5: KB & KPI     [                    ]   0%
+Phase 6: Advanced     [                    ]   0%
 ```
 
-### Change Log
+---
+
+## 8. Change Log
 
 | Date | Version | Change |
 |------|---------|--------|
-| 2026-01-27 | 1.0.0 | Initial plan created |
+| 2026-01-27 | 1.0.0 | Initial plan |
+| 2026-01-27 | 2.0.0 | Added Process Decomposition, Policy Profiles, Enterprise Types |
 
 ---
 
-## 9. Контакти
+## 9. Next Actions
 
-### Project Resources
+### Immediate (цей тиждень):
+1. [ ] Review updated plan
+2. [ ] Decide on hybrid enterprise handling
+3. [ ] Create `connectors/odoo/` scaffold
 
-| Resource | Location |
-|----------|----------|
-| Research Docs | `/docs/research/` |
-| FCP Connectors | `/connectors/` |
-| User Guides | `/docs/guides/` |
-
-### Related Projects
-
-| Project | Repository |
-|---------|------------|
-| FCP Core | `flywheel_connectors` |
-| Odoo v19 | `odoov19` |
+### Short-term (наступні 2 тижні):
+1. [ ] Implement Policy Profile system
+2. [ ] Implement basic Gate system
+3. [ ] First working operation with profile-aware behavior
 
 ---
 
-*Plan created: 2026-01-27*
-*Status: Active Planning*
-*Next review: After Phase 1 completion*
+*Plan updated: 2026-01-27*
+*Version: 2.0.0*
+*Key changes: Process Decomposition, Policy Profiles, Enterprise Types, Updated timeline*
