@@ -6,7 +6,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError};
+use fcp_core::{
+    BaseConnector, CapabilityGrant, CapabilityToken, CapabilityVerifier, ConnectorId, EventCaps,
+    FcpError, HandshakeRequest, HandshakeResponse, OperationId, SessionId,
+};
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, info, instrument};
@@ -32,6 +35,12 @@ pub struct TwitterConnector {
     /// Authenticated user info
     authenticated_user: Option<User>,
 
+    /// Capability verifier
+    verifier: Option<CapabilityVerifier>,
+
+    /// Session ID
+    session_id: Option<SessionId>,
+
     /// Event broadcast sender for subscriptions
     event_tx: broadcast::Sender<Value>,
 
@@ -53,6 +62,8 @@ impl TwitterConnector {
             config: None,
             client: None,
             authenticated_user: None,
+            verifier: None,
+            session_id: None,
             event_tx,
             stream_active: Arc::new(RwLock::new(false)),
             stream_subscribers: Arc::new(AtomicU64::new(0)),
@@ -115,9 +126,15 @@ impl TwitterConnector {
     }
 
     /// Handle the handshake method.
-    #[instrument(skip(self, _params))]
-    pub async fn handle_handshake(&mut self, _params: Value) -> Result<Value, FcpError> {
+    #[instrument(skip(self, params))]
+    pub async fn handle_handshake(&mut self, params: Value) -> Result<Value, FcpError> {
         info!("Performing Twitter connector handshake");
+
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid handshake request: {e}"),
+            })?;
 
         let client = self.require_client()?;
 
@@ -132,16 +149,46 @@ impl TwitterConnector {
         info!(username = %user.username, user_id = %user.id, "Authenticated as user");
         self.authenticated_user = Some(user.clone());
 
+        // Set up verifier
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
         self.base.set_handshaken(true);
 
-        Ok(json!({
-            "status": "ready",
-            "user": {
-                "id": user.id,
-                "name": user.name,
-                "username": user.username
-            }
-        }))
+        // Convert capability IDs to grants
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .into_iter()
+            .map(|cap| CapabilityGrant {
+                capability: cap,
+                operation: None,
+            })
+            .collect();
+
+        let response = HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: "sha256:twitter-connector-v1".into(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        };
+
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
     }
 
     /// Handle the health method.
@@ -213,6 +260,40 @@ impl TwitterConnector {
         let args = params.get("args").cloned().unwrap_or(json!({}));
 
         debug!(operation = %operation, "Invoking Twitter operation");
+
+        // Extract and verify capability token
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing capability_token".into(),
+            })?;
+
+        let token: CapabilityToken =
+            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+
+        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation ID format".into(),
+        })?;
+
+        // Extract resource URIs
+        let mut resource_uris = Vec::new();
+        if let Some(user_id) = args.get("user_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("twitter:user:{user_id}"));
+        }
+        if let Some(tweet_id) = args.get("tweet_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("twitter:tweet:{tweet_id}"));
+        }
+
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(&token, &op_id, &resource_uris)?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
 
         let result = self.dispatch_operation(operation, args).await;
 
