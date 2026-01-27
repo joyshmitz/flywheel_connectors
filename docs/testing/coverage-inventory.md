@@ -45,7 +45,7 @@ The flywheel_connectors codebase has **~3,600+ test markers** across **177 files
 
 | Crate | Test Files | Test Count | Notes |
 |-------|-----------|------------|-------|
-| fcp-host | 1 | 8 | Rate limit integration only |
+| fcp-host | 2 | 9 | Rate limit + subprocess connector integration |
 | fcp-tailscale | 1 | ~10 | Enrollment lifecycle only |
 | fcp-conformance | 1 | 19 | FZPF schema validation |
 

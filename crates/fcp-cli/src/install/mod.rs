@@ -359,7 +359,14 @@ impl DemoKeys {
 fn parse_target_triple(triple: &str) -> ConnectorTarget {
     // Parse triples like "x86_64-unknown-linux-gnu" or "aarch64-apple-darwin"
     let parts: Vec<&str> = triple.split('-').collect();
-    let arch = parts.first().map_or("unknown", |s| *s);
+    let raw_arch = parts.first().map_or("unknown", |s| *s);
+    
+    let arch = match raw_arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
     let os = if parts.len() >= 3 {
         parts[2]
     } else {
