@@ -13,13 +13,18 @@
 //!
 //! # List available schemas
 //! cargo run -p fcp-conformance --bin fcp-vecgen -- --list
+//!
+//! # Verify vectors against stored baseline (CI mode)
+//! cargo run -p fcp-conformance --bin fcp-vecgen -- --verify --baseline tests/vectors/serialization/schema_hash_vectors.json
 //! ```
 
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 
+use chrono::Utc;
 use clap::Parser;
 use fcp_conformance::vecgen::{
     GeneratedVector, PayloadVector, SchemaRegistration, core_schema_registrations,
@@ -54,6 +59,14 @@ struct Args {
     /// Verify existing vectors instead of generating.
     #[arg(long, default_value_t = false)]
     verify: bool,
+
+    /// Path to baseline vectors file for verification (required with --verify).
+    #[arg(long)]
+    baseline: Option<PathBuf>,
+
+    /// Output JSONL log file for structured CI output.
+    #[arg(long)]
+    log_jsonl: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -85,6 +98,218 @@ struct TestObjectHeader {
     schema_hash: String,
     zone_id: String,
     created_at: String,
+}
+
+/// A single difference found during verification.
+#[derive(Debug, Clone, Serialize)]
+struct VectorDiff {
+    schema: String,
+    field: String,
+    expected: String,
+    actual: String,
+}
+
+/// Verification result summary.
+#[derive(Debug, Clone, Serialize)]
+struct VerificationResult {
+    passed: bool,
+    schemas_checked: usize,
+    schemas_matched: usize,
+    schemas_missing: Vec<String>,
+    schemas_extra: Vec<String>,
+    diffs: Vec<VectorDiff>,
+}
+
+/// Structured log entry for E2E logging per `STANDARD_Testing_Logging.md`.
+#[derive(Debug, Clone, Serialize)]
+struct LogEntry {
+    timestamp: String,
+    level: String,
+    test_name: String,
+    module: String,
+    phase: String,
+    correlation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schemas_checked: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diffs_found: Option<usize>,
+}
+
+fn emit_log_entry(entry: &LogEntry, log_file: &mut Option<fs::File>) {
+    let json = serde_json::to_string(entry).unwrap_or_default();
+    if let Some(f) = log_file {
+        use std::io::Write;
+        let _ = writeln!(f, "{json}");
+    }
+    // Also emit to stderr for visibility
+    eprintln!(
+        "[{}] {}",
+        entry.level.to_uppercase(),
+        entry.message.as_deref().unwrap_or(&json)
+    );
+}
+
+/// Verify generated vectors against a baseline file.
+#[allow(clippy::too_many_lines)]
+fn verify_vectors(
+    baseline_path: &PathBuf,
+    log_file: &mut Option<fs::File>,
+    correlation_id: &str,
+) -> Result<VerificationResult, String> {
+    // Setup phase
+    emit_log_entry(
+        &LogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            level: "info".into(),
+            test_name: "schema_vector_verification".into(),
+            module: "fcp-conformance".into(),
+            phase: "setup".into(),
+            correlation_id: correlation_id.into(),
+            message: Some(format!("Loading baseline from {}", baseline_path.display())),
+            result: None,
+            schemas_checked: None,
+            diffs_found: None,
+        },
+        log_file,
+    );
+
+    // Load baseline
+    let baseline_content = fs::read_to_string(baseline_path)
+        .map_err(|e| format!("Failed to read baseline file: {e}"))?;
+    let baseline: BTreeMap<String, GeneratedVector> = serde_json::from_str(&baseline_content)
+        .map_err(|e| format!("Failed to parse baseline JSON: {e}"))?;
+
+    // Execute phase - generate fresh vectors
+    emit_log_entry(
+        &LogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            level: "info".into(),
+            test_name: "schema_vector_verification".into(),
+            module: "fcp-conformance".into(),
+            phase: "execute".into(),
+            correlation_id: correlation_id.into(),
+            message: Some("Regenerating vectors for comparison".into()),
+            result: None,
+            schemas_checked: None,
+            diffs_found: None,
+        },
+        log_file,
+    );
+
+    let generated = generate_all_vectors();
+
+    // Verify phase - compare
+    let mut result = VerificationResult {
+        passed: true,
+        schemas_checked: 0,
+        schemas_matched: 0,
+        schemas_missing: vec![],
+        schemas_extra: vec![],
+        diffs: vec![],
+    };
+
+    // Check for missing schemas (in baseline but not generated)
+    for key in baseline.keys() {
+        if !generated.contains_key(key) {
+            result.schemas_missing.push(key.clone());
+            result.passed = false;
+        }
+    }
+
+    // Check for extra schemas (generated but not in baseline)
+    for key in generated.keys() {
+        if !baseline.contains_key(key) {
+            result.schemas_extra.push(key.clone());
+            result.passed = false;
+        }
+    }
+
+    // Compare matching schemas
+    for (key, expected) in &baseline {
+        if let Some(actual) = generated.get(key) {
+            result.schemas_checked += 1;
+
+            // Compare schema hash (positive branch first for clippy::if_not_else)
+            if expected.expected_schema_hash == actual.expected_schema_hash {
+                // Compare payloads only if schema hash matches
+                let expected_payloads: BTreeMap<_, _> = expected
+                    .payloads
+                    .iter()
+                    .map(|p| (&p.description, p))
+                    .collect();
+                let actual_payloads: BTreeMap<_, _> = actual
+                    .payloads
+                    .iter()
+                    .map(|p| (&p.description, p))
+                    .collect();
+
+                for (desc, exp_payload) in &expected_payloads {
+                    if let Some(act_payload) = actual_payloads.get(desc) {
+                        if exp_payload.expected_cbor != act_payload.expected_cbor {
+                            result.diffs.push(VectorDiff {
+                                schema: key.clone(),
+                                field: format!("payload[{desc}].cbor"),
+                                expected: exp_payload.expected_cbor.clone(),
+                                actual: act_payload.expected_cbor.clone(),
+                            });
+                            result.passed = false;
+                        }
+                        if exp_payload.expected_payload != act_payload.expected_payload {
+                            result.diffs.push(VectorDiff {
+                                schema: key.clone(),
+                                field: format!("payload[{desc}].full_payload"),
+                                expected: exp_payload.expected_payload.clone(),
+                                actual: act_payload.expected_payload.clone(),
+                            });
+                            result.passed = false;
+                        }
+                    }
+                }
+                result.schemas_matched += 1;
+            } else {
+                // Schema hash mismatch
+                result.diffs.push(VectorDiff {
+                    schema: key.clone(),
+                    field: "schema_hash".into(),
+                    expected: expected.expected_schema_hash.clone(),
+                    actual: actual.expected_schema_hash.clone(),
+                });
+                result.passed = false;
+            }
+        }
+    }
+
+    // Emit verification result log
+    emit_log_entry(
+        &LogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            level: if result.passed { "info" } else { "error" }.into(),
+            test_name: "schema_vector_verification".into(),
+            module: "fcp-conformance".into(),
+            phase: "verify".into(),
+            correlation_id: correlation_id.into(),
+            message: Some(if result.passed {
+                "All vectors match baseline".into()
+            } else {
+                format!(
+                    "Vector drift detected: {} diffs, {} missing, {} extra",
+                    result.diffs.len(),
+                    result.schemas_missing.len(),
+                    result.schemas_extra.len()
+                )
+            }),
+            result: Some(if result.passed { "pass" } else { "fail" }.into()),
+            schemas_checked: Some(result.schemas_checked),
+            diffs_found: Some(result.diffs.len()),
+        },
+        log_file,
+    );
+
+    Ok(result)
 }
 
 /// Generate sample data for each registered schema.
@@ -213,6 +438,7 @@ fn generate_all_vectors() -> BTreeMap<String, GeneratedVector> {
     vectors
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let args = Args::parse();
 
@@ -231,8 +457,74 @@ fn main() {
     }
 
     if args.verify {
-        eprintln!("Verification mode not yet implemented");
-        std::process::exit(1);
+        let baseline_path = args.baseline.as_ref().unwrap_or_else(|| {
+            eprintln!("Error: --baseline is required with --verify");
+            std::process::exit(1);
+        });
+
+        // Open log file if specified
+        let mut log_file = args.log_jsonl.as_ref().and_then(|p| {
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::File::create(p).ok()
+        });
+
+        // Generate correlation ID
+        let correlation_id = format!(
+            "vecgen-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
+
+        match verify_vectors(baseline_path, &mut log_file, &correlation_id) {
+            Ok(result) => {
+                // Output JSON diff summary to stdout for CI artifact capture
+                if !result.diffs.is_empty()
+                    || !result.schemas_missing.is_empty()
+                    || !result.schemas_extra.is_empty()
+                {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&result).unwrap_or_default()
+                    );
+                }
+
+                if result.passed {
+                    eprintln!(
+                        "✓ All {} schemas verified successfully",
+                        result.schemas_checked
+                    );
+                    std::process::exit(0);
+                } else {
+                    eprintln!("✗ Verification failed:");
+                    if !result.schemas_missing.is_empty() {
+                        eprintln!("  Missing schemas: {:?}", result.schemas_missing);
+                    }
+                    if !result.schemas_extra.is_empty() {
+                        eprintln!("  Extra schemas: {:?}", result.schemas_extra);
+                    }
+                    for diff in &result.diffs {
+                        eprintln!(
+                            "  {}.{}: expected {} != actual {}",
+                            diff.schema,
+                            diff.field,
+                            &diff.expected[..diff.expected.len().min(32)],
+                            &diff.actual[..diff.actual.len().min(32)]
+                        );
+                    }
+                    eprintln!("\nTo update baseline, run:");
+                    eprintln!(
+                        "  cargo run -p fcp-conformance --bin fcp-vecgen -- --out tests/vectors/serialization"
+                    );
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error during verification: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // Generate vectors

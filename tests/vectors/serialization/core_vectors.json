@@ -1,0 +1,112 @@
+{
+  "fcp.core:AuditEvent@1.0.0": {
+    "description": "Audit chain event entry",
+    "schema_namespace": "fcp.core",
+    "schema_name": "AuditEvent",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "74ebf83b9c8f713cb0efbca2d3b63681544ffe0c83c9a4f16c67a50ca65a33d9",
+    "payloads": []
+  },
+  "fcp.core:CapabilityObject@1.0.0": {
+    "description": "Capability token wrapper object",
+    "schema_namespace": "fcp.core",
+    "schema_name": "CapabilityObject",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "f308bbbbf817b7b36e4cc03d86c758c460fa699b71c3259d65129e1d29e18430",
+    "payloads": [
+      {
+        "description": "basic capability",
+        "input_json": {
+          "expires_at": "2026-12-31T23:59:59Z",
+          "granted_at": "2026-01-01T00:00:00Z",
+          "id": "cap-001",
+          "zone": "z:work"
+        },
+        "expected_cbor": "a4626964676361702d303031647a6f6e65667a3a776f726b6a657870697265735f617474323032362d31322d33315432333a35393a35395a6a6772616e7465645f617474323032362d30312d30315430303a30303a30305a",
+        "expected_payload": "f308bbbbf817b7b36e4cc03d86c758c460fa699b71c3259d65129e1d29e18430a4626964676361702d303031647a6f6e65667a3a776f726b6a657870697265735f617474323032362d31322d33315432333a35393a35395a6a6772616e7465645f617474323032362d30312d30315430303a30303a30305a"
+      }
+    ]
+  },
+  "fcp.core:EventEnvelope@1.0.0": {
+    "description": "Streaming event wrapper",
+    "schema_namespace": "fcp.core",
+    "schema_name": "EventEnvelope",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "d18d603bf45029b91600e4d7e60553e82ca17e78ef52d79b52b443d023542230",
+    "payloads": []
+  },
+  "fcp.core:ObjectHeader@1.0.0": {
+    "description": "Universal object header with provenance",
+    "schema_namespace": "fcp.core",
+    "schema_name": "ObjectHeader",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "f645433643bf8dc506737d55f3d495c4566900f7de080d0f5778d16500d46929",
+    "payloads": [
+      {
+        "description": "basic header",
+        "input_json": {
+          "created_at": "2026-01-01T00:00:00Z",
+          "schema_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "zone_id": "z:work"
+        },
+        "expected_cbor": "a3677a6f6e655f6964667a3a776f726b6a637265617465645f617474323032362d30312d30315430303a30303a30305a6b736368656d615f68617368784030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030",
+        "expected_payload": "f645433643bf8dc506737d55f3d495c4566900f7de080d0f5778d16500d46929a3677a6f6e655f6964667a3a776f726b6a637265617465645f617474323032362d30312d30315430303a30303a30305a6b736368656d615f68617368784030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030"
+      }
+    ]
+  },
+  "fcp.core:OperationIntent@1.0.0": {
+    "description": "Operation request with idempotency",
+    "schema_namespace": "fcp.core",
+    "schema_name": "OperationIntent",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "253fd2ffd1cadf1450afe254bcd91e2ae511aa4df22faab37a940af235dfaff3",
+    "payloads": []
+  },
+  "fcp.core:OperationReceipt@1.0.0": {
+    "description": "Operation result receipt",
+    "schema_namespace": "fcp.core",
+    "schema_name": "OperationReceipt",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "275ecce217ba2946e6a5a876317899d26bf52fa74d57efd70b1221fa30491506",
+    "payloads": []
+  },
+  "fcp.test:GoldenStruct@1.0.0": {
+    "description": "Test struct for canonical CBOR verification",
+    "schema_namespace": "fcp.test",
+    "schema_name": "GoldenStruct",
+    "schema_version": "1.0.0",
+    "expected_schema_hash": "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23",
+    "payloads": [
+      {
+        "description": "canonical basic",
+        "input_json": {
+          "active": true,
+          "id": 12345,
+          "name": "test"
+        },
+        "expected_cbor": "a3626964193039646e616d65647465737466616374697665f5",
+        "expected_payload": "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23a3626964193039646e616d65647465737466616374697665f5"
+      },
+      {
+        "description": "canonical with unicode",
+        "input_json": {
+          "active": false,
+          "id": 99999,
+          "name": "hello😀world"
+        },
+        "expected_cbor": "a36269641a0001869f646e616d656e68656c6c6ff09f9880776f726c6466616374697665f4",
+        "expected_payload": "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23a36269641a0001869f646e616d656e68656c6c6ff09f9880776f726c6466616374697665f4"
+      },
+      {
+        "description": "canonical edge case",
+        "input_json": {
+          "active": false,
+          "id": 0,
+          "name": ""
+        },
+        "expected_cbor": "a362696400646e616d656066616374697665f4",
+        "expected_payload": "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23a362696400646e616d656066616374697665f4"
+      }
+    ]
+  }
+}
