@@ -2,17 +2,21 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
-use std::{env, io, process};
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::{Path, PathBuf};
+use std::{env, process};
 
 use fcp_core::CorrelationId;
 use fcp_e2e::{
     AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger, E2eReport, E2eRunner,
+    validate_log_entry_value,
 };
 
 #[derive(Debug, Default)]
 struct CliArgs {
     interop: bool,
+    validate_log: Option<PathBuf>,
     output: Option<PathBuf>,
     module: String,
     test_name: String,
@@ -25,6 +29,7 @@ struct CliArgs {
 fn usage() -> &'static str {
     "Usage:
   fcp-e2e --interop [--output <file>] [--test-name <name>] [--module <name>]
+  fcp-e2e --validate-log <file>
   fcp-e2e --connector-cmd <path> --request <json> [--request <json> ...] \\
          [--connector-arg <arg> ...] [--output <file>] [--test-name <name>] [--module <name>]
 "
@@ -34,6 +39,7 @@ fn parse_args() -> Result<CliArgs, String> {
     let mut args = env::args().skip(1);
     let mut parsed = CliArgs {
         interop: false,
+        validate_log: None,
         output: None,
         module: "fcp-e2e".to_string(),
         test_name: "fcp-e2e".to_string(),
@@ -50,6 +56,12 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "--interop" => {
                 parsed.interop = true;
+            }
+            "--validate-log" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--validate-log requires a value".to_string())?;
+                parsed.validate_log = Some(PathBuf::from(value));
             }
             "--output" => {
                 let value = args
@@ -99,12 +111,15 @@ fn parse_args() -> Result<CliArgs, String> {
         return Ok(parsed);
     }
 
-    if parsed.interop && parsed.connector_cmd.is_some() {
-        return Err("Choose only one of --interop or --connector-cmd".to_string());
+    let mode_count = parsed.validate_log.is_some() as u8
+        + parsed.interop as u8
+        + parsed.connector_cmd.is_some() as u8;
+    if mode_count == 0 {
+        return Err("Missing mode: use --validate-log, --interop, or --connector-cmd".to_string());
     }
 
-    if !parsed.interop && parsed.connector_cmd.is_none() {
-        return Err("Missing mode: use --interop or --connector-cmd".to_string());
+    if mode_count > 1 {
+        return Err("Choose only one of --validate-log, --interop, or --connector-cmd".to_string());
     }
 
     if parsed.connector_cmd.is_some() && parsed.requests.is_empty() {
@@ -123,6 +138,40 @@ fn write_report(report: &E2eReport, output: Option<PathBuf>) -> io::Result<()> {
     }
 }
 
+fn validate_entries(entries: &[E2eLogEntry]) -> Result<(), String> {
+    if entries.is_empty() {
+        return Err("no log entries recorded".to_string());
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        if let Err(err) = entry.validate() {
+            return Err(format!("entry {}: {}", index + 1, err));
+        }
+    }
+    Ok(())
+}
+
+fn validate_jsonl_file(path: &Path) -> Result<(), String> {
+    let file = File::open(path)
+        .map_err(|err| format!("failed to open log file {}: {}", path.display(), err))?;
+    let reader = io::BufReader::new(file);
+    let mut seen = 0_u64;
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| format!("failed to read line {}: {}", index + 1, err))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        seen += 1;
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|err| format!("line {}: invalid JSON: {}", index + 1, err))?;
+        validate_log_entry_value(&value).map_err(|err| format!("line {}: {}", index + 1, err))?;
+    }
+    if seen == 0 {
+        return Err("no log entries found".to_string());
+    }
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = match parse_args() {
@@ -139,9 +188,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Some(path) = args.validate_log.as_ref() {
+        if let Err(err) = validate_jsonl_file(path) {
+            eprintln!("log schema validation failed: {err}");
+            process::exit(1);
+        }
+        println!("log schema OK: {}", path.display());
+        return Ok(());
+    }
+
     if args.interop {
         let mut runner = E2eRunner::new(args.module);
         let report = runner.run_interop_suite(args.test_name);
+        if let Err(err) = validate_entries(&report.logs) {
+            eprintln!("log schema validation failed: {err}");
+            process::exit(1);
+        }
         write_report(&report, args.output)?;
         return Ok(());
     }
@@ -277,6 +339,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         duration_ms,
         logs: logger.drain(),
     };
+    if let Err(err) = validate_entries(&report.logs) {
+        eprintln!("log schema validation failed: {err}");
+        process::exit(1);
+    }
     write_report(&report, args.output)?;
     Ok(())
 }

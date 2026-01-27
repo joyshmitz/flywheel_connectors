@@ -84,3 +84,15 @@ The validator lives in `crates/fcp-e2e/src/logging.rs` as:
 
 These checks enforce the required fields and minimal typing guarantees so
 E2E logs are always parsable by downstream tooling.
+
+CLI Validation
+--------------
+
+Use the fcp-e2e CLI to validate script-generated JSONL logs:
+
+```bash
+fcp-e2e --validate-log scripts/e2e/out/e2e_happy_path.jsonl
+```
+
+The CLI will exit non-zero on the first invalid line and print a line number
+plus the schema violation.

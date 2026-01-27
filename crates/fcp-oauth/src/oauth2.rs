@@ -190,9 +190,7 @@ impl OAuth2Client {
     /// # Errors
     /// Returns `OAuthError::HttpError` if the HTTP client fails to build.
     pub fn new(config: OAuth2Config) -> OAuthResult<Self> {
-        let http_client = Client::builder()
-            .timeout(config.timeout)
-            .build()?;
+        let http_client = Client::builder().timeout(config.timeout).build()?;
 
         Ok(Self {
             config,

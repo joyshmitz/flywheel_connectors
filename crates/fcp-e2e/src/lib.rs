@@ -28,7 +28,9 @@ use fcp_core::{
 };
 use serde::{Deserialize, Serialize};
 
-pub use logging::{AssertionsSummary, E2eLogEntry, E2eLogger};
+pub use logging::{
+    AssertionsSummary, E2eLogEntry, E2eLogger, LogSchemaError, validate_log_entry_value,
+};
 pub use subprocess::ConnectorProcessRunner;
 
 /// Errors returned by the E2E harness.
