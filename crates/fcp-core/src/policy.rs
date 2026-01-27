@@ -366,12 +366,11 @@ pub fn simulate_policy_decision(
         .as_deref()
         .or_else(|| claims.get_subject())
         .ok_or(PolicySimulationError::MissingClaim { claim: "sub" })?;
-    let principal = PrincipalId::new(principal_str).map_err(|err| {
-        PolicySimulationError::InvalidPrincipal {
+    let principal =
+        PrincipalId::new(principal_str).map_err(|err| PolicySimulationError::InvalidPrincipal {
             value: principal_str.to_string(),
             message: err.to_string(),
-        }
-    })?;
+        })?;
 
     let capability_str = input
         .capability_id
@@ -387,18 +386,18 @@ pub fn simulate_policy_decision(
         }
     })?;
 
-    let request_object_id = input.request_object_id.unwrap_or_else(|| {
-        ObjectId::from_unscoped_bytes(invoke.id.0.as_bytes())
-    });
+    let request_object_id = input
+        .request_object_id
+        .unwrap_or_else(|| ObjectId::from_unscoped_bytes(invoke.id.0.as_bytes()));
 
     let provenance = input
         .provenance_record
         .clone()
         .unwrap_or_else(|| provenance_from_request(invoke));
 
-    let now_ms = input.now_ms.unwrap_or_else(|| {
-        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
-    });
+    let now_ms = input
+        .now_ms
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0));
 
     let decision_input = PolicyDecisionInput {
         request_object_id,
