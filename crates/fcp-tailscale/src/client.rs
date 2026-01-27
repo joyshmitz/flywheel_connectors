@@ -220,16 +220,11 @@ impl LocalApiClient {
     /// # Errors
     ///
     /// Returns an error if the client cannot be created.
-    pub fn with_socket(socket_path: &str) -> TailscaleResult<Self> {
-        // Build a client that can talk to Unix sockets
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| TailscaleError::LocalApiRequest(e.to_string()))?;
-
-        Ok(Self {
-            client,
-            base_url: format!("http://local-tailscaled.sock{socket_path}"),
-        })
+    pub fn with_socket(_socket_path: &str) -> TailscaleResult<Self> {
+        // Unix socket support requires additional dependencies not currently enabled.
+        Err(TailscaleError::LocalApiRequest(
+            "Unix socket support not enabled in this build".into(),
+        ))
     }
 
     /// Create a new `LocalAPI` client using an HTTP URL.
