@@ -61,6 +61,7 @@ pub trait ConnectorHealthDisplay {
     /// Lowercase label for health status.
     fn label(&self) -> &'static str;
     /// Optional reason for degraded/unavailable.
+    #[allow(dead_code)]
     fn reason(&self) -> Option<&str>;
 }
 
@@ -92,8 +93,7 @@ impl ConnectorHealthDisplay for ConnectorHealth {
     fn reason(&self) -> Option<&str> {
         match self {
             Self::Healthy => None,
-            Self::Degraded { reason } => Some(reason.as_str()),
-            Self::Unavailable { reason, .. } => Some(reason.as_str()),
+            Self::Degraded { reason } | Self::Unavailable { reason, .. } => Some(reason.as_str()),
         }
     }
 }

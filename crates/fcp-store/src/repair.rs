@@ -500,11 +500,10 @@ mod tests {
             object_id: ObjectId::from_bytes([1; 32]),
             distinct_nodes: 1,
             max_node_fraction_bps: 10000,
-            coverage_bps: if source > 0 {
-                total * 10000 / source
-            } else {
-                0
-            },
+            coverage_bps: total
+                .saturating_mul(10_000)
+                .checked_div(source)
+                .unwrap_or(0),
             is_available: total >= source,
             total_symbols: total,
             source_symbols: source,

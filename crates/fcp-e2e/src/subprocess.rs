@@ -4,8 +4,8 @@
 //! stdin/stdout. It is intentionally lightweight and deterministic.
 
 use std::io;
-use std::sync::Arc;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
