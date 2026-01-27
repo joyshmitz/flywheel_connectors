@@ -1,7 +1,12 @@
 {
+  "description": "Session key schedule (fixed)",
   "session_id": "88888888888888888888888888888888",
   "initiator_node_id": "node-initiator",
   "responder_node_id": "node-responder",
+  "initiator_ephemeral_sk": "3333333333333333333333333333333333333333333333333333333333333333",
+  "initiator_ephemeral_pk": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+  "responder_ephemeral_sk": "4444444444444444444444444444444444444444444444444444444444444444",
+  "responder_ephemeral_pk": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b",
   "hello_nonce": "66666666666666666666666666666666",
   "ack_nonce": "77777777777777777777777777777777",
   "shared_secret": "3c528e9fd39731b15d10de8feb5f71d3f65b73c993581dedb03315a9ed177730",

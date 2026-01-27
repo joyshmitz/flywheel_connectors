@@ -4,6 +4,53 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Deserialize)]
+struct KeyScheduleVector {
+    description: Option<String>,
+    session_id: String,
+    initiator_node_id: String,
+    responder_node_id: String,
+    initiator_ephemeral_sk: String,
+    initiator_ephemeral_pk: String,
+    responder_ephemeral_sk: String,
+    responder_ephemeral_pk: String,
+    hello_nonce: String,
+    ack_nonce: String,
+    shared_secret: String,
+    k_mac_i2r: String,
+    k_mac_r2i: String,
+    k_ctx: String,
+}
+
+fn load_key_schedule_vector() -> KeyScheduleVector {
+    let raw = include_str!("../../../../tests/vectors/sessions/key_schedule.json");
+    serde_json::from_str(raw).expect("key_schedule.json must be valid JSON")
+}
+
+fn from_key_schedule(vector: KeyScheduleVector) -> SessionGoldenVector {
+    SessionGoldenVector {
+        description: vector
+            .description
+            .unwrap_or_else(|| "Session key schedule".to_string()),
+        initiator_id: vector.initiator_node_id,
+        responder_id: vector.responder_node_id,
+        initiator_ephemeral_sk: vector.initiator_ephemeral_sk,
+        initiator_ephemeral_pk: vector.initiator_ephemeral_pk,
+        responder_ephemeral_sk: vector.responder_ephemeral_sk,
+        responder_ephemeral_pk: vector.responder_ephemeral_pk,
+        hello_nonce: vector.hello_nonce,
+        ack_nonce: vector.ack_nonce,
+        expected_shared_secret: vector.shared_secret,
+        session_id: vector.session_id,
+        expected_keys: SessionDerivedKeys {
+            k_ctx: vector.k_ctx,
+            k_data: "00".repeat(32),
+            k_mac_i2r: vector.k_mac_i2r,
+            k_mac_r2i: vector.k_mac_r2i,
+        },
+    }
+}
+
 /// Golden vector for session handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionGoldenVector {
@@ -52,38 +99,13 @@ impl SessionGoldenVector {
     #[must_use]
     #[allow(clippy::missing_const_for_fn)] // Cannot be const: Vec allocation
     pub fn load_all() -> Vec<Self> {
-        // TODO: Load from embedded CBOR/JSON files
-        vec![Self::vector_1_basic_handshake()]
+        vec![from_key_schedule(load_key_schedule_vector())]
     }
 
     /// Vector 1: Basic handshake
     #[must_use]
     pub fn vector_1_basic_handshake() -> Self {
-        Self {
-            description: "Basic handshake".into(),
-            initiator_id: "node-initiator".into(),
-            responder_id: "node-responder".into(),
-            // Keys and nonces would be hardcoded here in a real vector
-            initiator_ephemeral_sk: "12".repeat(32),
-            initiator_ephemeral_pk:
-                "052a50773ac8d91773f2dc9662e12f0defe915e415b8a1c8e20a5a3d6ab2b843".into(),
-            responder_ephemeral_sk: "34".repeat(32),
-            responder_ephemeral_pk:
-                "ffc951aa6f2fa03096d1d1b579735b2f6f84019fe2f617aa65ff3d68705f2527".into(),
-            hello_nonce: "01".repeat(16),
-            ack_nonce: "02".repeat(16),
-            expected_shared_secret:
-                "161e854907b902cf0ef64555458b3f0d86de9439c9eaf8595ea4834f8b4d0b0f".into(),
-            session_id: "77".repeat(16),
-            expected_keys: SessionDerivedKeys {
-                k_ctx: "cf7f39884db5a0365e9529183e0664fbea8f585343b5a6c92de9e936aab6cc8f".into(),
-                k_data: "00".repeat(32), // Unused in current implementation
-                k_mac_i2r: "2114740f1b364fbaa79aead5054f827d66dd3a527415a9f198994c38314c2f4c"
-                    .into(),
-                k_mac_r2i: "ccf67f71dc2b558d95d173351cfbedadf20b88ca1dc8097dcd77eea42c0d4d8d"
-                    .into(),
-            },
-        }
+        from_key_schedule(load_key_schedule_vector())
     }
 }
 

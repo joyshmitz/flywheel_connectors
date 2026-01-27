@@ -110,6 +110,9 @@ pub enum FrameError {
 
     #[error("invalid symbol size (must be > 0)")]
     InvalidSymbolSize,
+
+    #[error("invalid utf-8 string")]
+    InvalidUtf8,
 }
 
 /// Parsed FCPS frame header (114 bytes).
@@ -341,6 +344,13 @@ impl FcpsFrame {
     pub fn encode(&self) -> Vec<u8> {
         let header_bytes = self.header.encode();
         let payload_len: usize = self.symbols.iter().map(SymbolRecord::wire_size).sum();
+
+        // Ensure header claim matches actual payload
+        debug_assert_eq!(
+            self.header.total_payload_len as usize, payload_len,
+            "header.total_payload_len mismatch"
+        );
+
         let mut buf = Vec::with_capacity(FCPS_HEADER_LEN + payload_len);
         buf.extend_from_slice(&header_bytes);
         for symbol in &self.symbols {
@@ -748,9 +758,17 @@ impl SignedFcpsFrame {
         let frame_bytes = self.frame.encode();
         let source_id_bytes = self.source_id.as_str().as_bytes();
 
+        if source_id_bytes.len() > u16::MAX as usize {
+            panic!(
+                "source_id too long: {} bytes (max {})",
+                source_id_bytes.len(),
+                u16::MAX
+            );
+        }
+
         let mut out = Vec::with_capacity(2 + source_id_bytes.len() + 8 + 64 + frame_bytes.len());
 
-        let source_id_len = u16::try_from(source_id_bytes.len()).unwrap_or(u16::MAX);
+        let source_id_len = u16::try_from(source_id_bytes.len()).unwrap();
         out.extend_from_slice(&source_id_len.to_le_bytes());
         out.extend_from_slice(source_id_bytes);
         out.extend_from_slice(&self.timestamp.to_le_bytes());
@@ -785,7 +803,7 @@ impl SignedFcpsFrame {
 
         let source_id_end = 2 + source_id_len;
         let source_id_str = std::str::from_utf8(&bytes[2..source_id_end])
-            .map_err(|_| FrameError::InvalidMagic { got: [0, 0, 0, 0] })?;
+            .map_err(|_| FrameError::InvalidUtf8)?;
         let source_id = TailscaleNodeId::new(source_id_str);
 
         let timestamp_start = source_id_end;

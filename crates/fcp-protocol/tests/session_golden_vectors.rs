@@ -78,9 +78,14 @@ impl TestLogEntry {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct KeyScheduleVector {
+    description: String,
     session_id: String,
     initiator_node_id: String,
     responder_node_id: String,
+    initiator_ephemeral_sk: String,
+    initiator_ephemeral_pk: String,
+    responder_ephemeral_sk: String,
+    responder_ephemeral_pk: String,
     hello_nonce: String,
     ack_nonce: String,
     shared_secret: String,
@@ -319,9 +324,14 @@ fn test_generate_key_schedule_vector() {
     .expect("derive keys");
 
     let vector = KeyScheduleVector {
+        description: "Session key schedule (fixed)".to_string(),
         session_id: hex::encode(session_id.as_bytes()),
         initiator_node_id: initiator.as_str().to_string(),
         responder_node_id: responder.as_str().to_string(),
+        initiator_ephemeral_sk: hex::encode(initiator_eph.to_bytes()),
+        initiator_ephemeral_pk: initiator_eph.public_key().to_hex(),
+        responder_ephemeral_sk: hex::encode(responder_eph.to_bytes()),
+        responder_ephemeral_pk: responder_eph.public_key().to_hex(),
         hello_nonce: hex::encode(hello_nonce.as_bytes()),
         ack_nonce: hex::encode(ack_nonce.as_bytes()),
         shared_secret: hex::encode(shared.as_bytes()),
