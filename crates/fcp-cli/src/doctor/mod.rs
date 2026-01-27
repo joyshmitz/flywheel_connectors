@@ -723,7 +723,7 @@ fn print_human_readable(report: &DoctorReport) {
     }
 }
 
-fn freshness_color(level: FreshnessLevel) -> &'static str {
+const fn freshness_color(level: FreshnessLevel) -> &'static str {
     match level {
         FreshnessLevel::Fresh => "\x1b[32m",
         FreshnessLevel::Stale => "\x1b[33m",

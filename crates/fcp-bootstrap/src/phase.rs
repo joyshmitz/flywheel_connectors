@@ -231,6 +231,10 @@ pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
 }
 
 /// Write the current phase to the lock file.
+///
+/// # Errors
+///
+/// Returns an I/O error if the phase cannot be serialized or written.
 pub fn write_phase_lock(data_dir: &Path, phase: &BootstrapPhase) -> std::io::Result<()> {
     let lock_file = data_dir.join("init.lock");
     let contents = serde_json::to_string(phase)
@@ -239,6 +243,10 @@ pub fn write_phase_lock(data_dir: &Path, phase: &BootstrapPhase) -> std::io::Res
 }
 
 /// Remove the phase lock file (call on successful completion).
+///
+/// # Errors
+///
+/// Returns an I/O error if the lock file cannot be removed.
 pub fn remove_phase_lock(data_dir: &Path) -> std::io::Result<()> {
     let lock_file = data_dir.join("init.lock");
     if lock_file.exists() {
