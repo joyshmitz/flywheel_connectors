@@ -77,6 +77,7 @@ pub struct BootstrapConfig {
 
 impl BootstrapConfig {
     /// Create a new configuration builder.
+    #[must_use]
     pub fn builder() -> BootstrapConfigBuilder {
         BootstrapConfigBuilder::default()
     }
@@ -129,6 +130,10 @@ impl BootstrapConfigBuilder {
     }
 
     /// Build the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error if required fields are missing.
     pub fn build(self) -> BootstrapResult<BootstrapConfig> {
         let data_dir = self
             .data_dir
@@ -158,6 +163,10 @@ pub struct BootstrapWorkflow {
 
 impl BootstrapWorkflow {
     /// Create a new bootstrap workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initialization state is invalid or filesystem setup fails.
     pub fn new(config: BootstrapConfig) -> BootstrapResult<Self> {
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)?;
@@ -185,6 +194,10 @@ impl BootstrapWorkflow {
     }
 
     /// Run the bootstrap workflow to completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any bootstrap phase fails.
     pub async fn run(mut self) -> BootstrapResult<GenesisState> {
         // Phase 1: Time validation
         if !self.config.skip_time_validation {
@@ -199,11 +212,10 @@ impl BootstrapWorkflow {
             BootstrapMode::MultiDevice {
                 device_count,
                 threshold,
-            } => {
-                self.run_multi_device_bootstrap(threshold, device_count)
-                    .await?
+            } => self.run_multi_device_bootstrap(threshold, device_count)?,
+            BootstrapMode::HardwareToken { token } => {
+                self.run_hardware_token_bootstrap(&token)?
             }
-            BootstrapMode::HardwareToken { token } => self.run_hardware_token_bootstrap(token)?,
             BootstrapMode::Import { phrase } => self.run_import_bootstrap(&phrase)?,
         };
 
@@ -297,7 +309,7 @@ impl BootstrapWorkflow {
         let genesis = GenesisState::create(&keypair.public());
 
         // Save recovery phrase (encrypted with device key in real implementation)
-        self.save_recovery_phrase(&phrase)?;
+        Self::save_recovery_phrase(&phrase);
 
         self.phase = BootstrapPhase::GenesisCreate;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
@@ -306,7 +318,7 @@ impl BootstrapWorkflow {
     }
 
     /// Run multi-device bootstrap with threshold ceremony.
-    async fn run_multi_device_bootstrap(
+    fn run_multi_device_bootstrap(
         &mut self,
         threshold: u32,
         total: u32,
@@ -334,7 +346,7 @@ impl BootstrapWorkflow {
     /// Run hardware token bootstrap.
     fn run_hardware_token_bootstrap(
         &mut self,
-        token: DetectedToken,
+        token: &DetectedToken,
     ) -> BootstrapResult<GenesisState> {
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
@@ -366,7 +378,7 @@ impl BootstrapWorkflow {
         let genesis = GenesisState::create_deterministic(&keypair.public());
 
         // Save the recovery phrase
-        self.save_recovery_phrase(phrase)?;
+        Self::save_recovery_phrase(phrase);
 
         self.phase = BootstrapPhase::GenesisCreate;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
@@ -383,7 +395,7 @@ impl BootstrapWorkflow {
     }
 
     /// Save the recovery phrase (in a real implementation, this would be encrypted).
-    fn save_recovery_phrase(&self, _phrase: &RecoveryPhrase) -> BootstrapResult<()> {
+    fn save_recovery_phrase(_phrase: &RecoveryPhrase) {
         // In a real implementation, we would:
         // 1. Encrypt the phrase with a device-specific key
         // 2. Store it in a secure location
@@ -391,10 +403,10 @@ impl BootstrapWorkflow {
 
         // For now, we just log that we would save it
         tracing::debug!("Recovery phrase would be saved (encrypted) to secure storage");
-        Ok(())
     }
 
     /// Get the current phase.
+    #[must_use]
     pub const fn phase(&self) -> &BootstrapPhase {
         &self.phase
     }
@@ -442,6 +454,7 @@ fn check_initialization_state(
 }
 
 /// Detect available hardware tokens.
+#[must_use]
 pub fn detect_hardware_tokens() -> Vec<DetectedToken> {
     let detector = TokenDetector::new();
     detector.detect_fcp_compatible()

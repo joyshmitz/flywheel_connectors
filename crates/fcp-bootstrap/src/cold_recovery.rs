@@ -203,7 +203,7 @@ pub mod cli {
 
     /// Format the cold recovery confirmation message.
     pub fn format_confirmation_message() -> &'static str {
-        r#"
+        r"
 ⚠️  COLD START RECOVERY
 No existing mesh peers found. This will:
 - Create fresh genesis from owner key
@@ -212,7 +212,7 @@ No existing mesh peers found. This will:
 - Start with single node (no quorum)
 
 If you have a backup of your .fcp directory, restore it instead.
-"#
+"
     }
 }
 

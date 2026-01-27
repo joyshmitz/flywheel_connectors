@@ -24,6 +24,7 @@ pub struct CeremonyId {
 
 impl CeremonyId {
     /// Generate a new random ceremony ID.
+    #[must_use]
     pub fn generate(threshold: u32, total: u32) -> Self {
         use rand::RngCore;
         let mut id = [0u8; 16];
@@ -90,6 +91,7 @@ impl ThresholdConfig {
     /// # Panics
     ///
     /// Panics if threshold > total or threshold < 1.
+    #[must_use]
     pub fn new(threshold: u32, total: u32) -> Self {
         assert!(threshold >= 1, "threshold must be at least 1");
         assert!(threshold <= total, "threshold must not exceed total");
@@ -151,6 +153,7 @@ pub enum CeremonyPhase {
 
 impl CeremonyPhase {
     /// Check if this is a terminal phase.
+    #[must_use]
     pub const fn is_terminal(&self) -> bool {
         matches!(self, Self::Complete { .. } | Self::Failed { .. })
     }
@@ -309,6 +312,7 @@ pub struct MessageRecord {
 
 impl ThresholdCeremony {
     /// Create a new threshold ceremony.
+    #[must_use]
     pub fn new(threshold: u32, total: u32) -> Self {
         let config = ThresholdConfig::new(threshold, total);
         let ceremony_id = CeremonyId::generate(threshold, total);
@@ -334,6 +338,7 @@ impl ThresholdCeremony {
     }
 
     /// Create a ceremony with a specific config.
+    #[must_use]
     pub fn with_config(config: ThresholdConfig) -> Self {
         let ceremony_id = CeremonyId::generate(config.threshold, config.total);
         let now = Utc::now();
@@ -358,6 +363,11 @@ impl ThresholdCeremony {
     }
 
     /// Add a participant to the ceremony.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not in the gathering phase,
+    /// the participant already joined, or the participant limit is reached.
     pub fn add_participant(&mut self, participant: ParticipantId) -> Result<(), String> {
         if let CeremonyPhase::Gathering { joined, target } = &mut self.phase {
             if joined.len() >= *target as usize {
@@ -401,6 +411,11 @@ impl ThresholdCeremony {
     }
 
     /// Add a commitment from a participant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not in the Round 1 phase or the
+    /// participant already submitted a commitment.
     pub fn add_commitment(&mut self, commitment: FrostCommitment) -> Result<(), String> {
         if let CeremonyPhase::Round1Commitments { commitments } = &mut self.phase {
             if commitments.contains_key(&commitment.participant_index) {
@@ -445,6 +460,11 @@ impl ThresholdCeremony {
     }
 
     /// Add shares from a participant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ceremony is not in the Round 2 phase or the
+    /// participant already submitted shares.
     pub fn add_shares(
         &mut self,
         from_index: u32,
@@ -508,7 +528,7 @@ impl ThresholdCeremony {
         let now = Utc::now();
         self.phase = CeremonyPhase::Failed {
             reason: reason.to_string(),
-            at_phase: phase_before_abort.clone(),
+            at_phase: phase_before_abort,
         };
         self.transcript.phases.push(PhaseRecord {
             phase: "Failed".to_string(),
@@ -524,7 +544,7 @@ impl ThresholdCeremony {
     }
 
     /// Check if the ceremony can be resumed after abort.
-    fn can_resume_after_abort(&self) -> bool {
+    const fn can_resume_after_abort(&self) -> bool {
         // Can resume from Gathering or Round1
         // Cannot resume from Round2 (shares may be exposed)
         matches!(
@@ -534,6 +554,7 @@ impl ThresholdCeremony {
     }
 
     /// Create a checkpoint for potential resume.
+    #[must_use]
     pub fn create_checkpoint(&self) -> CeremonyCheckpoint {
         let commitments = if let CeremonyPhase::Round1Commitments { commitments } = &self.phase {
             commitments.clone()
@@ -558,6 +579,10 @@ impl ThresholdCeremony {
     }
 
     /// Resume a ceremony from a checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint is expired or the phase is not resumable.
     pub fn resume(checkpoint: CeremonyCheckpoint) -> Result<Self, CeremonyResumeError> {
         // Validate checkpoint is not expired
         if checkpoint.phase_deadline < Utc::now() {
@@ -597,6 +622,7 @@ impl ThresholdCeremony {
     }
 
     /// Check if the phase has timed out.
+    #[must_use]
     pub fn is_timed_out(&self) -> bool {
         Utc::now() > self.phase_deadline
     }
@@ -607,10 +633,11 @@ mod tests {
     use super::*;
 
     fn test_participant(index: u32) -> ParticipantId {
+        let index_u8 = u8::try_from(index).expect("participant index must fit in u8");
         ParticipantId {
             index,
             name: format!("participant-{index}"),
-            public_key: [index as u8; 32],
+            public_key: [index_u8; 32],
         }
     }
 

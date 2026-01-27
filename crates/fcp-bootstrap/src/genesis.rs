@@ -32,6 +32,7 @@ pub struct GenesisState {
 
     /// The genesis fingerprint (computed, not stored).
     #[serde(skip)]
+    #[allow(dead_code)]
     fingerprint_cache: Option<String>,
 }
 

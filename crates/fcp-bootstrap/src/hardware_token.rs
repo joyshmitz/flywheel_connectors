@@ -117,6 +117,7 @@ pub struct TokenDetector {
 
 impl TokenDetector {
     /// Create a new token detector with default provider paths.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             provider_paths: default_provider_paths(),
@@ -227,6 +228,7 @@ pub mod mock {
 
     impl MockTokenProvider {
         /// Create a new mock provider with no tokens.
+        #[must_use]
         pub fn new() -> Self {
             Self { tokens: Vec::new() }
         }

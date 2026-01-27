@@ -103,6 +103,7 @@ impl TimeValidation {
     }
 
     /// Create a validation result without NTP (for testing or offline use).
+    #[must_use]
     pub fn offline() -> Self {
         Self {
             system_time: Utc::now(),
@@ -114,6 +115,7 @@ impl TimeValidation {
 
     /// Create a validation result with a known drift (for testing).
     #[cfg(test)]
+    #[must_use]
     pub fn with_drift(drift: Duration) -> Self {
         let system_time = Utc::now();
         let ntp_time = system_time - chrono::Duration::from_std(drift).unwrap_or_default();
@@ -185,7 +187,7 @@ fn try_ntp_server(server: &str, _timeout: Duration) -> Option<DateTime<Utc>> {
             let ntp_time = response.datetime();
             // Convert to chrono DateTime via unix timestamp
             let timestamp = ntp_time.unix_timestamp().ok()?;
-            let secs = timestamp.as_secs() as i64;
+            let secs = i64::try_from(timestamp.as_secs()).ok()?;
             DateTime::from_timestamp(secs, 0)
         }
         Err(_) => None,
