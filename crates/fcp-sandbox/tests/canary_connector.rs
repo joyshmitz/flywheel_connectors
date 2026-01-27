@@ -395,12 +395,15 @@ mod linux_apply_integration {
 
     const CHILD_ENV: &str = "FCP_SANDBOX_CHILD";
 
+    const CHILD_TEST_PREFIX: &str = "linux_apply_integration::";
+
     fn run_child(test_name: &str, mode: &str) -> std::process::ExitStatus {
         let exe = std::env::current_exe().expect("current_exe");
+        let full_name = format!("{CHILD_TEST_PREFIX}{test_name}");
         Command::new(exe)
             .env(CHILD_ENV, mode)
             .arg("--exact")
-            .arg(test_name)
+            .arg(full_name)
             .arg("--nocapture")
             .status()
             .expect("spawn child test")
