@@ -10,8 +10,11 @@
 
 mod logging;
 
+use std::io::{self, Write};
+use std::path::Path;
 use std::time::Instant;
 
+use fcp_conformance::run_all_interop_tests;
 use fcp_core::{
     CorrelationId, FcpConnector, FcpError, HandshakeRequest, HealthSnapshot, Introspection,
     InvokeRequest,
@@ -39,6 +42,32 @@ pub struct E2eReport {
     pub duration_ms: u64,
     /// Collected structured logs.
     pub logs: Vec<E2eLogEntry>,
+}
+
+impl E2eReport {
+    /// Serialize logs to JSON lines.
+    #[must_use]
+    pub fn to_json_lines(&self) -> String {
+        self.logs
+            .iter()
+            .filter_map(|entry| serde_json::to_string(entry).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Write logs to a JSONL file.
+    ///
+    /// # Errors
+    /// Returns an IO error if the file cannot be written.
+    pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        for entry in &self.logs {
+            let line = serde_json::to_string(entry)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+            writeln!(file, "{line}")?;
+        }
+        Ok(())
+    }
 }
 
 /// Scenario configuration for a connector suite run.
@@ -86,12 +115,63 @@ impl E2eRunner {
         }
     }
 
+    /// Run the protocol interop suite and emit a report.
+    #[must_use]
+    pub fn run_interop_suite(&mut self, test_name: impl Into<String>) -> E2eReport {
+        let test_name = test_name.into();
+        let start = Instant::now();
+        let correlation_id = CorrelationId::new().to_string();
+
+        let summary = run_all_interop_tests();
+        let passed = summary.all_passed();
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let failures: Vec<serde_json::Value> = summary
+            .failures
+            .iter()
+            .map(|failure| {
+                serde_json::json!({
+                    "name": failure.name,
+                    "category": failure.category,
+                    "message": failure.message,
+                })
+            })
+            .collect();
+
+        let entry = E2eLogEntry::new(
+            if passed { "info" } else { "error" },
+            test_name.clone(),
+            self.module.clone(),
+            "verify",
+            correlation_id,
+            if passed { "pass" } else { "fail" },
+            duration_ms,
+            AssertionsSummary::new(summary.passed as u32, summary.failed as u32),
+            serde_json::json!({
+                "interop": {
+                    "total": summary.total,
+                    "passed": summary.passed,
+                    "failed": summary.failed,
+                    "failures": failures,
+                }
+            }),
+        );
+        self.logger.push(entry);
+
+        E2eReport {
+            test_name,
+            passed,
+            duration_ms,
+            logs: self.logger.drain(),
+        }
+    }
+
     /// Execute a connector suite and return a report.
     ///
     /// # Errors
     /// Returns [`E2eError`] if the connector returns an error in a required phase.
     pub async fn run_connector_suite<C: FcpConnector>(
-        mut self,
+        &mut self,
         connector: &mut C,
         suite: ConnectorSuite,
     ) -> Result<E2eReport, E2eError> {
@@ -195,7 +275,7 @@ impl E2eRunner {
             test_name: suite.test_name,
             passed,
             duration_ms,
-            logs: self.logger.entries().to_vec(),
+            logs: self.logger.drain(),
         })
     }
 }
@@ -393,6 +473,7 @@ mod tests {
         HandshakeResponse, HealthSnapshot, InstanceId, InvokeResponse, OperationId, OperationInfo,
         RiskLevel, SafetyTier, SessionId, ZoneId,
     };
+    use fcp_testkit::MockApiServer;
 
     #[derive(Debug)]
     struct DummyConnector {
@@ -420,7 +501,10 @@ mod tests {
             Ok(())
         }
 
-        async fn handshake(&mut self, _req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
+        async fn handshake(
+            &mut self,
+            _req: HandshakeRequest,
+        ) -> fcp_core::FcpResult<HandshakeResponse> {
             self.base.set_handshaken(true);
             Ok(HandshakeResponse {
                 status: "accepted".to_string(),
@@ -481,7 +565,10 @@ mod tests {
 
         async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {
             if req.operation.as_str() == "dummy.echo" {
-                Ok(InvokeResponse::ok(req.id, serde_json::json!({ "ok": true })))
+                Ok(InvokeResponse::ok(
+                    req.id,
+                    serde_json::json!({ "ok": true }),
+                ))
             } else {
                 Err(FcpError::Unauthorized {
                     code: 2101,
@@ -490,7 +577,10 @@ mod tests {
             }
         }
 
-        async fn subscribe(&self, _req: fcp_core::SubscribeRequest) -> fcp_core::FcpResult<fcp_core::SubscribeResponse> {
+        async fn subscribe(
+            &self,
+            _req: fcp_core::SubscribeRequest,
+        ) -> fcp_core::FcpResult<fcp_core::SubscribeResponse> {
             Err(FcpError::StreamingNotSupported)
         }
 
@@ -517,7 +607,8 @@ mod tests {
     async fn runs_minimal_suite() {
         let mut connector = DummyConnector::new();
         let suite = ConnectorSuite::minimal("dummy_suite", test_handshake());
-        let report = E2eRunner::new("fcp-e2e")
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
             .run_connector_suite(&mut connector, suite)
             .await
             .expect("suite runs");
@@ -554,18 +645,32 @@ mod tests {
             expect_invoke_error: true,
         };
 
-        let report = E2eRunner::new("fcp-e2e")
+        let mut runner = E2eRunner::new("fcp-e2e");
+        let report = runner
             .run_connector_suite(&mut connector, suite)
             .await
             .expect("suite runs");
 
         assert!(report.passed, "deny suite should pass when error expected");
-        let json_lines = report
-            .logs
-            .iter()
-            .filter_map(|entry| serde_json::to_string(entry).ok())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let json_lines = report.to_json_lines();
         assert!(json_lines.contains("deny_invoke"));
+    }
+
+    #[tokio::test]
+    async fn mock_server_smoke() {
+        let mock = MockApiServer::start().await;
+        mock.expect_get("/health", serde_json::json!({ "ok": true }))
+            .await;
+
+        let url = format!("{}/health", mock.base_url());
+        let body: serde_json::Value = reqwest::get(url)
+            .await
+            .expect("request ok")
+            .json()
+            .await
+            .expect("json body");
+
+        assert_eq!(body, serde_json::json!({ "ok": true }));
+        mock.assert_request_count(1).await;
     }
 }

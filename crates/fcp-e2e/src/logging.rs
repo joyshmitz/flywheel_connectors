@@ -1,5 +1,8 @@
 //! Structured logging utilities for E2E connector verification.
 
+use std::io::{self, Write};
+use std::path::Path;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +102,11 @@ impl E2eLogger {
         &self.entries
     }
 
+    /// Drain all collected entries.
+    pub fn drain(&mut self) -> Vec<E2eLogEntry> {
+        std::mem::take(&mut self.entries)
+    }
+
     /// Serialize all entries to JSON lines.
     #[must_use]
     pub fn to_json_lines(&self) -> String {
@@ -108,6 +116,21 @@ impl E2eLogger {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// Write all entries as JSON lines to a file.
+    ///
+    /// # Errors
+    /// Returns an IO error if the file cannot be created or written to.
+    pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        for entry in &self.entries {
+            let line = serde_json::to_string(entry).map_err(|err| {
+                io::Error::new(io::ErrorKind::InvalidData, err.to_string())
+            })?;
+            writeln!(file, "{line}")?;
+        }
+        Ok(())
+    }
 }
 
 fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
@@ -116,7 +139,10 @@ fn redact_secrets(value: &serde_json::Value) -> serde_json::Value {
             let mut redacted = serde_json::Map::new();
             for (key, val) in map {
                 if should_redact_key(key) {
-                    redacted.insert(key.clone(), serde_json::Value::String("redacted".to_string()));
+                    redacted.insert(
+                        key.clone(),
+                        serde_json::Value::String("redacted".to_string()),
+                    );
                 } else {
                     redacted.insert(key.clone(), redact_secrets(val));
                 }
