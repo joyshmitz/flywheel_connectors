@@ -10,6 +10,19 @@
 //!
 //! # JSON output
 //! fcp doctor --zone z:private --json
+//!
+//! # Test specific scenarios (simulation mode)
+//! fcp doctor --zone z:private --scenario degraded
+//! fcp doctor --zone z:private --scenario stale-checkpoint
+//! fcp doctor --zone z:private --scenario network-partition
+//! ```
+//!
+//! # Future: Real Mesh Connectivity
+//!
+//! When a mesh node is available, set `FCP_MESH_ENDPOINT` to connect to real data:
+//! ```text
+//! export FCP_MESH_ENDPOINT=http://localhost:9090
+//! fcp doctor --zone z:private
 //! ```
 
 #![allow(clippy::cast_sign_loss)]
@@ -18,13 +31,33 @@ pub mod types;
 
 use anyhow::Result;
 use chrono::Utc;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use fcp_core::ZoneId;
 
 use types::{
-    AuditStatus, CheckResult, CheckpointStatus, DegradedModeStatus, DoctorReport, FreshnessLevel,
-    OverallStatus, RevocationStatus, StoreCoverageStatus, TransportPolicyStatus,
+    AuditStatus, CheckResult, CheckpointStatus, DegradedModeStatus, DegradedReason, DoctorReport,
+    FreshnessLevel, OverallStatus, RevocationStatus, StoreCoverageStatus, TransportPolicyStatus,
 };
+
+/// Simulation scenarios for testing different health states.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum DoctorScenario {
+    /// All checks pass, system healthy.
+    #[default]
+    Healthy,
+    /// System in degraded mode but operational.
+    Degraded,
+    /// Checkpoint is stale, operations may be limited.
+    StaleCheckpoint,
+    /// Revocation list too stale, high-risk operations blocked.
+    StaleRevocation,
+    /// Network partition detected, limited connectivity.
+    NetworkPartition,
+    /// Store coverage below threshold.
+    LowCoverage,
+    /// Multiple failures.
+    Critical,
+}
 
 /// Arguments for the `fcp doctor` command.
 #[derive(Args, Debug)]
@@ -36,6 +69,10 @@ pub struct DoctorArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Simulation scenario for testing (ignored when connected to real mesh).
+    #[arg(long, value_enum, default_value_t = DoctorScenario::Healthy)]
+    pub scenario: DoctorScenario,
 }
 
 /// Run the doctor command.
@@ -43,9 +80,16 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
     // Validate zone ID format
     let zone_id: ZoneId = args.zone.parse()?;
 
-    // TODO: Connect to mesh node and gather real status.
-    // For now, we simulate a report for demonstration.
-    let report = simulate_report(&zone_id);
+    // Check for real mesh endpoint (future functionality)
+    let mesh_endpoint = std::env::var("FCP_MESH_ENDPOINT").ok();
+    let report = if let Some(_endpoint) = mesh_endpoint {
+        // TODO: Connect to real mesh node when available
+        // For now, fall back to simulation with a note
+        eprintln!("Note: Real mesh connectivity not yet implemented, using simulation");
+        simulate_report(&zone_id, args.scenario)
+    } else {
+        simulate_report(&zone_id, args.scenario)
+    };
 
     if args.json {
         let output = serde_json::to_string_pretty(&report)?;
@@ -54,8 +98,11 @@ pub fn run(args: &DoctorArgs) -> Result<()> {
         print_human_readable(&report);
     }
 
-    if report.overall_status == OverallStatus::Fail {
-        std::process::exit(1);
+    // Exit codes: 0 = ok, 1 = fail, 2 = warn
+    match report.overall_status {
+        OverallStatus::Ok => {}
+        OverallStatus::Warn => std::process::exit(2),
+        OverallStatus::Fail => std::process::exit(1),
     }
 
     Ok(())

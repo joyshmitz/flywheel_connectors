@@ -198,7 +198,7 @@ impl BootstrapWorkflow {
     /// # Errors
     ///
     /// Returns an error if any bootstrap phase fails.
-    pub async fn run(mut self) -> BootstrapResult<GenesisState> {
+    pub fn run(mut self) -> BootstrapResult<GenesisState> {
         // Phase 1: Time validation
         if !self.config.skip_time_validation {
             self.run_time_validation()?;
@@ -532,7 +532,7 @@ mod tests {
             .unwrap();
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
-        let genesis = workflow.run().await.unwrap();
+        let genesis = workflow.run().unwrap();
 
         assert!(genesis.validate().is_ok());
         assert!(dir.path().join("genesis.cbor").exists());

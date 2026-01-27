@@ -1060,9 +1060,10 @@ mod tests {
             invoke_entry.context.get("reason_code"),
             Some(&serde_json::json!("FCP-3001"))
         );
-        assert!(
-            invoke_entry.context.get("decision_receipt_id").is_some(),
-            "decision receipt should be logged"
+        let expected_receipt = ObjectId::from_unscoped_bytes(b"decision").to_string();
+        assert_eq!(
+            invoke_entry.context.get("decision_receipt_id"),
+            Some(&serde_json::json!(expected_receipt))
         );
     }
 
