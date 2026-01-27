@@ -155,6 +155,21 @@ impl ConnectorManifest {
         // Enforce for the `network.*` capability family.
         self.capabilities.validate_no_network_host_restrictions()?;
 
+        // Lint: reject capability IDs embedding hostnames, ports, URLs, or IPs.
+        self.capabilities.validate_no_hostname_port_url_patterns()?;
+
+        // Also lint capability IDs declared in individual operations.
+        for (op_id, op) in &self.provides.operations {
+            lint_capability_id_no_network_addressing(
+                op.capability.as_str(),
+                "provides.operations.*.capability",
+            )
+            .map_err(|e| ManifestError::Invalid {
+                field: "provides.operations.*.capability",
+                message: format!("operation `{op_id}`: {e}"),
+            })?;
+        }
+
         // NORMATIVE: interface_hash must be well-formed and match computed value.
         let expected = self.compute_interface_hash()?;
         if self.manifest.interface_hash != expected {
@@ -1044,6 +1059,118 @@ impl CapabilitiesSection {
         }
         Ok(())
     }
+
+    /// Lint: reject capability IDs that embed hostnames, ports, or URL-like
+    /// patterns. FCP2 requires that all network addressing live in
+    /// `network_constraints`, not in capability identifiers.
+    ///
+    /// Detected patterns:
+    /// - URL schemes: `http:`, `https:`, `ftp:`, `ws:`, `wss:`
+    /// - Port suffixes: `:<digits>` (2–5 digits resembling a TCP/UDP port)
+    /// - Hostname TLD endings: `.com`, `.org`, `.net`, `.edu`, `.gov`, `.mil`
+    /// - IPv4 address fragments: four consecutive all-digit dot-segments
+    fn validate_no_hostname_port_url_patterns(&self) -> Result<(), ManifestError> {
+        for (field, caps) in [
+            ("capabilities.required", &self.required),
+            ("capabilities.optional", &self.optional),
+            ("capabilities.forbidden", &self.forbidden),
+        ] {
+            for cap in caps {
+                lint_capability_id_no_network_addressing(cap.as_str(), field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Well-known TLDs that are unlikely to appear as legitimate capability
+/// namespace segments. Kept deliberately conservative to avoid false positives.
+const KNOWN_TLDS: &[&str] = &["com", "org", "net", "edu", "gov", "mil"];
+
+/// URL schemes that must never appear at the start of a capability ID.
+const URL_SCHEMES: &[&str] = &["http:", "https:", "ftp:", "ws:", "wss:"];
+
+/// Check a single capability ID for network-addressing patterns.
+///
+/// Returns `Ok(())` when the ID looks like a clean capability namespace
+/// (e.g. `telegram.send_message`, `network.egress`). Returns an error when
+/// the ID embeds hostnames, ports, URL schemes, or IP addresses.
+fn lint_capability_id_no_network_addressing(
+    id: &str,
+    field: &'static str,
+) -> Result<(), ManifestError> {
+    // 1. URL scheme prefix
+    for scheme in URL_SCHEMES {
+        if id.starts_with(scheme) {
+            return Err(ManifestError::Invalid {
+                field,
+                message: format!(
+                    "capability id `{id}` contains URL scheme `{scheme}`; \
+                     network addressing belongs in `network_constraints`"
+                ),
+            });
+        }
+    }
+
+    let segments: Vec<&str> = id.split('.').collect();
+
+    // 2. Port-like suffix: colon followed by 2–5 digits within any segment.
+    for segment in &segments {
+        if let Some(colon_idx) = segment.rfind(':') {
+            let after = &segment[colon_idx + 1..];
+            if (2..=5).contains(&after.len()) && after.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(port) = after.parse::<u32>() {
+                    if port > 0 && port <= 65535 {
+                        return Err(ManifestError::Invalid {
+                            field,
+                            message: format!(
+                                "capability id `{id}` contains port number `:{after}`; \
+                                 network addressing belongs in `network_constraints`"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Hostname TLD ending: the last dot-segment (ignoring any trailing
+    //    port) matches a well-known TLD and there are at least 2 segments.
+    if segments.len() >= 2 {
+        let last = segments[segments.len() - 1];
+        // Strip trailing port if present (e.g. "org:443" → "org")
+        let tld_candidate = last.split(':').next().unwrap_or(last);
+        if KNOWN_TLDS.contains(&tld_candidate) {
+            return Err(ManifestError::Invalid {
+                field,
+                message: format!(
+                    "capability id `{id}` appears to contain a hostname \
+                     (ends with `.{tld_candidate}`); \
+                     network addressing belongs in `network_constraints`"
+                ),
+            });
+        }
+    }
+
+    // 4. IPv4 address pattern: four consecutive all-digit segments (1–3 chars each).
+    if segments.len() >= 4 {
+        for window in segments.windows(4) {
+            if window
+                .iter()
+                .all(|s| !s.is_empty() && s.len() <= 3 && s.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return Err(ManifestError::Invalid {
+                    field,
+                    message: format!(
+                        "capability id `{id}` appears to contain an IPv4 address; \
+                         network addressing belongs in `network_constraints`"
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// `[provides]` section.
@@ -2415,5 +2542,357 @@ deny_ptrace = true
         let path = vector_manifest_path("manifest_minimal.toml");
         let raw = std::fs::read(&path).expect("read manifest fixture");
         assert_eq!(EMBEDDED_MINIMAL_MANIFEST, raw.as_slice());
+    }
+
+    // ── Capability-ID lint tests (bd-rk6a / bd-2kt1) ───────────────────
+
+    #[test]
+    fn lint_rejects_url_scheme_http() {
+        let _log = TestLog::new(
+            "lint_rejects_url_scheme_http",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err = lint_capability_id_no_network_addressing(
+            "http:api.example.com",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("URL scheme"));
+        assert!(msg.contains("http:"));
+    }
+
+    #[test]
+    fn lint_rejects_url_scheme_https() {
+        let _log = TestLog::new(
+            "lint_rejects_url_scheme_https",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err = lint_capability_id_no_network_addressing(
+            "https:api.example.com",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("URL scheme"));
+    }
+
+    #[test]
+    fn lint_rejects_url_scheme_wss() {
+        let _log = TestLog::new(
+            "lint_rejects_url_scheme_wss",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err = lint_capability_id_no_network_addressing(
+            "wss:stream.example.com",
+            "capabilities.optional",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("URL scheme"));
+    }
+
+    #[test]
+    fn lint_rejects_port_number_443() {
+        let _log = TestLog::new(
+            "lint_rejects_port_number_443",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err =
+            lint_capability_id_no_network_addressing("api.example:443", "capabilities.required");
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("port number"));
+        assert!(msg.contains(":443"));
+    }
+
+    #[test]
+    fn lint_rejects_port_number_8080() {
+        let _log = TestLog::new(
+            "lint_rejects_port_number_8080",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err = lint_capability_id_no_network_addressing("service:8080", "capabilities.required");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("port number"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_tld_com() {
+        let _log = TestLog::new(
+            "lint_rejects_hostname_tld_com",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err =
+            lint_capability_id_no_network_addressing("api.example.com", "capabilities.required");
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("hostname"));
+        assert!(msg.contains(".com"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_tld_org() {
+        let _log = TestLog::new(
+            "lint_rejects_hostname_tld_org",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err =
+            lint_capability_id_no_network_addressing("api.telegram.org", "capabilities.required");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains(".org"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_tld_net() {
+        let _log = TestLog::new(
+            "lint_rejects_hostname_tld_net",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err = lint_capability_id_no_network_addressing(
+            "service.example.net",
+            "capabilities.optional",
+        );
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains(".net"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_tld_edu() {
+        let _log = TestLog::new(
+            "lint_rejects_hostname_tld_edu",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err =
+            lint_capability_id_no_network_addressing("api.university.edu", "capabilities.required");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains(".edu"));
+    }
+
+    #[test]
+    fn lint_rejects_hostname_port_combo() {
+        let _log = TestLog::new(
+            "lint_rejects_hostname_port_combo",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        // "api.example.org:443" — segments: ["api", "example", "org:443"]
+        // Port check catches ":443" inside the last segment.
+        let err = lint_capability_id_no_network_addressing(
+            "api.example.org:443",
+            "capabilities.required",
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn lint_rejects_ipv4_address() {
+        let _log = TestLog::new(
+            "lint_rejects_ipv4_address",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err =
+            lint_capability_id_no_network_addressing("connect.127.0.0.1", "capabilities.required");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("IPv4"));
+    }
+
+    #[test]
+    fn lint_rejects_ipv4_loopback() {
+        let _log = TestLog::new(
+            "lint_rejects_ipv4_loopback",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        let err = lint_capability_id_no_network_addressing("10.0.0.1", "capabilities.forbidden");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("IPv4"));
+    }
+
+    #[test]
+    fn lint_allows_legitimate_capability_ids() {
+        let _log = TestLog::new(
+            "lint_allows_legitimate_capability_ids",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        // All of these should pass the lint without errors.
+        let legitimate = [
+            "network.dns",
+            "network.egress",
+            "network.tls.sni",
+            "ipc.gateway",
+            "media.download",
+            "system.exec",
+            "telegram.send_message",
+            "discord.send_message",
+            "twitter.post",
+            "github.create_issue",
+            "stripe.charge",
+            "storage.read",
+            "database.query",
+            "audit.read",
+            "policy.check",
+            "connector.health",
+            "my.custom.capability",
+            "a",
+            "x.y",
+        ];
+        for id in &legitimate {
+            let result = lint_capability_id_no_network_addressing(id, "capabilities.required");
+            assert!(
+                result.is_ok(),
+                "expected `{id}` to pass lint, got: {:?}",
+                result.unwrap_err()
+            );
+        }
+    }
+
+    #[test]
+    fn lint_single_digit_port_not_flagged() {
+        let _log = TestLog::new(
+            "lint_single_digit_port_not_flagged",
+            "fcp-manifest",
+            None,
+            None,
+            None,
+        );
+        // Single-digit after colon should NOT be flagged as a port
+        // (avoids false positives on version-like segments like "v:2").
+        let result =
+            lint_capability_id_no_network_addressing("priority:3", "capabilities.required");
+        assert!(
+            result.is_ok(),
+            "single-digit colon suffix should not be flagged as port"
+        );
+    }
+
+    #[test]
+    fn rejects_capability_id_with_hostname_in_manifest() {
+        let _log = TestLog::new(
+            "rejects_capability_id_with_hostname_in_manifest",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        // Replace a legitimate capability with one containing a hostname.
+        let toml = test_manifest_toml(&placeholder).replace("media.download", "api.example.com");
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash =
+            test_manifest_toml(&hash.to_string()).replace("media.download", "api.example.com");
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { .. }));
+        assert!(err.to_string().contains("hostname"));
+    }
+
+    #[test]
+    fn rejects_capability_id_with_url_scheme_in_manifest() {
+        let _log = TestLog::new(
+            "rejects_capability_id_with_url_scheme_in_manifest",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml =
+            test_manifest_toml(&placeholder).replace("media.download", "https:api.telegram.org");
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace("media.download", "https:api.telegram.org");
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { .. }));
+        assert!(err.to_string().contains("URL scheme"));
+    }
+
+    #[test]
+    fn rejects_operation_capability_with_hostname() {
+        let _log = TestLog::new(
+            "rejects_operation_capability_with_hostname",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        // Replace the operation's capability field with a hostname pattern.
+        let toml = test_manifest_toml(&placeholder).replace(
+            "capability = \"telegram.send_message\"",
+            "capability = \"api.telegram.org\"",
+        );
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "capability = \"telegram.send_message\"",
+            "capability = \"api.telegram.org\"",
+        );
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { .. }));
+    }
+
+    #[test]
+    fn rejects_capability_id_with_port_in_manifest() {
+        let _log = TestLog::new(
+            "rejects_capability_id_with_port_in_manifest",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace("media.download", "service:8080");
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash =
+            test_manifest_toml(&hash.to_string()).replace("media.download", "service:8080");
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(err, ManifestError::Invalid { .. }));
+        assert!(err.to_string().contains("port number"));
     }
 }
