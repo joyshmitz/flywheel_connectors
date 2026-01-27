@@ -702,7 +702,7 @@ mod tests {
         let peer = NodeId::new("peer-auth");
 
         let request = test_symbol_request(100, None);
-        let result = handler.validate_request(&request, true, &mut admission, &peer, 0);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
 
         assert!(result.is_ok());
         let validated = result.unwrap();
@@ -726,7 +726,7 @@ mod tests {
 
         // Request within unauthenticated limit should succeed
         let request = test_symbol_request(DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, None);
-        let result = handler.validate_request(&request, false, &mut admission, &peer, 0);
+        let result = handler.validate_request(&request, false, &mut admission, &peer, 0, 64);
         assert!(result.is_ok());
     }
 
@@ -741,7 +741,7 @@ mod tests {
 
         // Request exceeding unauthenticated limit should fail
         let request = test_symbol_request(DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED + 1, None);
-        let result = handler.validate_request(&request, false, &mut admission, &peer, 0);
+        let result = handler.validate_request(&request, false, &mut admission, &peer, 0, 64);
         assert!(matches!(
             result,
             Err(SymbolRequestError::BoundsExceeded { .. })
@@ -755,7 +755,7 @@ mod tests {
         let peer = NodeId::new("peer-pon");
 
         let request = test_symbol_request(50, Some(vec![1, 2, 3, 4, 5]));
-        let result = handler.validate_request(&request, true, &mut admission, &peer, 0);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
 
         assert!(result.is_ok());
         let validated = result.unwrap();
@@ -769,7 +769,7 @@ mod tests {
         let peer = NodeId::new("peer-large-hint");
 
         let request = test_symbol_request(50, Some(vec![0; MAX_MISSING_HINT_ENTRIES + 1]));
-        let result = handler.validate_request(&request, true, &mut admission, &peer, 0);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
 
         assert!(matches!(
             result,
