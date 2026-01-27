@@ -606,15 +606,22 @@ impl DiscordConnector {
             })?;
 
         // Verify token
-        // Note: For now we pass empty resource_uris. In a full implementation,
-        // we would extract target resources (channel_id, etc) from input to validate constraints.
+        // Extract target resources (channel_id, guild_id) from input to validate constraints.
         let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
 
+        let mut resource_uris = Vec::new();
+        if let Some(channel_id) = input.get("channel_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("discord:channel:{channel_id}"));
+        }
+        if let Some(guild_id) = input.get("guild_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("discord:guild:{guild_id}"));
+        }
+
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &[])?;
+            verifier.verify(&token, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }

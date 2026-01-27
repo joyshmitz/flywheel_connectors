@@ -368,8 +368,17 @@ impl OpenAIConnector {
             message: "Invalid operation ID format".into(),
         })?;
 
+        let mut resource_uris = Vec::new();
+        if operation == "openai.chat" || operation == "openai.simple_chat" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o");
+            resource_uris.push(format!("openai:model:{model}"));
+        }
+
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &[])?;
+            verifier.verify(&token, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }

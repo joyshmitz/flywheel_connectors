@@ -362,8 +362,17 @@ impl AnthropicConnector {
             message: "Invalid operation ID format".into(),
         })?;
 
+        let mut resource_uris = Vec::new();
+        if operation == "anthropic.message" || operation == "anthropic.chat" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claude-sonnet-4-20250514");
+            resource_uris.push(format!("anthropic:model:{model}"));
+        }
+
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &[])?;
+            verifier.verify(&token, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
