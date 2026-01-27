@@ -85,7 +85,7 @@ pub struct SymbolContext {
 /// Uses HKDF-SHA256 with:
 /// - Salt: `zone_key_id` (8 bytes)
 /// - IKM: `zone_key` bytes
-/// - Info: "FCP2-SENDER-KEY-V1" || sender_node_id || sender_instance_id_le
+/// - Info: "FCP2-SENDER-KEY-V1" || `sender_node_id` || `sender_instance_id_le`
 ///
 /// # Arguments
 ///

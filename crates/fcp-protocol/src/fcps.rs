@@ -753,18 +753,21 @@ impl SignedFcpsFrame {
     /// - timestamp (u64 LE)
     /// - signature (64 bytes)
     /// - frame bytes
+    ///
+    /// # Panics
+    ///
+    /// Panics if `source_id` exceeds `u16::MAX` bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let frame_bytes = self.frame.encode();
         let source_id_bytes = self.source_id.as_str().as_bytes();
 
-        if source_id_bytes.len() > u16::MAX as usize {
-            panic!(
-                "source_id too long: {} bytes (max {})",
-                source_id_bytes.len(),
-                u16::MAX
-            );
-        }
+        assert!(
+            u16::try_from(source_id_bytes.len()).is_ok(),
+            "source_id too long: {} bytes (max {})",
+            source_id_bytes.len(),
+            u16::MAX
+        );
 
         let mut out = Vec::with_capacity(2 + source_id_bytes.len() + 8 + 64 + frame_bytes.len());
 
@@ -802,8 +805,8 @@ impl SignedFcpsFrame {
         }
 
         let source_id_end = 2 + source_id_len;
-        let source_id_str = std::str::from_utf8(&bytes[2..source_id_end])
-            .map_err(|_| FrameError::InvalidUtf8)?;
+        let source_id_str =
+            std::str::from_utf8(&bytes[2..source_id_end]).map_err(|_| FrameError::InvalidUtf8)?;
         let source_id = TailscaleNodeId::new(source_id_str);
 
         let timestamp_start = source_id_end;
