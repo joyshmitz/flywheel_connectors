@@ -4,17 +4,21 @@
 //! stdin/stdout. It is intentionally lightweight and deterministic.
 
 use std::io;
+use std::sync::Arc;
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 /// Subprocess runner for connector binaries using JSONL IPC.
 pub struct ConnectorProcessRunner {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    _stderr: BufReader<ChildStderr>,
+    stderr_lines: Arc<Mutex<Vec<String>>>,
+    _stderr_task: JoinHandle<()>,
 }
 
 impl ConnectorProcessRunner {
@@ -48,11 +52,33 @@ impl ConnectorProcessRunner {
             .take()
             .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "connector stderr unavailable"))?;
 
+        let stderr_lines = Arc::new(Mutex::new(Vec::new()));
+        let stderr_lines_task = Arc::clone(&stderr_lines);
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim_end();
+                        if !trimmed.is_empty() {
+                            let mut buffer = stderr_lines_task.lock().await;
+                            buffer.push(trimmed.to_string());
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
-            _stderr: BufReader::new(stderr),
+            stderr_lines,
+            _stderr_task: stderr_task,
         })
     }
 
@@ -101,5 +127,11 @@ impl ConnectorProcessRunner {
     /// Returns an IO error if the process cannot be terminated.
     pub async fn terminate(&mut self) -> io::Result<()> {
         self.child.kill().await
+    }
+
+    /// Drain captured stderr lines since the last call.
+    pub async fn drain_stderr_lines(&self) -> Vec<String> {
+        let mut buffer = self.stderr_lines.lock().await;
+        std::mem::take(&mut *buffer)
     }
 }

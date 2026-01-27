@@ -144,6 +144,29 @@ impl ConnectorSuite {
             invoke_expectations: InvokeExpectations::default(),
         }
     }
+
+    /// Create a suite expecting a default-deny response with a stable reason code.
+    #[must_use]
+    pub fn default_deny(
+        test_name: impl Into<String>,
+        handshake: HandshakeRequest,
+        invoke: InvokeRequest,
+        reason_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            test_name: test_name.into(),
+            config: serde_json::json!({}),
+            handshake,
+            invoke: Some(invoke),
+            invoke_expectations: InvokeExpectations {
+                expect_error: true,
+                expect_decision_receipt: true,
+                expect_audit_event: false,
+                expect_receipt: false,
+                expected_reason_code: Some(reason_code.into()),
+            },
+        }
+    }
 }
 
 /// Scenario configuration for a compliance suite run.
@@ -174,7 +197,7 @@ impl ComplianceSuite {
 }
 
 /// Expectations for invoke results.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct InvokeExpectations {
     /// Expect an invoke error (default deny or policy denial).
     pub expect_error: bool,
@@ -286,7 +309,10 @@ impl E2eRunner {
             correlation_id,
             if passed { "pass" } else { "fail" },
             duration_ms,
-            AssertionsSummary::new(static_passed + dynamic_passed, static_failed + dynamic_failed),
+            AssertionsSummary::new(
+                static_passed + dynamic_passed,
+                static_failed + dynamic_failed,
+            ),
             serde_json::json!({
                 "static": {
                     "passed": static_checks.passed,
@@ -661,6 +687,12 @@ fn log_invoke_result(
         }
     }
 
+    if let Some(expected_reason_code) = expectations.expected_reason_code.as_ref() {
+        if reason_code.as_deref() != Some(expected_reason_code.as_str()) {
+            passed = false;
+        }
+    }
+
     if passed {
         *assertions_passed += 1;
     } else {
@@ -682,6 +714,7 @@ fn log_invoke_result(
             "expected_decision_receipt": expectations.expect_decision_receipt,
             "expected_audit_event": expectations.expect_audit_event,
             "expected_receipt": expectations.expect_receipt,
+            "expected_reason_code": expectations.expected_reason_code,
             "invoke_status": invoke_status.map(|status| format!("{status:?}")),
             "decision": decision,
             "reason_code": reason_code,
@@ -924,12 +957,8 @@ mod tests {
         ) -> fcp_core::FcpResult<fcp_core::SimulateResponse> {
             if req.operation.as_str() == "dummy.denied" {
                 Ok(
-                    fcp_core::SimulateResponse::denied(
-                        req.id,
-                        "missing capability",
-                        "FCP-3001",
-                    )
-                    .with_missing_capabilities(vec!["dummy.denied".to_string()]),
+                    fcp_core::SimulateResponse::denied(req.id, "missing capability", "FCP-3001")
+                        .with_missing_capabilities(vec!["dummy.denied".to_string()]),
                 )
             } else {
                 Ok(fcp_core::SimulateResponse::allowed(req.id))

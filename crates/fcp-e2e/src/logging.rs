@@ -124,9 +124,8 @@ impl E2eLogger {
     pub fn write_json_lines<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
         let mut file = std::fs::File::create(path)?;
         for entry in &self.entries {
-            let line = serde_json::to_string(entry).map_err(|err| {
-                io::Error::new(io::ErrorKind::InvalidData, err.to_string())
-            })?;
+            let line = serde_json::to_string(entry)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
             writeln!(file, "{line}")?;
         }
         Ok(())

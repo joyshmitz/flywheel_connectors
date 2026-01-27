@@ -15,8 +15,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "time"] }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
+fcp-manifest = { workspace = true }
