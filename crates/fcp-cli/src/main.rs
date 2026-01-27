@@ -16,6 +16,7 @@ mod connector;
 mod doctor;
 mod explain;
 mod install;
+mod new;
 mod repair;
 
 use std::io::{IsTerminal, Read, Write};
@@ -88,6 +89,12 @@ enum Commands {
     /// Verify manifest signatures, binary checksums, and supply chain policy,
     /// then mirror the connector to the mesh store.
     Install(install::InstallArgs),
+
+    /// Create a new FCP2-compliant connector scaffold.
+    ///
+    /// Generates a complete connector crate with manifest, source files,
+    /// and test scaffolding. Runs compliance prechecks automatically.
+    New(new::NewArgs),
 
     /// Coverage status and repair planning.
     Repair(repair::RepairArgs),
@@ -225,6 +232,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             install::run(args)
+        }
+        Commands::New(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            new::run(&args)
         }
         Commands::Repair(args) => {
             if cli.input_stdin {
