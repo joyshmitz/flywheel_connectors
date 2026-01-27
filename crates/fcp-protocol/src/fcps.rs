@@ -1022,7 +1022,8 @@ mod tests {
         let wrong_key = Ed25519SigningKey::generate();
 
         let header = test_header();
-        let symbols = vec![test_symbol(0, 64)];
+        // Use 2 symbols to match header.symbol_count
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-wrong-key");

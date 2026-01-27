@@ -3,7 +3,7 @@
 //! This crate implements the host/orchestrator that:
 //! - Supervises connector binaries in sandboxes
 //! - Exposes an agent-facing API (local or mesh-facing)
-//! - Delegates enforcement decisions to the MeshNode + policy engine
+//! - Delegates enforcement decisions to the `MeshNode` + policy engine
 //! - Manages lifecycle (install/verify, configure, health, restart)
 //!
 //! Based on FCP Specification Section 10 (Gateway Architecture) and

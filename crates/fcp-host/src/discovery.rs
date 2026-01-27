@@ -60,17 +60,17 @@ impl DiscoveryFilter {
     #[must_use]
     pub fn matches(&self, connector: &ConnectorSummary) -> bool {
         // Category filter
-        if let Some(ref cat) = self.category {
-            if !connector.categories.iter().any(|c| c == cat) {
-                return false;
-            }
+        if let Some(ref cat) = self.category
+            && !connector.categories.iter().any(|c| c == cat)
+        {
+            return false;
         }
 
         // Risk/safety tier filter
-        if let Some(max_risk) = self.max_risk {
-            if !connector.max_safety_tier.is_at_most(max_risk) {
-                return false;
-            }
+        if let Some(max_risk) = self.max_risk
+            && !connector.max_safety_tier.is_at_most(max_risk)
+        {
+            return false;
         }
 
         // Health filter
@@ -279,7 +279,7 @@ impl From<&OperationInfo> for ToolDescriptor {
                 .iter()
                 .map(|e| ToolExample {
                     description: None,
-                    input: serde_json::from_str(e).unwrap_or(serde_json::json!({})),
+                    input: serde_json::from_str(e).unwrap_or_else(|_| serde_json::json!({})),
                     output: None,
                 })
                 .collect(),
@@ -369,11 +369,11 @@ pub struct PreflightResponse {
 impl PreflightResponse {
     /// Create an allowed response.
     #[must_use]
-    pub fn allowed() -> Self {
+    pub const fn allowed() -> Self {
         Self {
             allowed: true,
             reason: None,
-            missing_capabilities: vec![],
+            missing_capabilities: Vec::new(),
             rate_limit: None,
             estimated_cost: None,
         }
@@ -461,7 +461,7 @@ pub enum HostHealthStatus {
 // SafetyTier Extensions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Extension trait for SafetyTier comparisons.
+/// Extension trait for `SafetyTier` comparisons.
 pub trait SafetyTierExt {
     /// Check if this tier is at most the given level.
     fn is_at_most(&self, other: SafetyTier) -> bool;
@@ -477,11 +477,11 @@ impl SafetyTierExt for SafetyTier {
 
     fn level(&self) -> u8 {
         match self {
-            SafetyTier::Safe => 0,
-            SafetyTier::Risky => 1,
-            SafetyTier::Dangerous => 2,
-            SafetyTier::Critical => 3,
-            SafetyTier::Forbidden => 4,
+            Self::Safe => 0,
+            Self::Risky => 1,
+            Self::Dangerous => 2,
+            Self::Critical => 3,
+            Self::Forbidden => 4,
         }
     }
 }
@@ -570,6 +570,11 @@ where
     }
 
     /// Introspect a single connector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ConnectorNotFound`] if the connector or its
+    /// introspection data is missing from the registry.
     pub async fn introspect(
         &self,
         connector_id: &ConnectorId,
@@ -656,10 +661,10 @@ impl DiscoveryCache {
         // Try to read from cache
         {
             let read = self.cache.read().await;
-            if let Some(ref cached) = *read {
-                if cached.cached_at.elapsed() < self.ttl {
-                    return cached.connectors.clone();
-                }
+            if let Some(ref cached) = *read
+                && cached.cached_at.elapsed() < self.ttl
+            {
+                return cached.connectors.clone();
             }
         }
 
@@ -689,6 +694,8 @@ impl DiscoveryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Test SafetyTier extension
     #[test]
@@ -995,5 +1002,166 @@ mod tests {
             let parsed: LatencyHint = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, hint);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Discovery cache + endpoint behavior
+    // ─────────────────────────────────────────────────────────────────────────
+
+    struct CountingRegistry {
+        connectors: Vec<ConnectorSummary>,
+        list_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingRegistry {
+        fn new(connectors: Vec<ConnectorSummary>, list_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                connectors,
+                list_calls,
+            }
+        }
+
+        fn find(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.connectors.iter().find(|c| &c.id == id).cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ConnectorRegistry for CountingRegistry {
+        async fn list(&self) -> Vec<ConnectorSummary> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            self.connectors.clone()
+        }
+
+        async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
+            self.find(id)
+        }
+
+        async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
+            self.find(id).map(|_| Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            })
+        }
+
+        async fn get_archetype(&self, _id: &ConnectorId) -> Option<ConnectorArchetype> {
+            None
+        }
+
+        async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
+            None
+        }
+
+        fn version(&self) -> u64 {
+            1
+        }
+    }
+
+    struct AllowPolicy;
+
+    #[async_trait::async_trait]
+    impl PolicyEngine for AllowPolicy {
+        async fn evaluate_preflight(&self, _request: &PreflightRequest) -> PreflightResponse {
+            PreflightResponse::allowed()
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_reuses_within_ttl() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "cache",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let cache = DiscoveryCache::new(Duration::from_secs(60));
+
+        let _ = cache.get_or_refresh(&registry).await;
+        let _ = cache.get_or_refresh(&registry).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_refreshes_when_expired() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "expired",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let cache = DiscoveryCache::new(Duration::from_millis(0));
+
+        let _ = cache.get_or_refresh(&registry).await;
+        let _ = cache.get_or_refresh(&registry).await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_invalidate_cache_forces_refresh() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "invalidate",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::with_cache_ttl(
+            Arc::new(registry),
+            Arc::new(AllowPolicy),
+            Duration::from_secs(60),
+        );
+
+        let _ = endpoint.discover(None).await;
+        let _ = endpoint.discover(None).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        endpoint.invalidate_cache().await;
+        let _ = endpoint.discover(None).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_introspect_missing_connector() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+        let id = ConnectorId::new("missing", "test", "v1").unwrap();
+
+        let err = endpoint.introspect(&id).await.unwrap_err();
+        assert!(matches!(err, HostError::ConnectorNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_defaults_archetype() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "default-arch",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let response = endpoint.introspect(&summary.id).await.unwrap();
+        assert_eq!(response.archetype, ConnectorArchetype::RequestResponse);
     }
 }
