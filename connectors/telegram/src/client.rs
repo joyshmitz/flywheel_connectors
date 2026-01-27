@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tracing::{debug, instrument, warn};
 
 use crate::types::*;
@@ -98,7 +98,11 @@ impl TelegramClient {
 
                         if attempts < max_retries {
                             let wait = Duration::from_secs(retry_after);
-                            warn!(attempt = attempts, wait_secs = retry_after, "Rate limited, retrying");
+                            warn!(
+                                attempt = attempts,
+                                wait_secs = retry_after,
+                                "Rate limited, retrying"
+                            );
                             tokio::time::sleep(wait).await;
                             continue;
                         }
@@ -165,9 +169,8 @@ impl TelegramClient {
         &self,
         request: GetUpdatesRequest,
     ) -> Result<Vec<Update>, TelegramError> {
-        let timeout = Duration::from_secs(
-            u64::try_from(request.timeout.unwrap_or(30)).unwrap_or(30) + 10,
-        );
+        let timeout =
+            Duration::from_secs(u64::try_from(request.timeout.unwrap_or(30)).unwrap_or(30) + 10);
         // Default to empty vec if result is missing but ok is true (though request handles that)
         self.request("POST", "getUpdates", Some(&request), Some(timeout))
             .await
@@ -190,7 +193,10 @@ impl TelegramClient {
             message_thread_id: options.message_thread_id,
         };
 
-        match self.request("POST", "sendMessage", Some(&request), None).await {
+        match self
+            .request("POST", "sendMessage", Some(&request), None)
+            .await
+        {
             Ok(msg) => Ok(msg),
             Err(TelegramError::Api { code, description }) => {
                 // Check for parse errors and retry without parse mode
@@ -200,7 +206,9 @@ impl TelegramClient {
                         parse_mode: None,
                         ..request
                     };
-                    return self.request("POST", "sendMessage", Some(&retry_request), None).await;
+                    return self
+                        .request("POST", "sendMessage", Some(&retry_request), None)
+                        .await;
                 }
                 Err(TelegramError::Api { code, description })
             }
@@ -218,7 +226,6 @@ impl TelegramClient {
         // Or cleaner: make request() support query params?
         // Simpler: Just manual impl for get_file or change request() to take an enum for body/query.
         // Let's manually invoke client for get_file to keep request() simple for JSON-RPC style calls.
-        
         let url = self.api_url("getFile");
         let response: TelegramResponse<File> = self
             .client
@@ -267,7 +274,8 @@ impl TelegramClient {
             text,
         };
 
-        self.request("POST", "answerCallbackQuery", Some(&request), None).await
+        self.request("POST", "answerCallbackQuery", Some(&request), None)
+            .await
     }
 }
 
