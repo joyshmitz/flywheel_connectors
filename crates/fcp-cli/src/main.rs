@@ -17,6 +17,7 @@ mod doctor;
 mod explain;
 mod install;
 mod new;
+mod package;
 mod repair;
 
 use std::io::{IsTerminal, Read, Write};
@@ -95,6 +96,12 @@ enum Commands {
     /// Generates a complete connector crate with manifest, source files,
     /// and test scaffolding. Runs compliance prechecks automatically.
     New(new::NewArgs),
+
+    /// Package a connector for distribution.
+    ///
+    /// Build the connector with deterministic flags, embed manifest,
+    /// generate SBOM, and output a complete package directory.
+    Package(package::PackageArgs),
 
     /// Coverage status and repair planning.
     Repair(repair::RepairArgs),
@@ -238,6 +245,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             new::run(&args)
+        }
+        Commands::Package(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            package::run(&args)
         }
         Commands::Repair(args) => {
             if cli.input_stdin {
