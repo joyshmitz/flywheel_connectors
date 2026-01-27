@@ -18,6 +18,7 @@ hex.workspace = true
 semver.workspace = true
 chrono.workspace = true
 jsonschema.workspace = true
+clap = { workspace = true, features = ["derive"] }
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }
@@ -28,6 +29,10 @@ fcp-manifest = { path = "../fcp-manifest" }
 fcp-mesh = { path = "../fcp-mesh" }
 fcp-store = { path = "../fcp-store" }
 fcp-tailscale = { path = "../fcp-tailscale" }
+
+[[bin]]
+name = "fcp-vecgen"
+path = "src/bin/vecgen.rs"
 
 [dev-dependencies]
 pretty_assertions.workspace = true

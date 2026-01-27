@@ -24,6 +24,7 @@ pub mod compliance;
 pub mod harness;
 pub mod interop;
 pub mod schemas;
+pub mod vecgen;
 pub mod vectors;
 
 // Re-export vector types for convenience
