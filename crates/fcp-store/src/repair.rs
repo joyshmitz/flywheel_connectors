@@ -118,8 +118,7 @@ impl RateLimiter {
         let nanos_per_token = 60_000_000_000 / u64::from(self.max_tokens);
 
         // Add tokens based on elapsed time
-        if nanos_per_token > 0 {
-            let new_tokens = (elapsed.as_nanos() as u64) / nanos_per_token;
+        if let Some(new_tokens) = (elapsed.as_nanos() as u64).checked_div(nanos_per_token) {
             if new_tokens > 0 {
                 // Determine new token count, capped at max
                 let current = *tokens;
@@ -192,7 +191,7 @@ impl RepairController {
         queue.push(request);
 
         // Sort by priority (highest first)
-        queue.sort_by(|a, b| b.priority.cmp(&a.priority));
+        queue.sort_by_key(|r| std::cmp::Reverse(r.priority));
 
         self.stats.write().queue_depth = queue.len();
     }

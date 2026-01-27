@@ -78,6 +78,7 @@ impl SymbolEnvelope {
     /// # Errors
     ///
     /// Returns [`SymbolEnvelopeError::EncryptFailed`] if AEAD encryption fails.
+    #[allow(clippy::too_many_arguments)] // All parameters required for envelope construction
     pub fn encrypt(
         object_id: ObjectId,
         esi: u32,
@@ -171,8 +172,9 @@ pub fn derive_nonce24(sender_instance_id: u64, frame_seq: u64, esi: u32) -> [u8;
 /// Uses HKDF-SHA256 with:
 /// - Salt: `zone_key_id` (8 bytes)
 /// - IKM: `zone_key` bytes
-/// - Info: "FCP2-SENDER-KEY-V1" || sender_node_id || sender_instance_id_le
+/// - Info: "FCP2-SENDER-KEY-V1" || `sender_node_id` || `sender_instance_id_le`
 #[must_use]
+#[allow(clippy::trivially_copy_pass_by_ref)] // API consistency with other crates
 pub fn derive_sender_subkey(
     zone_key: &ZoneKey,
     zone_key_id: &ZoneKeyId,
