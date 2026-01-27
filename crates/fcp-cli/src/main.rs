@@ -6,6 +6,7 @@
 //! - `fcp connector` - Connector discovery and introspection
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
+//! - `fcp policy` - Policy simulation and preflight checks
 //! - `fcp repair` - Coverage status and repair planning
 
 #![forbid(unsafe_code)]
@@ -18,6 +19,7 @@ mod explain;
 mod install;
 mod new;
 mod package;
+mod policy;
 mod repair;
 
 use std::io::{IsTerminal, Read, Write};
@@ -102,6 +104,11 @@ enum Commands {
     /// Build the connector with deterministic flags, embed manifest,
     /// generate SBOM, and output a complete package directory.
     Package(package::PackageArgs),
+
+    /// Policy simulation and preflight checks.
+    ///
+    /// Simulate policy outcomes for an InvokeRequest without side effects.
+    Policy(policy::PolicyArgs),
 
     /// Coverage status and repair planning.
     Repair(repair::RepairArgs),
@@ -251,6 +258,12 @@ fn main() -> Result<()> {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             package::run(&args)
+        }
+        Commands::Policy(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            policy::run(&args)
         }
         Commands::Repair(args) => {
             if cli.input_stdin {
