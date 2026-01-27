@@ -27,6 +27,12 @@ pub mod types;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::{Args, Subcommand};
+use fcp_core::{AuditEvent, AuditHead, ObjectId, ZoneId};
+use hex::encode as hex_encode;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 
 use types::{AuditEventOutput, AuditFilter, AuditTailError};
 
@@ -45,6 +51,10 @@ pub enum AuditCommands {
     /// Streams audit events in order (by seq) with optional filtering.
     /// Useful for incident response and debugging.
     Tail(TailArgs),
+    /// Verify integrity of an audit chain and head.
+    Verify(VerifyArgs),
+    /// Render a timeline of audit events.
+    Timeline(TimelineArgs),
 }
 
 /// Arguments for the `fcp audit tail` command.
@@ -95,6 +105,42 @@ pub struct TailArgs {
     pub json: bool,
 }
 
+/// Arguments for the `fcp audit verify` command.
+#[derive(Args, Debug)]
+pub struct VerifyArgs {
+    /// Zone to verify (optional; ensures all events match this zone).
+    #[arg(long, short = 'z')]
+    pub zone: Option<String>,
+
+    /// Audit event records input (JSONL or JSON array). Use "-" for stdin.
+    #[arg(long)]
+    pub events: PathBuf,
+
+    /// Audit head input (JSON). Use "-" for stdin.
+    #[arg(long)]
+    pub head: Option<PathBuf>,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+/// Arguments for the `fcp audit timeline` command.
+#[derive(Args, Debug)]
+pub struct TimelineArgs {
+    /// Zone to render (optional; filters events by zone).
+    #[arg(long, short = 'z')]
+    pub zone: Option<String>,
+
+    /// Audit event records input (JSONL or JSON array). Use "-" for stdin.
+    #[arg(long)]
+    pub events: PathBuf,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 /// Run the audit command.
 ///
 /// # Errors
@@ -103,6 +149,8 @@ pub struct TailArgs {
 pub fn run(args: AuditArgs) -> Result<()> {
     match args.command {
         AuditCommands::Tail(tail_args) => run_tail(&tail_args),
+        AuditCommands::Verify(verify_args) => run_verify(&verify_args),
+        AuditCommands::Timeline(timeline_args) => run_timeline(&timeline_args),
     }
 }
 
@@ -154,6 +202,362 @@ fn run_tail(args: &TailArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Audit Verify + Timeline
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditEventRecord {
+    object_id: ObjectId,
+    event: AuditEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AuditVerifyStatus {
+    Ok,
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditVerifyIssue {
+    code: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditVerifyReport {
+    status: AuditVerifyStatus,
+    zone_id: Option<String>,
+    chain_len: usize,
+    head_seq: Option<u64>,
+    head_event: Option<String>,
+    issues: Vec<AuditVerifyIssue>,
+}
+
+fn run_verify(args: &VerifyArgs) -> Result<()> {
+    let zone_filter = match args.zone.as_deref() {
+        Some(zone) => Some(zone.parse::<ZoneId>().context("invalid zone id")?),
+        None => None,
+    };
+
+    let events_input = read_input(&args.events)?;
+    let mut records = parse_event_records(&events_input)?;
+    if records.is_empty() {
+        let report = AuditVerifyReport {
+            status: AuditVerifyStatus::Warn,
+            zone_id: args.zone.clone(),
+            chain_len: 0,
+            head_seq: None,
+            head_event: None,
+            issues: vec![AuditVerifyIssue {
+                code: "audit.chain.empty".to_string(),
+                message: "no audit events provided".to_string(),
+                seq: None,
+                object_id: None,
+            }],
+        };
+        return output_verify_report(&report, args.json);
+    }
+
+    // Sort by seq for deterministic verification.
+    records.sort_by(|a, b| {
+        a.event
+            .seq
+            .cmp(&b.event.seq)
+            .then_with(|| a.object_id.to_string().cmp(&b.object_id.to_string()))
+    });
+
+    let head = if let Some(ref path) = args.head {
+        let head_input = read_input(path)?;
+        Some(parse_audit_head(&head_input)?)
+    } else {
+        None
+    };
+
+    let report = verify_chain(&records, head.as_ref(), zone_filter.as_ref());
+    output_verify_report(&report, args.json)
+}
+
+fn run_timeline(args: &TimelineArgs) -> Result<()> {
+    let zone_filter = match args.zone.as_deref() {
+        Some(zone) => Some(zone.parse::<ZoneId>().context("invalid zone id")?),
+        None => None,
+    };
+
+    let events_input = read_input(&args.events)?;
+    let mut records = parse_event_records(&events_input)?;
+    if let Some(ref zone) = zone_filter {
+        records.retain(|rec| rec.event.zone_id() == zone);
+    }
+
+    records.sort_by_key(|a| a.event.seq);
+
+    let outputs: Vec<AuditEventOutput> = records.iter().map(to_event_output).collect();
+    if args.json {
+        output_json(&outputs)?;
+    } else {
+        let zone_label = zone_filter
+            .as_ref()
+            .map_or_else(|| "all-zones".to_string(), ToString::to_string);
+        output_human(&outputs, &zone_label, &AuditFilter::default());
+    }
+
+    Ok(())
+}
+
+fn read_input(path: &Path) -> Result<String> {
+    if path.as_os_str() == "-" {
+        let mut buf = String::new();
+        io::stdin()
+            .read_to_string(&mut buf)
+            .context("failed to read stdin")?;
+        return Ok(buf);
+    }
+
+    fs::read_to_string(path).with_context(|| format!("failed to read input {}", path.display()))
+}
+
+fn parse_event_records(input: &str) -> Result<Vec<AuditEventRecord>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if trimmed.starts_with('[') {
+        return serde_json::from_str(trimmed).context("failed to parse audit event array");
+    }
+
+    let mut records = Vec::new();
+    for (idx, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let record: AuditEventRecord = serde_json::from_str(line)
+            .with_context(|| format!("failed to parse audit event record on line {}", idx + 1))?;
+        records.push(record);
+    }
+
+    Ok(records)
+}
+
+fn parse_audit_head(input: &str) -> Result<AuditHead> {
+    let trimmed = input.trim();
+    if trimmed.starts_with('[') {
+        anyhow::bail!("audit head input must be a single JSON object, not an array");
+    }
+    serde_json::from_str(trimmed).context("failed to parse audit head")
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_chain(
+    records: &[AuditEventRecord],
+    head: Option<&AuditHead>,
+    zone: Option<&ZoneId>,
+) -> AuditVerifyReport {
+    let mut issues = Vec::new();
+    let mut seen_seq = std::collections::HashMap::new();
+
+    for record in records {
+        if let Some(zone) = zone {
+            if record.event.zone_id() != zone {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.zone_mismatch".to_string(),
+                    message: format!(
+                        "event zone {} does not match requested zone {}",
+                        record.event.zone_id(),
+                        zone
+                    ),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+        }
+
+        if let Some(prev) = seen_seq.insert(record.event.seq, record.object_id) {
+            if prev != record.object_id {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.fork_detected".to_string(),
+                    message: "multiple events share the same seq with different ids".to_string(),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+        }
+    }
+
+    let mut iter = records.iter();
+    if let Some(first) = iter.next() {
+        if first.event.seq != 0 || first.event.prev.is_some() {
+            issues.push(AuditVerifyIssue {
+                code: "audit.genesis_invalid".to_string(),
+                message: "genesis event must have seq 0 and no prev".to_string(),
+                seq: Some(first.event.seq),
+                object_id: Some(first.object_id.to_string()),
+            });
+        }
+
+        let mut prev = first;
+        for record in iter {
+            let expected_seq = prev.event.seq.saturating_add(1);
+            if record.event.seq != expected_seq {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.seq_gap".to_string(),
+                    message: format!("expected seq {}, found {}", expected_seq, record.event.seq),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+
+            if record.event.prev.as_ref() != Some(&prev.object_id) {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.prev_mismatch".to_string(),
+                    message: "prev pointer does not match previous event id".to_string(),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+
+            prev = record;
+        }
+    }
+
+    if let Some(head) = head {
+        if let Some(last) = records.last() {
+            if head.head_event != last.object_id {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.head_mismatch".to_string(),
+                    message: "audit head does not reference chain tip".to_string(),
+                    seq: Some(last.event.seq),
+                    object_id: Some(last.object_id.to_string()),
+                });
+            }
+            if head.head_seq != last.event.seq {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.head_seq_mismatch".to_string(),
+                    message: "audit head seq does not match chain tip".to_string(),
+                    seq: Some(last.event.seq),
+                    object_id: Some(last.object_id.to_string()),
+                });
+            }
+        }
+
+        if let Some(zone) = zone {
+            if head.zone_id() != zone {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.head_zone_mismatch".to_string(),
+                    message: format!("audit head zone {} does not match {}", head.zone_id(), zone),
+                    seq: Some(head.head_seq),
+                    object_id: Some(head.head_event.to_string()),
+                });
+            }
+        }
+    }
+
+    let is_fail = issues.iter().any(|issue| {
+        matches!(
+            issue.code.as_str(),
+            "audit.fork_detected"
+                | "audit.prev_mismatch"
+                | "audit.seq_gap"
+                | "audit.genesis_invalid"
+                | "audit.head_mismatch"
+                | "audit.head_seq_mismatch"
+        )
+    });
+
+    let status = if issues.is_empty() {
+        AuditVerifyStatus::Ok
+    } else if is_fail {
+        AuditVerifyStatus::Fail
+    } else {
+        AuditVerifyStatus::Warn
+    };
+
+    AuditVerifyReport {
+        status,
+        zone_id: zone.map(ToString::to_string),
+        chain_len: records.len(),
+        head_seq: head.map(|h| h.head_seq),
+        head_event: head.map(|h| h.head_event.to_string()),
+        issues,
+    }
+}
+
+fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
+    if json {
+        let payload =
+            serde_json::to_string_pretty(report).context("failed to serialize verify report")?;
+        println!("{payload}");
+        return Ok(());
+    }
+
+    println!();
+    println!("Audit Verify Status: {:?}", report.status);
+    if let Some(ref zone) = report.zone_id {
+        println!("Zone: {zone}");
+    }
+    println!("Chain length: {}", report.chain_len);
+    if let Some(seq) = report.head_seq {
+        println!("Head seq: {seq}");
+    }
+    if let Some(ref head) = report.head_event {
+        println!("Head event: {head}");
+    }
+
+    if report.issues.is_empty() {
+        println!("Issues: none");
+        return Ok(());
+    }
+
+    println!();
+    println!("Issues:");
+    for issue in &report.issues {
+        println!("  - {}: {}", issue.code, issue.message);
+        if let Some(seq) = issue.seq {
+            println!("    seq: {seq}");
+        }
+        if let Some(ref id) = issue.object_id {
+            println!("    id: {id}");
+        }
+    }
+
+    Ok(())
+}
+
+fn to_event_output(record: &AuditEventRecord) -> AuditEventOutput {
+    let event = &record.event;
+    let trace_id = event
+        .trace_context
+        .as_ref()
+        .map(|trace| hex_encode(trace.trace_id));
+    let span_id = event
+        .trace_context
+        .as_ref()
+        .map(|trace| hex_encode(trace.span_id));
+
+    AuditEventOutput {
+        seq: event.seq,
+        occurred_at: event.occurred_at,
+        occurred_at_iso: format_timestamp(event.occurred_at),
+        event_type: event.event_type.clone(),
+        actor: event.actor.to_string(),
+        zone_id: event.zone_id.to_string(),
+        correlation_id: hex_encode(event.correlation_id.0.as_bytes()),
+        trace_id,
+        span_id,
+        connector_id: event.connector_id.as_ref().map(ToString::to_string),
+        operation_id: event.operation.as_ref().map(ToString::to_string),
+        prev: event.prev.as_ref().map(ToString::to_string),
+    }
 }
 
 /// Load audit events (stub implementation).
