@@ -69,6 +69,10 @@ fn compile_schema(schema_str: &str) -> Result<Validator, SchemaValidationError> 
 }
 
 /// Validate a single E2E log entry (JSON object) against the v1 schema.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if validation fails.
 pub fn validate_e2e_log_entry(value: &Value) -> Result<(), SchemaValidationError> {
     let validator = compile_schema(E2E_LOG_V1_SCHEMA)?;
     validator
@@ -77,6 +81,10 @@ pub fn validate_e2e_log_entry(value: &Value) -> Result<(), SchemaValidationError
 }
 
 /// Validate a JSONL payload of E2E log entries.
+///
+/// # Errors
+///
+/// Returns `SchemaValidationError` if any line is invalid JSON or fails schema validation.
 pub fn validate_e2e_log_jsonl(input: &str) -> Result<(), SchemaValidationError> {
     let validator = compile_schema(E2E_LOG_V1_SCHEMA)?;
     for (idx, line) in input.lines().enumerate() {

@@ -36,5 +36,6 @@ tracing = "0.1"
 semver = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
+fcp-conformance = { path = "../fcp-conformance" }
 fcp-e2e = { path = "../fcp-e2e" }
 tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "test-util"] }

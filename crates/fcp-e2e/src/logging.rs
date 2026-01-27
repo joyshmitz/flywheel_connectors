@@ -45,7 +45,7 @@ pub struct E2eLogEntry {
     pub duration_ms: u64,
     /// Assertion counts.
     pub assertions: AssertionsSummary,
-    /// Context-specific fields (zone_id, connector_id, etc.).
+    /// Context-specific fields (`zone_id`, `connector_id`, etc.).
     #[serde(default)]
     pub context: serde_json::Value,
 }
@@ -165,6 +165,10 @@ pub enum LogSchemaError {
 ///
 /// This accepts both harness logs (`test_name`, `phase`) and script logs
 /// (`script`, `step`) as long as the required base fields are present.
+///
+/// # Errors
+///
+/// Returns `LogSchemaError` if schema validation fails.
 pub fn validate_log_entry_value(value: &serde_json::Value) -> Result<(), LogSchemaError> {
     validate_e2e_log_entry(value).map_err(|err| LogSchemaError::InvalidField {
         field: "schema",

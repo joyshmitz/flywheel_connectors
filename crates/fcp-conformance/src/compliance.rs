@@ -441,9 +441,11 @@ mod tests {
 
     #[test]
     fn static_manifest_invalid_version_fails() {
+        // Don't use with_computed_interface_hash here - the manifest has an invalid
+        // semver version which will fail at TOML deserialization, before we could
+        // compute any interface hash. run_manifest handles parse errors gracefully.
         let raw = include_str!("../../../tests/vectors/manifest/manifest_invalid_version.toml");
-        let materialized = with_computed_interface_hash(raw);
-        let report = StaticCompliance::run_manifest(&materialized);
+        let report = StaticCompliance::run_manifest(raw);
         assert!(!report.passed);
         assert!(
             report

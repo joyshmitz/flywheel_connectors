@@ -200,6 +200,7 @@ impl ComplianceSuite {
 
 /// Expectations for invoke results.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct InvokeExpectations {
     /// Expect an invoke error (default deny or policy denial).
     pub expect_error: bool,
@@ -602,6 +603,7 @@ fn log_result(
     passed
 }
 
+#[allow(clippy::too_many_lines)]
 fn log_invoke_result(
     logger: &mut E2eLogger,
     test_name: &str,

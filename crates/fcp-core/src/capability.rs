@@ -877,23 +877,157 @@ impl CapabilityConstraints {
     }
 }
 
+/// Rate limit scope - determines how rate limits are tracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationRateLimitScope {
+    /// Rate limit per connector instance (default).
+    PerConnector,
+    /// Rate limit per zone.
+    PerZone,
+    /// Rate limit per principal (user/agent).
+    PerPrincipal,
+}
+
+impl Default for OperationRateLimitScope {
+    fn default() -> Self {
+        Self::PerConnector
+    }
+}
+
+impl std::fmt::Display for OperationRateLimitScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PerConnector => write!(f, "per_connector"),
+            Self::PerZone => write!(f, "per_zone"),
+            Self::PerPrincipal => write!(f, "per_principal"),
+        }
+    }
+}
+
+impl std::str::FromStr for OperationRateLimitScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "per_connector" => Ok(Self::PerConnector),
+            "per_zone" => Ok(Self::PerZone),
+            "per_principal" => Ok(Self::PerPrincipal),
+            _ => Err(format!(
+                "invalid rate limit scope `{s}`: expected one of per_connector, per_zone, per_principal"
+            )),
+        }
+    }
+}
+
 /// Rate limit configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimit {
-    /// Maximum requests in the period
+    /// Maximum requests in the period (bucket size). Must be > 0.
     pub max: u32,
 
-    /// Period in milliseconds
+    /// Period in milliseconds (refill interval). Must be > 0.
     pub per_ms: u64,
 
-    /// Burst allowance
+    /// Burst allowance (tokens above max that can accumulate).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub burst: Option<u32>,
 
-    /// Scope: `per_connector`, `per_zone`, or `per_principal`
+    /// Scope: determines how rate limits are tracked.
+    /// Defaults to `per_connector` if not specified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+
+    /// Pool name for shared rate limiting across operations.
+    /// Operations with the same pool_name share a single rate limit bucket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pool_name: Option<String>,
 }
+
+impl RateLimit {
+    /// Validate the rate limit configuration.
+    ///
+    /// # Errors
+    /// Returns an error if any constraint is violated.
+    pub fn validate(&self) -> Result<(), RateLimitValidationError> {
+        if self.max == 0 {
+            return Err(RateLimitValidationError::ZeroMax);
+        }
+        if self.per_ms == 0 {
+            return Err(RateLimitValidationError::ZeroPeriod);
+        }
+        if let Some(ref scope) = self.scope {
+            scope.parse::<OperationRateLimitScope>().map_err(|_| {
+                RateLimitValidationError::InvalidScope {
+                    scope: scope.clone(),
+                }
+            })?;
+        }
+        // Validate pool_name format if present (must be valid identifier)
+        if let Some(ref pool) = self.pool_name {
+            if pool.is_empty() {
+                return Err(RateLimitValidationError::EmptyPoolName);
+            }
+            if !pool
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+            {
+                return Err(RateLimitValidationError::InvalidPoolName {
+                    pool_name: pool.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the parsed scope, defaulting to `PerConnector`.
+    #[must_use]
+    pub fn parsed_scope(&self) -> OperationRateLimitScope {
+        self.scope
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default()
+    }
+}
+
+/// Error returned when rate limit validation fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RateLimitValidationError {
+    /// max (bucket size) must be > 0.
+    ZeroMax,
+    /// per_ms (period) must be > 0.
+    ZeroPeriod,
+    /// Invalid scope value.
+    InvalidScope { scope: String },
+    /// Pool name cannot be empty.
+    EmptyPoolName,
+    /// Pool name contains invalid characters.
+    InvalidPoolName { pool_name: String },
+}
+
+impl std::fmt::Display for RateLimitValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroMax => write!(f, "rate_limit.max must be > 0"),
+            Self::ZeroPeriod => write!(f, "rate_limit.per_ms must be > 0"),
+            Self::InvalidScope { scope } => {
+                write!(
+                    f,
+                    "invalid rate_limit.scope `{scope}`: expected per_connector, per_zone, or per_principal"
+                )
+            }
+            Self::EmptyPoolName => write!(f, "rate_limit.pool_name cannot be empty"),
+            Self::InvalidPoolName { pool_name } => {
+                write!(
+                    f,
+                    "invalid rate_limit.pool_name `{pool_name}`: must contain only alphanumeric, underscore, hyphen, or dot"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RateLimitValidationError {}
 
 /// Verifies capability tokens against the host's public key.
 #[derive(Debug, Clone)]

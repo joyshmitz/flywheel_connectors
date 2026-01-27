@@ -9,7 +9,8 @@ use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
-    Principal, RiskLevel, SafetyTier, SessionId, TrustLevel, ZoneId,
+    Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse, TrustLevel,
+    ZoneId,
 };
 use serde_json::json;
 use tokio::sync::broadcast;

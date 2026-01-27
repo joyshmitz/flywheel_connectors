@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn test_authorization_url() {
         let config = test_config();
-        let client = OAuth2Client::new(config);
+        let client = OAuth2Client::new(config).unwrap();
 
         let (url, state) = client.authorization_url(&["read", "write"]).unwrap();
 

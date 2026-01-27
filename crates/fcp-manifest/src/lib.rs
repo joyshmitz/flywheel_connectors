@@ -336,6 +336,9 @@ pub enum ManifestError {
 
     #[error("interface hash mismatch (expected {expected}, found {found})")]
     InterfaceHashMismatch { expected: String, found: String },
+
+    #[error("invalid rate limit: {0}")]
+    RateLimit(#[from] fcp_core::RateLimitValidationError),
 }
 
 /// `[manifest]` section (NORMATIVE).
@@ -1223,6 +1226,9 @@ impl OperationSection {
                 message: "must not be empty".into(),
             });
         }
+        if let Some(ref rate_limit) = self.rate_limit {
+            rate_limit.as_inner().validate()?;
+        }
         if let Some(ref nc) = self.network_constraints {
             nc.validate()?;
         }
@@ -1334,6 +1340,7 @@ fn parse_rate_limit_shorthand(input: &str) -> Result<fcp_core::RateLimit, &'stat
         per_ms,
         burst: None,
         scope: None,
+        pool_name: None,
     })
 }
 

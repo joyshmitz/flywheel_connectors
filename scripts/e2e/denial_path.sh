@@ -181,6 +181,7 @@ step_audit_tail() {
 
 require_cmd fcp-harness
 require_cmd fcp
+require_cmd fcp-e2e
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -192,5 +193,7 @@ run_step "explain_denial" 4 "[\"${OUT_DIR}/decision.json\"]" "" step_explain_den
 run_step "expired_token" 5 "[\"${OUT_DIR}/expired_token.cbor\",\"${OUT_DIR}/expired_denial.cbor\"]" "FCP-2102" step_expired_token
 run_step "wrong_zone" 6 "[\"${OUT_DIR}/wrong_zone_token.cbor\",\"${OUT_DIR}/zone_denial.cbor\"]" "FCP-3001" step_wrong_zone
 run_step "audit_tail" 7 "[]" "" step_audit_tail
+
+fcp-e2e --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

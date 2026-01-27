@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 # Core FCP types
 fcp-core = { path = "../fcp-core" }
+fcp-conformance = { path = "../fcp-conformance" }
 
 # Async runtime
 async-trait.workspace = true

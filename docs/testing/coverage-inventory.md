@@ -297,7 +297,7 @@ These are **manual-only** runs against dedicated sandbox accounts. No mocks. Use
 - Acquire scoped API keys/tokens for the connector capabilities under test.
 - Configure a minimal zone (e.g., `z:work`) with only the required caps.
 - Set `CORRELATION_ID` for each run and log it in every step.
-- Store logs in `./artifacts/e2e/<connector>/<date>/run.jsonl`.
+- Store logs in `./artifacts/e2e/<connector>/<YYYY-MM-DD>/run.jsonl`.
 
 ### Required Scenarios (Minimum)
 - **Discovery/Introspection**: list connector, introspect tools, verify schemas.
@@ -341,7 +341,11 @@ cargo build -p fcp-anthropic
 - Invoke (example):
   ```json
   {"jsonrpc":"2.0","id":"5","method":"invoke","params":{
+    "type":"invoke",
+    "id":"req-123",
+    "connector_id":"<connector_id>",
     "operation":"<operation>",
+    "zone_id":"z:work",
     "input":{...},
     "capability_token":"<base64-cose-token>"
   }}
@@ -355,7 +359,7 @@ fcp-e2e --connector-cmd target/debug/fcp-telegram \
   --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
   --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
   --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/telegram/2026-01-27/run.jsonl
+  --output artifacts/e2e/telegram/<YYYY-MM-DD>/run.jsonl
 ```
 
 **Discord (bot token required)**:
@@ -366,7 +370,7 @@ fcp-e2e --connector-cmd target/debug/fcp-discord \
   --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
   --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
   --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/discord/2026-01-27/run.jsonl
+  --output artifacts/e2e/discord/<YYYY-MM-DD>/run.jsonl
 ```
 
 **Twitter/X (OAuth 1.0a required)**:
@@ -377,7 +381,7 @@ fcp-e2e --connector-cmd target/debug/fcp-twitter \
   --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
   --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
   --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/twitter/2026-01-27/run.jsonl
+  --output artifacts/e2e/twitter/<YYYY-MM-DD>/run.jsonl
 ```
 
 **OpenAI (API key required)**:
@@ -388,7 +392,7 @@ fcp-e2e --connector-cmd target/debug/fcp-openai \
   --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
   --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
   --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/openai/2026-01-27/run.jsonl
+  --output artifacts/e2e/openai/<YYYY-MM-DD>/run.jsonl
 ```
 
 **Anthropic (API key required)**:
@@ -399,7 +403,7 @@ fcp-e2e --connector-cmd target/debug/fcp-anthropic \
   --request '{"jsonrpc":"2.0","id":"2","method":"handshake","params":{"protocol_version":"2.0","zone":"z:work","zone_dir":null,"host_public_key":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"nonce":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"capabilities_requested":[]}}' \
   --request '{"jsonrpc":"2.0","id":"3","method":"health","params":{}}' \
   --request '{"jsonrpc":"2.0","id":"4","method":"introspect","params":{}}' \
-  --output artifacts/e2e/anthropic/2026-01-27/run.jsonl
+  --output artifacts/e2e/anthropic/<YYYY-MM-DD>/run.jsonl
 ```
 
 **Invoke note:** connector `invoke` requires a valid `capability_token`. For manual runs, mint tokens via the host/mesh policy path (preferred). If running connectors directly, defer invoke until token minting is wired.

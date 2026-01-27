@@ -198,6 +198,7 @@ step_issuer_revocation() {
 
 require_cmd fcp-harness
 require_cmd fcp
+require_cmd fcp-e2e
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -209,5 +210,7 @@ run_step "revoke_token" 4 "[]" step_revoke
 run_step "invoke_revoked" 5 "[\"${OUT_DIR}/revoked_denial.cbor\",\"${OUT_DIR}/revoked_decision.json\"]" step_invoke_revoked
 run_step "audit_verify" 6 "[]" step_audit_verify
 run_step "issuer_revocation" 7 "[\"${OUT_DIR}/issuer_token.cbor\"]" step_issuer_revocation
+
+fcp-e2e --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

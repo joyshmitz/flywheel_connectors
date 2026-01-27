@@ -73,15 +73,19 @@ log_step() {
   local correlation_id
   local token_json
   local approval_json
+  local approver_json
+  local details
 
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   correlation_id="$(correlation_id_for_step "${step_number}")"
   token_json="$(json_or_null "${TOKEN_ID}")"
   approval_json="$(json_or_null "${APPROVAL_ID}")"
+  approver_json="$(json_or_null "${APPROVER}")"
+  details="{\"taint_labels\":[\"${TAINT_LABEL}\"],\"approver\":${approver_json},\"approval_id\":${approval_json},\"token_id\":${token_json}}"
 
   mkdir -p "$(dirname "${LOG_JSONL}")"
-  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"taint_labels":["%s"],"approver":"%s","approval_id":%s,"token_id":%s,"result":"%s","artifacts":%s}\n' \
-    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${TAINT_LABEL}" "${APPROVER}" "${approval_json}" "${token_json}" "${result}" "${artifacts_json}" >> "${LOG_JSONL}"
+  printf '{"timestamp":"%s","script":"%s","step":"%s","step_number":%s,"correlation_id":"%s","duration_ms":%s,"result":"%s","artifacts":%s,"details":%s}\n' \
+    "${timestamp}" "${SCRIPT_NAME}" "${step}" "${step_number}" "${correlation_id}" "${duration_ms}" "${result}" "${artifacts_json}" "${details}" >> "${LOG_JSONL}"
 }
 
 run_step() {
@@ -192,6 +196,7 @@ step_audit_verify() {
 
 require_cmd fcp-harness
 require_cmd fcp
+require_cmd fcp-e2e
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -203,5 +208,7 @@ run_step "invoke_denied" 4 "[\"${OUT_DIR}/taint_denial.cbor\",\"${OUT_DIR}/taint
 run_step "create_approval" 5 "[\"${OUT_DIR}/approval.cbor\"]" step_create_approval
 run_step "invoke_approved" 6 "[\"${OUT_DIR}/approved_receipt.cbor\",\"${OUT_DIR}/approved_decision.json\"]" step_invoke_approved
 run_step "audit_verify" 7 "[]" step_audit_verify
+
+fcp-e2e --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

@@ -279,6 +279,10 @@ impl LogCollector {
     }
 
     /// Validate the JSONL output against the E2E log schema (v1).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SchemaValidationError` if any entry fails schema validation.
     pub fn validate_jsonl(&self) -> Result<(), SchemaValidationError> {
         let payload = self.to_jsonl();
         validate_e2e_log_jsonl(&payload)

@@ -42,15 +42,15 @@ impl ConnectorProcessRunner {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "connector stdin unavailable"))?;
+            .ok_or_else(|| io::Error::other("connector stdin unavailable"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "connector stdout unavailable"))?;
+            .ok_or_else(|| io::Error::other("connector stdout unavailable"))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "connector stderr unavailable"))?;
+            .ok_or_else(|| io::Error::other("connector stderr unavailable"))?;
 
         let stderr_lines = Arc::new(Mutex::new(Vec::new()));
         let stderr_lines_task = Arc::clone(&stderr_lines);
@@ -60,7 +60,7 @@ impl ConnectorProcessRunner {
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(_) => {
                         let trimmed = line.trim_end();
                         if !trimmed.is_empty() {
@@ -68,7 +68,6 @@ impl ConnectorProcessRunner {
                             buffer.push(trimmed.to_string());
                         }
                     }
-                    Err(_) => break,
                 }
             }
         });

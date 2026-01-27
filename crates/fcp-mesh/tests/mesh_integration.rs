@@ -98,6 +98,51 @@ mod meshnode {
         }
     }
 
+    fn build_mesh_node(name: &str, sender_instance_id: u64, local_node_id: u64) -> MeshNode {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            local_node_id,
+            ..MemorySymbolStoreConfig::default()
+        }));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        MeshNode::new(
+            MeshNodeConfig::new(name).with_sender_instance_id(sender_instance_id),
+            object_store,
+            symbol_store,
+            quarantine_store,
+        )
+    }
+
+    async fn seed_symbols(store: &Arc<dyn SymbolStore>, meta: &ObjectSymbolMeta, source_node: u64) {
+        store.put_object_meta(meta.clone()).await.unwrap();
+
+        for esi in 0..meta.source_symbols {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: meta.object_id,
+                    esi,
+                    zone_id: meta.zone_id.clone(),
+                    source_node: Some(source_node),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; 16]),
+            };
+            store.put_symbol(symbol).await.unwrap();
+        }
+    }
+
+    async fn missing_esis(
+        store: &Arc<dyn SymbolStore>,
+        object_id: &ObjectId,
+        total: u32,
+    ) -> Vec<u32> {
+        let received = store.get_all_symbols(object_id).await;
+        let have: HashSet<u32> = received.iter().map(|symbol| symbol.meta.esi).collect();
+        (0..total).filter(|esi| !have.contains(esi)).collect()
+    }
+
     #[tokio::test]
     async fn meshnode_symbol_request_smoke() {
         let zone_id = ZoneId::work();
@@ -473,32 +518,8 @@ mod meshnode {
         let zone_key_id = ZoneKeyId::from_bytes([7u8; 8]);
         let object_id = test_object_id("meshnode-multi-node-symbols");
 
-        let object_store_a = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
-        let symbol_store_a = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
-            local_node_id: 1,
-            ..MemorySymbolStoreConfig::default()
-        }));
-        let quarantine_store_a = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
-
-        let object_store_b = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
-        let symbol_store_b = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
-            local_node_id: 2,
-            ..MemorySymbolStoreConfig::default()
-        }));
-        let quarantine_store_b = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
-
-        let mut node_a = MeshNode::new(
-            MeshNodeConfig::new("node-a").with_sender_instance_id(21),
-            object_store_a,
-            symbol_store_a.clone(),
-            quarantine_store_a,
-        );
-        let node_b = MeshNode::new(
-            MeshNodeConfig::new("node-b").with_sender_instance_id(22),
-            object_store_b,
-            symbol_store_b.clone(),
-            quarantine_store_b,
-        );
+        let mut node_a = build_mesh_node("node-a", 21, 1);
+        let node_b = build_mesh_node("node-b", 22, 2);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -508,35 +529,16 @@ mod meshnode {
             source_symbols: 4,
             first_symbol_at: 0,
         };
-        symbol_store_a.put_object_meta(meta.clone()).await.unwrap();
+        let symbol_store_a = node_a.symbol_store().clone();
+        seed_symbols(&symbol_store_a, &meta, 1).await;
 
-        for esi in 0..4u32 {
-            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
-            let symbol = StoredSymbol {
-                meta: SymbolMeta {
-                    object_id,
-                    esi,
-                    zone_id: zone_id.clone(),
-                    source_node: Some(1),
-                    stored_at: 0,
-                },
-                data: Bytes::from(vec![esi_byte; 16]),
-            };
-            symbol_store_a.put_symbol(symbol).await.unwrap();
-        }
-
-        let sender_store = node_a.symbol_store().clone();
         let receiver_store = node_b.symbol_store().clone();
 
         let mut attempts = 0;
         while !receiver_store.can_reconstruct(&object_id).await && attempts < 5 {
             attempts += 1;
 
-            let received = receiver_store.get_all_symbols(&object_id).await;
-            let have: HashSet<u32> = received.iter().map(|symbol| symbol.meta.esi).collect();
-            let missing: Vec<u32> = (0..meta.source_symbols)
-                .filter(|esi| !have.contains(esi))
-                .collect();
+            let missing = missing_esis(&receiver_store, &object_id, meta.source_symbols).await;
 
             let request = SymbolRequest::new(
                 test_header(&zone_id),
@@ -566,7 +568,7 @@ mod meshnode {
             }
 
             for esi in response.symbol_esis {
-                let symbol = sender_store.get_symbol(&object_id, esi).await.unwrap();
+                let symbol = symbol_store_a.get_symbol(&object_id, esi).await.unwrap();
                 receiver_store.put_symbol(symbol).await.unwrap();
             }
         }
@@ -668,16 +670,8 @@ mod meshnode {
         let zone_key_id = ZoneKeyId::from_bytes([9u8; 8]);
         let object_id = test_object_id("meshnode-session-auth");
 
-        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
-        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
-        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
-
-        let mut node = MeshNode::new(
-            MeshNodeConfig::new("node-auth").with_sender_instance_id(41),
-            object_store,
-            symbol_store.clone(),
-            quarantine_store,
-        );
+        let mut node = build_mesh_node("node-auth", 41, 3);
+        let symbol_store = node.symbol_store().clone();
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -687,21 +681,7 @@ mod meshnode {
             source_symbols: 4,
             first_symbol_at: 0,
         };
-        symbol_store.put_object_meta(meta).await.unwrap();
-
-        for esi in 0..4u32 {
-            let symbol = StoredSymbol {
-                meta: SymbolMeta {
-                    object_id,
-                    esi,
-                    zone_id: zone_id.clone(),
-                    source_node: Some(1),
-                    stored_at: 0,
-                },
-                data: Bytes::from(vec![0xA5; 16]),
-            };
-            symbol_store.put_symbol(symbol).await.unwrap();
-        }
+        seed_symbols(&symbol_store, &meta, 1).await;
 
         let session = MeshSession::new(
             MeshSessionId::new(),

@@ -140,6 +140,7 @@ step_teardown() {
 
 require_cmd fcp-harness
 require_cmd fcp
+require_cmd fcp-e2e
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -151,5 +152,7 @@ run_step "invoke" 4 "[\"${OUT_DIR}/receipt.cbor\"]" step_invoke
 run_step "verify_receipt" 5 "[\"${OUT_DIR}/decision.json\"]" step_verify_receipt
 run_step "audit_verify" 6 "[]" step_audit_verify
 run_step "teardown" 7 "[]" step_teardown
+
+fcp-e2e --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

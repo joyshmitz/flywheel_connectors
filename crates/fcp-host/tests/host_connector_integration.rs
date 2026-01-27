@@ -5,11 +5,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use fcp_conformance::schemas::validate_e2e_log_jsonl;
 use fcp_core::{
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
     Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId, ZoneId,
 };
-use fcp_e2e::ConnectorProcessRunner;
+use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
     PreflightRequest, PreflightResponse,
@@ -70,10 +71,7 @@ impl SubprocessConnector {
         });
         let response = runner.request(&request).await?;
         if let Some(error) = response.get("error") {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("connector error: {error}"),
-            ));
+            return Err(std::io::Error::other(format!("connector error: {error}")));
         }
         Ok(response.get("result").cloned().unwrap_or(json!({})))
     }
@@ -307,4 +305,25 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
     registry.terminate_all().await?;
 
     Ok(())
+}
+
+#[test]
+fn host_log_schema_example() {
+    let mut logger = E2eLogger::new();
+    let correlation_id = CorrelationId::new().to_string();
+
+    logger.push(E2eLogEntry::new(
+        "info",
+        "host_connector_integration",
+        "fcp-host",
+        "execute",
+        &correlation_id,
+        "pass",
+        5,
+        AssertionsSummary::new(1, 0),
+        json!({ "connector_count": 2 }),
+    ));
+
+    let payload = logger.to_json_lines();
+    validate_e2e_log_jsonl(&payload).expect("log schema should validate");
 }

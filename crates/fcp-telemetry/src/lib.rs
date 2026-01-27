@@ -197,6 +197,10 @@ pub async fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryErro
 ///
 /// Returns an error if initialization fails.
 pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError> {
+    if TELEMETRY.get().is_some() {
+        return Ok(());
+    }
+
     // Initialize logging
     init_logging(&config)?;
 
