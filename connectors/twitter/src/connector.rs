@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     BaseConnector, CapabilityGrant, CapabilityToken, CapabilityVerifier, ConnectorId, EventCaps,
-    FcpError, HandshakeRequest, HandshakeResponse, SessionId,
+    FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, broadcast};
@@ -244,6 +244,21 @@ impl TwitterConnector {
                 "deny_private_ranges": true
             }
         }))
+    }
+
+    /// Handle the simulate method.
+    #[instrument(skip(self, params))]
+    pub async fn handle_simulate(&self, params: Value) -> Result<Value, FcpError> {
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid simulate request: {e}"),
+            })?;
+
+        let response = SimulateResponse::allowed(req.id);
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
     }
 
     /// Handle the invoke method.
