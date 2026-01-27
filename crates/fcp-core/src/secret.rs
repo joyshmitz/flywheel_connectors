@@ -151,7 +151,7 @@ pub struct SecretObject {
 
     /// Encrypted secret payload (zone-key encrypted).
     ///
-    /// Format: `COSE_Encrypt0` with AES-256-GCM.
+    /// Format: `COSE_Encrypt0` with ChaCha20-Poly1305.
     /// AAD includes: `secret_id` || `zone_id` || `schema_hash`.
     #[serde(with = "crate::util::hex_or_bytes_vec")]
     pub encrypted_payload: Vec<u8>,
