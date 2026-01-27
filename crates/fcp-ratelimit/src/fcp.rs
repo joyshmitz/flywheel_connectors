@@ -364,6 +364,7 @@ mod tests {
             per_ms: 60_000,
             burst: Some(10),
             scope: None,
+            pool_name: None,
         };
 
         let cfg = config_from_core(&core).unwrap();
@@ -379,6 +380,7 @@ mod tests {
             per_ms: 60_000,
             burst: None,
             scope: None,
+            pool_name: None,
         };
         let err = config_from_core(&core).unwrap_err();
         assert!(err.to_string().contains("max must be > 0"));
@@ -388,6 +390,7 @@ mod tests {
             per_ms: 0,
             burst: None,
             scope: None,
+            pool_name: None,
         };
         let err = config_from_core(&core).unwrap_err();
         assert!(err.to_string().contains("per_ms must be > 0"));
@@ -400,6 +403,7 @@ mod tests {
             per_ms: 60_000,
             burst: Some(1),
             scope: None,
+            pool_name: None,
         };
         let err = config_from_core(&core).unwrap_err();
         assert!(err.to_string().contains("burst overflow"));

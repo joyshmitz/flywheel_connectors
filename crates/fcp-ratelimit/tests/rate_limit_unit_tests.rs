@@ -486,6 +486,7 @@ fn config_from_core_with_burst_interprets_as_additional() {
         per_ms: 60_000,
         burst: Some(20),
         scope: None,
+        pool_name: None,
     };
 
     let cfg = config_from_core(&rate).unwrap();
@@ -500,6 +501,7 @@ fn config_from_core_without_burst() {
         per_ms: 1_000,
         burst: None,
         scope: None,
+        pool_name: None,
     };
 
     let cfg = config_from_core(&rate).unwrap();

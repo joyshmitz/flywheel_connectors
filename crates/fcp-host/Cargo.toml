@@ -38,4 +38,5 @@ semver = { version = "1", features = ["serde"] }
 [dev-dependencies]
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-e2e = { path = "../fcp-e2e" }
+fcp-testkit = { path = "../fcp-testkit" }
 tokio = { version = "1.44", features = ["rt-multi-thread", "macros", "test-util"] }

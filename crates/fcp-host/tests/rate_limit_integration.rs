@@ -168,6 +168,7 @@ fn make_operation(name: &str, rate_limit_scope: Option<&str>) -> OperationInfo {
             per_ms: 60000,
             burst: Some(10),
             scope: Some(scope.to_string()),
+            pool_name: None,
         }),
         requires_approval: Some(ApprovalMode::None),
     }
