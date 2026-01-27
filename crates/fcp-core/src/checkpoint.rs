@@ -346,7 +346,7 @@ pub fn rank_checkpoint_coordinators(
         .iter()
         .map(|node| (hrw_hash_checkpoint(zone_id, epoch, node), node.clone()))
         .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0)); // Descending by hash
+    ranked.sort_by_key(|item| std::cmp::Reverse(item.0)); // Descending by hash
     ranked.into_iter().map(|(_, node)| node).collect()
 }
 

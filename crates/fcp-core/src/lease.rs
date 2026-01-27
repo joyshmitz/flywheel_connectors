@@ -302,7 +302,7 @@ pub fn rank_nodes_by_hrw(
         .map(|n| (hrw_hash(zone_id, subject_id, n), n.clone()))
         .collect();
     // Sort descending by score
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|item| std::cmp::Reverse(item.0));
     scored.into_iter().map(|(_, n)| n).collect()
 }
 
