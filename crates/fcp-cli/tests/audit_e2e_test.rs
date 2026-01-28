@@ -309,7 +309,11 @@ fn fcp_cmd() -> Command {
 
 /// Generate a correlation ID for test tracing.
 fn correlation_id() -> String {
-    format!("e2e-{}-{}", std::process::id(), Utc::now().timestamp_millis())
+    format!(
+        "e2e-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_millis()
+    )
 }
 
 /// Get the log output directory.
@@ -817,7 +821,10 @@ mod e2e_audit {
             .lines()
             .filter(|l| l.starts_with('{'))
             .count();
-        assert_eq!(limited_line_count, 3, "Limited timeline should have 3 events");
+        assert_eq!(
+            limited_line_count, 3,
+            "Limited timeline should have 3 events"
+        );
 
         #[allow(clippy::cast_possible_truncation)] // Test durations fit in u64
         let elapsed = start.elapsed().as_millis() as u64;
@@ -833,9 +840,6 @@ mod e2e_audit {
 
         // Persist final log summary
         let jsonl = logs.to_jsonl();
-        assert!(
-            !jsonl.is_empty(),
-            "JSONL log output should not be empty"
-        );
+        assert!(!jsonl.is_empty(), "JSONL log output should not be empty");
     }
 }
