@@ -1840,8 +1840,10 @@ dependencies = [
 name = "fcp-graphql"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "fcp-core",
  "fcp-streaming",
+ "fcp-testkit",
  "futures-util",
  "jsonschema",
  "pretty_assertions",

@@ -87,7 +87,10 @@ impl GraphqlSubscriptionClient {
     pub async fn subscribe<O: GraphqlOperation>(
         &self,
         variables: O::Variables,
-    ) -> Result<GraphqlSubscriptionStream<O::ResponseData>, GraphqlClientError> {
+    ) -> Result<GraphqlSubscriptionStream<O::ResponseData>, GraphqlClientError>
+    where
+        O::ResponseData: 'static,
+    {
         let mut ws_config = self.config.ws.clone();
         for (key, value) in &self.headers {
             ws_config.headers.insert(key.clone(), value.clone());
@@ -268,7 +271,7 @@ fn decode_ws_message(message: WsMessage) -> Result<GraphqlWsMessage, GraphqlClie
 
 impl From<StreamError> for GraphqlClientError {
     fn from(err: StreamError) -> Self {
-        GraphqlClientError::Protocol {
+        Self::Protocol {
             message: err.to_string(),
         }
     }

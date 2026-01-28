@@ -73,16 +73,18 @@ impl RetryPolicy {
             RetryStrategy::Never => RetryDecision::DoNotRetry,
             RetryStrategy::IdempotentOnly if !idempotent => RetryDecision::DoNotRetry,
             _ => {
-                let base_ms = self.base_delay.as_millis() as u64;
-                let exp = 2_u64.saturating_pow((attempt - 1) as u32);
+                let base_ms = u64::try_from(self.base_delay.as_millis()).unwrap_or(u64::MAX);
+                let exp = 2_u64
+                    .saturating_pow(u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX));
                 let mut delay_ms = base_ms.saturating_mul(exp);
-                let max_ms = self.max_delay.as_millis() as u64;
+                let max_ms = u64::try_from(self.max_delay.as_millis()).unwrap_or(u64::MAX);
                 if delay_ms > max_ms {
                     delay_ms = max_ms;
                 }
                 let jitter_ms = if self.max_jitter.as_millis() > 0 {
                     let mut rng = rand::thread_rng();
-                    rng.gen_range(0..=self.max_jitter.as_millis() as u64)
+                    let jitter_max = u64::try_from(self.max_jitter.as_millis()).unwrap_or(u64::MAX);
+                    rng.gen_range(0..=jitter_max)
                 } else {
                     0
                 };

@@ -92,7 +92,7 @@ where
         if !page.page_info.has_next_page {
             break;
         }
-        cursor = page.page_info.end_cursor.clone();
+        cursor.clone_from(&page.page_info.end_cursor);
         if cursor.is_none() {
             break;
         }

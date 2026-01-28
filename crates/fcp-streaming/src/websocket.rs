@@ -80,6 +80,9 @@ impl WsMessage {
     }
 
     /// Parse text as JSON.
+    ///
+    /// # Errors
+    /// Returns a JSON parsing error if the payload is not valid JSON.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         match self {
             Self::Text(s) => serde_json::from_str(s),
@@ -108,14 +111,14 @@ impl From<Message> for WsMessage {
 impl From<WsMessage> for Message {
     fn from(msg: WsMessage) -> Self {
         match msg {
-            WsMessage::Text(s) => Message::Text(s.into()),
-            WsMessage::Binary(b) => Message::Binary(b.into()),
-            WsMessage::Ping(b) => Message::Ping(b.into()),
-            WsMessage::Pong(b) => Message::Pong(b.into()),
+            WsMessage::Text(s) => Self::Text(s.into()),
+            WsMessage::Binary(b) => Self::Binary(b.into()),
+            WsMessage::Ping(b) => Self::Ping(b.into()),
+            WsMessage::Pong(b) => Self::Pong(b.into()),
             WsMessage::Close(frame) => {
                 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
                 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-                Message::Close(frame.map(|f| CloseFrame {
+                Self::Close(frame.map(|f| CloseFrame {
                     code: CloseCode::from(f.code),
                     reason: f.reason.into(),
                 }))
@@ -261,6 +264,9 @@ impl WsClient {
     }
 
     /// Connect to the WebSocket server.
+    ///
+    /// # Errors
+    /// Returns an error if the connection attempt fails or times out.
     pub async fn connect(&self) -> StreamResult<WsConnection> {
         let url = Url::parse(&self.url)
             .map_err(|e: url::ParseError| StreamError::ConnectionFailed(e.to_string()))?;
@@ -268,9 +274,8 @@ impl WsClient {
         let connect_result =
             tokio::time::timeout(self.config.connect_timeout, connect_async(url.as_str())).await;
 
-        let ws_result = match connect_result {
-            Ok(result) => result,
-            Err(_) => return Err(StreamError::Timeout(self.config.connect_timeout)),
+        let Ok(ws_result) = connect_result else {
+            return Err(StreamError::Timeout(self.config.connect_timeout));
         };
 
         let (ws_stream, _response) =
@@ -303,7 +308,7 @@ pub struct WsConnection {
 
 impl WsConnection {
     /// Create a new connection wrapper.
-    fn new(
+    const fn new(
         stream: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
         config: WsConfig,
     ) -> Self {
@@ -315,6 +320,9 @@ impl WsConnection {
     }
 
     /// Send a message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the message cannot be sent.
     pub async fn send(&mut self, message: WsMessage) -> StreamResult<()> {
         if self.closed {
             return Err(StreamError::InvalidState("Connection is closed".into()));
@@ -327,23 +335,35 @@ impl WsConnection {
     }
 
     /// Send a text message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the message cannot be sent.
     pub async fn send_text(&mut self, text: impl Into<String>) -> StreamResult<()> {
         self.send(WsMessage::text(text)).await
     }
 
     /// Send a binary message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the message cannot be sent.
     pub async fn send_binary(&mut self, data: impl Into<Vec<u8>>) -> StreamResult<()> {
         self.send(WsMessage::binary(data)).await
     }
 
     /// Send JSON data.
-    pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> StreamResult<()> {
+    ///
+    /// # Errors
+    /// Returns a stream error if serialization or send fails.
+    pub async fn send_json<T: serde::Serialize + Sync>(&mut self, data: &T) -> StreamResult<()> {
         let json =
             serde_json::to_string(data).map_err(|e| StreamError::ParseError(e.to_string()))?;
         self.send_text(json).await
     }
 
     /// Receive the next message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the underlying socket fails.
     pub async fn recv(&mut self) -> StreamResult<Option<WsMessage>> {
         if self.closed {
             return Ok(None);
@@ -366,6 +386,9 @@ impl WsConnection {
     }
 
     /// Close the connection.
+    ///
+    /// # Errors
+    /// Returns a stream error if the close frame fails to send.
     pub async fn close(&mut self) -> StreamResult<()> {
         if !self.closed {
             self.closed = true;
@@ -378,6 +401,9 @@ impl WsConnection {
     }
 
     /// Close with a specific frame.
+    ///
+    /// # Errors
+    /// Returns a stream error if the close frame fails to send.
     pub async fn close_with_frame(&mut self, frame: WsCloseFrame) -> StreamResult<()> {
         if !self.closed {
             self.closed = true;

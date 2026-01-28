@@ -60,6 +60,9 @@ impl SseEvent {
     }
 
     /// Parse data as JSON.
+    ///
+    /// # Errors
+    /// Returns a JSON parsing error if the data is not valid JSON.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         serde_json::from_str(&self.data)
     }
@@ -89,8 +92,8 @@ impl SseParser {
     }
 
     /// Parse incoming data and return complete events.
-    fn parse(&mut self, data: Bytes) -> Vec<SseEvent> {
-        self.buffer.extend_from_slice(&data);
+    fn parse(&mut self, data: &Bytes) -> Vec<SseEvent> {
+        self.buffer.extend_from_slice(data);
         let mut events = Vec::new();
 
         // Process complete lines
@@ -112,7 +115,6 @@ impl SseParser {
                 }
             } else if line_str.starts_with(':') {
                 // Comment, ignore
-                continue;
             } else {
                 self.process_field(&line_str);
             }
@@ -133,15 +135,13 @@ impl SseParser {
 
     /// Process a field line.
     fn process_field(&mut self, line: &str) {
-        let (field, value) = if let Some(colon_pos) = line.find(':') {
+        let (field, value) = line.find(':').map_or((line, ""), |colon_pos| {
             let field = &line[..colon_pos];
             let value = &line[colon_pos + 1..];
             // Skip leading space after colon
             let value = value.strip_prefix(' ').unwrap_or(value);
             (field, value)
-        } else {
-            (line, "")
-        };
+        });
 
         match field {
             "event" => self.event_type = Some(value.to_string()),
@@ -178,7 +178,7 @@ impl SseParser {
 
         // Update last event ID
         if event.id.is_some() {
-            self.last_event_id = event.id.clone();
+            self.last_event_id.clone_from(&event.id);
         }
 
         self.data_lines.clear();
@@ -312,11 +312,17 @@ impl SseClient {
     }
 
     /// Connect and return an event stream.
+    ///
+    /// # Errors
+    /// Returns a stream error if the HTTP request fails or returns a non-2xx status.
     pub async fn connect(&self) -> StreamResult<SseStream> {
         self.connect_with_last_id(None).await
     }
 
     /// Connect with a last event ID for resumption.
+    ///
+    /// # Errors
+    /// Returns a stream error if the HTTP request fails or returns a non-2xx status.
     pub async fn connect_with_last_id(
         &self,
         last_event_id: Option<&str>,
@@ -418,7 +424,7 @@ impl Stream for SseStream {
                 }
 
                 // Parse events
-                let events = this.parser.parse(data);
+                let events = this.parser.parse(&data);
                 if events.is_empty() {
                     // No complete events yet, poll again
                     cx.waker().wake_by_ref();
@@ -444,7 +450,7 @@ mod tests {
     fn test_parse_simple_event() {
         let mut parser = SseParser::new();
         let data = Bytes::from("data: hello world\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "hello world");
@@ -455,7 +461,7 @@ mod tests {
     fn test_parse_typed_event() {
         let mut parser = SseParser::new();
         let data = Bytes::from("event: message\ndata: hello\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, Some("message".to_string()));
@@ -466,7 +472,7 @@ mod tests {
     fn test_parse_multiline_data() {
         let mut parser = SseParser::new();
         let data = Bytes::from("data: line 1\ndata: line 2\ndata: line 3\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "line 1\nline 2\nline 3");
@@ -476,7 +482,7 @@ mod tests {
     fn test_parse_event_with_id() {
         let mut parser = SseParser::new();
         let data = Bytes::from("id: 123\ndata: test\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, Some("123".to_string()));
@@ -487,7 +493,7 @@ mod tests {
     fn test_parse_retry() {
         let mut parser = SseParser::new();
         let data = Bytes::from("retry: 5000\ndata: test\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].retry, Some(5000));
@@ -497,7 +503,7 @@ mod tests {
     fn test_parse_comment() {
         let mut parser = SseParser::new();
         let data = Bytes::from(": this is a comment\ndata: actual data\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "actual data");
@@ -507,7 +513,7 @@ mod tests {
     fn test_parse_multiple_events() {
         let mut parser = SseParser::new();
         let data = Bytes::from("data: event1\n\ndata: event2\n\n");
-        let events = parser.parse(data);
+        let events = parser.parse(&data);
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].data, "event1");
@@ -520,12 +526,12 @@ mod tests {
 
         // First chunk
         let data1 = Bytes::from("data: hello ");
-        let events1 = parser.parse(data1);
+        let events1 = parser.parse(&data1);
         assert!(events1.is_empty());
 
         // Second chunk
         let data2 = Bytes::from("world\n\n");
-        let events2 = parser.parse(data2);
+        let events2 = parser.parse(&data2);
         assert_eq!(events2.len(), 1);
         assert_eq!(events2[0].data, "hello world");
     }

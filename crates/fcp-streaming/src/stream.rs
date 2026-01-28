@@ -48,7 +48,7 @@ pin_project! {
 
 impl<S> TimeoutStream<S> {
     /// Create a new timeout stream.
-    pub fn new(inner: S, timeout: Duration) -> Self {
+    pub const fn new(inner: S, timeout: Duration) -> Self {
         Self {
             inner,
             timeout,
@@ -193,7 +193,7 @@ pub struct CountingStream<S> {
 
 impl<S> CountingStream<S> {
     /// Create a new counting stream.
-    pub fn new(inner: S) -> Self {
+    pub const fn new(inner: S) -> Self {
         Self {
             inner,
             items_count: 0,
@@ -236,7 +236,7 @@ pin_project! {
 
 impl<S> RateLimitedStream<S> {
     /// Create a new rate-limited stream.
-    pub fn new(inner: S, interval: Duration) -> Self {
+    pub const fn new(inner: S, interval: Duration) -> Self {
         Self {
             inner,
             interval,

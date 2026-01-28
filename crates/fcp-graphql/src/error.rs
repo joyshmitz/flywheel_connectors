@@ -55,6 +55,7 @@ pub enum GraphqlPathSegment {
 
 /// GraphQL error (per GraphQL spec).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 pub struct GraphqlError {
     /// Human-readable error message.
     pub message: String,
@@ -165,8 +166,10 @@ impl GraphqlClientError {
             } => {
                 if *status == StatusCode::TOO_MANY_REQUESTS {
                     if let Some(duration) = retry_after {
+                        let retry_after_ms =
+                            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
                         return FcpError::RateLimited {
-                            retry_after_ms: duration.as_millis() as u64,
+                            retry_after_ms,
                             violation: None,
                         };
                     }
@@ -195,9 +198,8 @@ impl GraphqlClientError {
             },
             Self::GraphqlErrors { errors } => {
                 let message = errors
-                    .get(0)
-                    .map(|err| err.message.clone())
-                    .unwrap_or_else(|| "GraphQL error".to_string());
+                    .first()
+                    .map_or_else(|| "GraphQL error".to_string(), |err| err.message.clone());
                 FcpError::External {
                     service: service.into(),
                     message,

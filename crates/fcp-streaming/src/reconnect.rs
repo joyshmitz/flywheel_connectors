@@ -89,12 +89,16 @@ impl ReconnectConfig {
     /// Calculate delay for a given attempt.
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let base = self.initial_delay.as_secs_f64() * self.backoff_multiplier.powi(attempt as i32);
+        let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
+        let base = self
+            .initial_delay
+            .as_secs_f64()
+            .mul_add(self.backoff_multiplier.powi(exponent), 0.0);
         let capped = base.min(self.max_delay.as_secs_f64());
 
         let delay = if self.jitter {
             // Add jitter (0.5x to 1.5x)
-            let jitter = 0.5 + (random_float() * 1.0);
+            let jitter = random_float().mul_add(1.0, 0.5);
             capped * jitter
         } else {
             capped
@@ -114,7 +118,7 @@ pub struct ReconnectHandler {
 impl ReconnectHandler {
     /// Create a new reconnection handler.
     #[must_use]
-    pub fn new(config: ReconnectConfig) -> Self {
+    pub const fn new(config: ReconnectConfig) -> Self {
         Self {
             config,
             attempts: 0,
@@ -122,7 +126,7 @@ impl ReconnectHandler {
     }
 
     /// Reset the reconnection state.
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.attempts = 0;
     }
 
@@ -134,14 +138,17 @@ impl ReconnectHandler {
 
     /// Check if reconnection is allowed.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn can_reconnect(&self) -> bool {
-        match self.config.max_attempts {
-            Some(max) => self.attempts < max,
-            None => true,
-        }
+        self.config
+            .max_attempts
+            .is_none_or(|max| self.attempts < max)
     }
 
     /// Wait for the next reconnection attempt.
+    ///
+    /// # Errors
+    /// Returns [`StreamError::ReconnectLimitExceeded`] when the retry budget is exhausted.
     pub async fn wait_for_reconnect(&mut self) -> StreamResult<()> {
         if !self.can_reconnect() {
             return Err(StreamError::ReconnectLimitExceeded {
@@ -163,6 +170,9 @@ impl ReconnectHandler {
     }
 
     /// Execute a reconnectable operation.
+    ///
+    /// # Errors
+    /// Returns the underlying operation error or a reconnect limit error.
     pub async fn reconnect<T, F, Fut>(&mut self, mut operation: F) -> StreamResult<T>
     where
         F: FnMut() -> Fut,
@@ -201,13 +211,16 @@ impl ReconnectHandler {
 }
 
 /// Execute an operation with automatic retry.
-pub async fn with_retry<T, F, Fut>(config: ReconnectConfig, mut operation: F) -> StreamResult<T>
+///
+/// # Errors
+/// Returns the underlying operation error or a reconnect limit error.
+pub async fn with_retry<T, F, Fut>(config: ReconnectConfig, operation: F) -> StreamResult<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = StreamResult<T>>,
 {
     let mut handler = ReconnectHandler::new(config);
-    handler.reconnect(|| operation()).await
+    handler.reconnect(operation).await
 }
 
 /// Simple random float generator (0.0 to 1.0).
