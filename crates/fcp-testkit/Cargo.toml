@@ -48,4 +48,6 @@ reqwest.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
+fcp-cbor = { path = "../fcp-cbor" }
+semver.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
