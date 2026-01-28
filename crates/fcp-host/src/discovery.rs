@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fcp_core::{
-    ConnectorHealth, ConnectorId, Introspection, OperationInfo, RateLimitDeclarations, SafetyTier,
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
+    Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -226,8 +227,21 @@ pub struct ToolDescriptor {
     /// JSON Schema for output.
     pub output_schema: serde_json::Value,
 
+    /// Required capability.
+    pub capability: CapabilityId,
+
+    /// Risk level (for agent UX).
+    pub risk_level: RiskLevel,
+
     /// Safety tier.
     pub safety_tier: SafetyTier,
+
+    /// Idempotency class.
+    pub idempotency: IdempotencyClass,
+
+    /// Approval mode required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<ApprovalMode>,
 
     /// Whether this tool requires confirmation.
     pub requires_confirmation: bool,
@@ -252,7 +266,7 @@ pub struct ToolDescriptor {
 
     /// AI agent hints.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ai_hints: Option<String>,
+    pub ai_hints: Option<AgentHint>,
 }
 
 impl From<&OperationInfo> for ToolDescriptor {
@@ -262,7 +276,11 @@ impl From<&OperationInfo> for ToolDescriptor {
             description: op.description.clone().unwrap_or_else(|| op.summary.clone()),
             input_schema: op.input_schema.clone(),
             output_schema: op.output_schema.clone(),
+            capability: op.capability.clone(),
+            risk_level: op.risk_level,
             safety_tier: op.safety_tier,
+            idempotency: op.idempotency,
+            approval_mode: op.requires_approval,
             requires_confirmation: op.requires_approval.is_some(),
             idempotent: matches!(
                 op.idempotency,
@@ -283,10 +301,14 @@ impl From<&OperationInfo> for ToolDescriptor {
                     output: None,
                 })
                 .collect(),
-            ai_hints: if op.ai_hints.when_to_use.is_empty() {
+            ai_hints: if op.ai_hints.when_to_use.is_empty()
+                && op.ai_hints.common_mistakes.is_empty()
+                && op.ai_hints.examples.is_empty()
+                && op.ai_hints.related.is_empty()
+            {
                 None
             } else {
-                Some(op.ai_hints.when_to_use.clone())
+                Some(op.ai_hints.clone())
             },
         }
     }
@@ -943,14 +965,23 @@ mod tests {
             description: "Send a message to a channel".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             output_schema: serde_json::json!({"type": "object"}),
+            capability: CapabilityId::new("cap.send_message").expect("capability"),
+            risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            approval_mode: Some(ApprovalMode::Interactive),
             requires_confirmation: true,
             idempotent: false,
             supports_simulate: true,
             latency_hint: Some(LatencyHint::Fast),
             rate_limits: vec!["discord_api".to_string()],
             examples: vec![],
-            ai_hints: Some("Use for sending chat messages".to_string()),
+            ai_hints: Some(AgentHint {
+                when_to_use: "Use for sending chat messages".to_string(),
+                common_mistakes: vec!["Missing channel_id".to_string()],
+                examples: vec![r#"{"channel_id":"123","content":"hi"}"#.to_string()],
+                related: vec![CapabilityId::new("discord.delete_message").expect("capability")],
+            }),
         };
 
         let json = serde_json::to_string(&tool).unwrap();

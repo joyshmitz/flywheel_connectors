@@ -2,7 +2,9 @@
 //!
 //! These types represent the structured output of connector discovery commands.
 
-use fcp_core::{ConnectorHealth, SafetyTier};
+use fcp_core::{
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, IdempotencyClass, RiskLevel, SafetyTier,
+};
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,8 +122,8 @@ pub struct ConnectorInfo {
     pub allowed_source_zones: Vec<String>,
 
     /// Capabilities
-    pub required_capabilities: Vec<String>,
-    pub optional_capabilities: Vec<String>,
+    pub required_capabilities: Vec<CapabilityId>,
+    pub optional_capabilities: Vec<CapabilityId>,
 
     /// Operations
     pub operations: Vec<OperationSummary>,
@@ -150,11 +152,11 @@ pub struct OperationSummary {
     /// Brief summary
     pub summary: String,
     /// Required capability
-    pub capability: String,
+    pub capability: CapabilityId,
     /// Risk level (low, medium, high, critical)
-    pub risk_level: String,
-    /// Safety tier (T0-T3)
-    pub safety_tier: String,
+    pub risk_level: RiskLevel,
+    /// Safety tier (safe, risky, dangerous, critical, forbidden)
+    pub safety_tier: SafetyTier,
 }
 
 /// Summary of an event topic.
@@ -245,16 +247,16 @@ pub struct OperationDescriptor {
     pub output_schema: serde_json::Value,
 
     /// Required capability
-    pub capability: String,
+    pub capability: CapabilityId,
     /// Risk level
-    pub risk_level: String,
+    pub risk_level: RiskLevel,
     /// Safety tier
-    pub safety_tier: String,
+    pub safety_tier: SafetyTier,
     /// Idempotency class
-    pub idempotency: String,
+    pub idempotency: IdempotencyClass,
 
     /// AI agent hints
-    pub ai_hints: AgentHintsDescriptor,
+    pub ai_hints: AgentHint,
 
     /// Rate limiting
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -262,23 +264,7 @@ pub struct OperationDescriptor {
 
     /// Approval requirements
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub requires_approval: Option<String>,
-}
-
-/// AI agent hints for an operation.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentHintsDescriptor {
-    /// When to use this operation
-    pub when_to_use: String,
-    /// Common mistakes to avoid
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub common_mistakes: Vec<String>,
-    /// Example invocations
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub examples: Vec<String>,
-    /// Related operations
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub related: Vec<String>,
+    pub requires_approval: Option<ApprovalMode>,
 }
 
 /// Rate limit descriptor.
@@ -425,22 +411,22 @@ mod tests {
                     "tweet_id": {"type": "string"}
                 }
             }),
-            capability: "twitter:write:tweets".to_string(),
-            risk_level: "medium".to_string(),
-            safety_tier: "T2".to_string(),
-            idempotency: "non_idempotent".to_string(),
-            ai_hints: AgentHintsDescriptor {
+            capability: CapabilityId::new("twitter:write:tweets").expect("capability"),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
                 when_to_use: "When the user explicitly asks to post a tweet".to_string(),
                 common_mistakes: vec!["Posting without user confirmation".to_string()],
                 examples: vec![r#"{"text": "Hello world!"}"#.to_string()],
-                related: vec!["twitter.delete_tweet".to_string()],
+                related: vec![CapabilityId::new("twitter:delete:tweets").expect("capability")],
             },
             rate_limit: Some(RateLimitDescriptor {
                 requests: 300,
                 period_secs: 900,
                 formatted: "300/15min".to_string(),
             }),
-            requires_approval: Some("interactive".to_string()),
+            requires_approval: Some(ApprovalMode::Interactive),
         };
 
         let json = serde_json::to_string_pretty(&op).unwrap();
@@ -497,14 +483,14 @@ mod tests {
             runtime_format: "wasi".to_string(),
             home_zone: "z:private".to_string(),
             allowed_source_zones: vec!["z:private".to_string(), "z:work".to_string()],
-            required_capabilities: vec!["twitter:read:tweets".to_string()],
-            optional_capabilities: vec!["twitter:write:tweets".to_string()],
+            required_capabilities: vec![CapabilityId::new("twitter:read:tweets").expect("cap")],
+            optional_capabilities: vec![CapabilityId::new("twitter:write:tweets").expect("cap")],
             operations: vec![OperationSummary {
                 id: "twitter.get_timeline".to_string(),
                 summary: "Get user timeline".to_string(),
-                capability: "twitter:read:tweets".to_string(),
-                risk_level: "low".to_string(),
-                safety_tier: "T0".to_string(),
+                capability: CapabilityId::new("twitter:read:tweets").expect("capability"),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
             }],
             events: vec![],
             sandbox: SandboxInfo {
