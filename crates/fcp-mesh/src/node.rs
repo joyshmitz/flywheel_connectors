@@ -406,6 +406,7 @@ impl MeshNode {
     pub fn enforce_invoke_request<F>(
         &self,
         request: &InvokeRequest,
+        required_capability: &fcp_core::CapabilityId,
         verifier: &CapabilityVerifier,
         revocations: &RevocationRegistry,
         resource_uris: &[String],
@@ -417,7 +418,7 @@ impl MeshNode {
         request.validate_idempotency_key()?;
 
         let claims =
-            verifier.verify(&request.capability_token, &request.operation, resource_uris)?;
+            verifier.verify(&request.capability_token, required_capability, &request.operation, resource_uris)?;
 
         if let Some(holder_node) = claims.get_holder_node() {
             let proof = request.holder_proof.as_ref().ok_or_else(|| {

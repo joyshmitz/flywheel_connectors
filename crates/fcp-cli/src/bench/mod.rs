@@ -508,10 +508,11 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
 
     let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), InstanceId::new());
     let op = OperationId::new("op.test").expect("operation id must be canonical");
+    let cap = fcp_core::CapabilityId::new("cap.test").expect("capability id must be canonical");
 
     let (percentiles, outliers) = runner::run_benchmark_with_result(warmup, iterations, || {
         verifier
-            .verify(&token, &op, &[])
+            .verify(&token, &cap, &op, &[])
             .expect("capability verification should succeed");
     });
 

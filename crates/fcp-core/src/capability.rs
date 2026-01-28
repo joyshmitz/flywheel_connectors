@@ -1644,13 +1644,13 @@ mod tests {
 
         let token = CapabilityToken { raw: cose_token };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
-        
+
         let op = OperationId::new("op.test").unwrap();
         // We TRY to use "cap.critical"
         let required_cap = CapabilityId::new("cap.critical").unwrap();
 
         let result = verifier.verify(&token, &required_cap, &op, &[]);
-        
+
         // Should fail because token has "cap.benign", but we needed "cap.critical"
         // even though the operation "op.test" matched the list!
         assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));

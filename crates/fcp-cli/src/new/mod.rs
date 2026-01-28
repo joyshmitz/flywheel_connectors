@@ -936,7 +936,9 @@ impl FcpConnector for {struct_name}Connector {{
         // Verify capability token
         if let Some(verifier) = &self.verifier {{
             // TODO: Pass actual resource URIs if the operation targets specific resources
-            verifier.verify(&req.capability_token, &req.operation, &[])?;
+            // TODO: Map operation to required capability dynamically
+            let required_cap = CapabilityId::from_static(CAP_PLACEHOLDER);
+            verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
         }} else {{
             return Err(FcpError::NotConfigured);
         }}

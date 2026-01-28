@@ -124,6 +124,9 @@ pub struct ZonePolicyObject {
     pub transport_policy: ZoneTransportPolicy,
     #[serde(default)]
     pub decision_receipts: DecisionReceiptPolicy,
+    /// Device posture requirements for this zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_posture: Option<crate::posture::PostureRequirements>,
 }
 
 /// A bounded glob-only policy pattern.
@@ -190,6 +193,11 @@ pub enum DecisionReasonCode {
     TransportLanForbidden,
     SanitizerReceiptInvalid,
     SanitizerCoverageInsufficient,
+    PostureAttestationMissing,
+    PostureAttestationExpired,
+    PostureAttestationInvalid,
+    PostureRequirementNotMet,
+    PostureVerifierNotAllowed,
 }
 
 impl DecisionReasonCode {
@@ -224,6 +232,11 @@ impl DecisionReasonCode {
             Self::TransportLanForbidden => "transport.lan_forbidden",
             Self::SanitizerReceiptInvalid => "taint.sanitizer_invalid",
             Self::SanitizerCoverageInsufficient => "taint.sanitizer_coverage_insufficient",
+            Self::PostureAttestationMissing => "posture.attestation_missing",
+            Self::PostureAttestationExpired => "posture.attestation_expired",
+            Self::PostureAttestationInvalid => "posture.attestation_invalid",
+            Self::PostureRequirementNotMet => "posture.requirement_not_met",
+            Self::PostureVerifierNotAllowed => "posture.verifier_not_allowed",
         }
     }
 
@@ -316,6 +329,9 @@ pub struct PolicySimulationInput {
     /// Optional override for evaluation time (epoch ms).
     #[serde(default)]
     pub now_ms: Option<u64>,
+    /// Optional device posture attestation.
+    #[serde(default)]
+    pub posture_attestation: Option<crate::posture::PostureAttestation>,
 }
 
 /// Errors returned by policy simulation.
@@ -418,6 +434,7 @@ pub fn simulate_policy_decision(
         revocation_fresh: input.revocation_fresh,
         execution_approval_required: input.execution_approval_required,
         now_ms,
+        posture_attestation: input.posture_attestation.as_ref(),
     };
 
     let engine = PolicyEngine {
@@ -537,6 +554,8 @@ pub struct PolicyDecisionInput<'a> {
     pub revocation_fresh: bool,
     pub execution_approval_required: bool,
     pub now_ms: u64,
+    /// Device posture attestation for the requesting node.
+    pub posture_attestation: Option<&'a crate::posture::PostureAttestation>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -566,6 +585,15 @@ impl PolicyEngine {
 
         if let Some(reason) = check_pattern_lists(&self.zone_policy, input) {
             return PolicyDecision::deny(reason, Vec::new());
+        }
+
+        // Check posture requirements
+        if let Some(ref posture_requirements) = self.zone_policy.requires_posture {
+            if !posture_requirements.is_empty() {
+                if let Some(reason) = check_posture(posture_requirements, input) {
+                    return PolicyDecision::deny(reason, Vec::new());
+                }
+            }
         }
 
         if !self.zone_policy.capability_ceiling.is_empty()
@@ -839,6 +867,38 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     }
 
     true
+}
+
+fn check_posture(
+    requirements: &crate::posture::PostureRequirements,
+    input: &PolicyDecisionInput<'_>,
+) -> Option<DecisionReasonCode> {
+    use crate::posture::PostureCheckResult;
+
+    let Some(attestation) = input.posture_attestation else {
+        return Some(DecisionReasonCode::PostureAttestationMissing);
+    };
+
+    if !attestation.is_valid() {
+        return Some(DecisionReasonCode::PostureAttestationInvalid);
+    }
+
+    if attestation.is_expired() {
+        return Some(DecisionReasonCode::PostureAttestationExpired);
+    }
+
+    match requirements.is_satisfied_by(attestation) {
+        PostureCheckResult::Satisfied => None,
+        PostureCheckResult::AttestationExpired | PostureCheckResult::AttestationTooOld => {
+            Some(DecisionReasonCode::PostureAttestationExpired)
+        }
+        PostureCheckResult::VerifierNotAllowed => {
+            Some(DecisionReasonCode::PostureVerifierNotAllowed)
+        }
+        PostureCheckResult::RequirementNotMet { .. } => {
+            Some(DecisionReasonCode::PostureRequirementNotMet)
+        }
+    }
 }
 
 fn apply_flow_approvals(
