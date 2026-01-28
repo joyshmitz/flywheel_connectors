@@ -30,8 +30,11 @@ pub use crate::{CostEstimate, CurrencyCost, ResourceAvailability};
 // Rate limits
 pub use crate::{
     RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope,
-    RateLimitUnit,
+    RateLimitStatus, RateLimitUnit,
 };
+
+// Rate limit SDK helpers
+pub use crate::ratelimit::{RateLimitError, RateLimitPoolBuilder, RateLimitTracker};
 
 // Events
 pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
@@ -64,7 +67,8 @@ pub use crate::streaming::{
 // Runtime supervision helpers
 pub use crate::runtime::{
     HealthTracker, HealthTransition, InMemoryPollingCursor, InMemoryStreamingSession,
-    PollingCursor, StreamingSession, SupervisorConfig,
+    PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingSession,
+    SupervisorConfig, SupervisorOutcome,
 };
 
 // Schema validation helpers

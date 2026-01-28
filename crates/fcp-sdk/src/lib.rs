@@ -154,6 +154,7 @@ pub use fcp_manifest::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub mod prelude;
+pub mod ratelimit;
 pub mod runtime;
 pub mod streaming;
 
