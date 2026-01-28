@@ -248,6 +248,7 @@ pub fn validate_json_schema(
 }
 
 const INVALID_REQUEST_SCHEMA_CODE: u16 = 1001;
+const INVALID_REQUEST_LIMITS_CODE: u16 = 1004;
 const MAX_SCHEMA_ERRORS: usize = 5;
 
 fn format_schema_errors(errors: &[String]) -> String {
@@ -322,6 +323,193 @@ pub fn validate_output(
             ),
         }),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Payload limits helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Recommended payload limits for connector inputs/outputs.
+///
+/// Defaults are conservative to prevent pathological payloads while remaining
+/// large enough for common connector requests.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Maximum serialized payload size in bytes.
+    pub max_bytes: Option<usize>,
+    /// Maximum number of elements in any array.
+    pub max_array_len: Option<usize>,
+    /// Maximum nesting depth (root = depth 1).
+    pub max_depth: Option<usize>,
+}
+
+impl Limits {
+    /// Default max payload size (256 KiB).
+    pub const DEFAULT_MAX_BYTES: usize = 256 * 1024;
+    /// Default max array length.
+    pub const DEFAULT_MAX_ARRAY_LEN: usize = 1_000;
+    /// Default max nesting depth (root = depth 1).
+    pub const DEFAULT_MAX_DEPTH: usize = 32;
+
+    /// Create limits with all values enabled.
+    #[must_use]
+    pub const fn new(max_bytes: usize, max_array_len: usize, max_depth: usize) -> Self {
+        Self {
+            max_bytes: Some(max_bytes),
+            max_array_len: Some(max_array_len),
+            max_depth: Some(max_depth),
+        }
+    }
+
+    /// Disable all limits (use with caution).
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            max_bytes: None,
+            max_array_len: None,
+            max_depth: None,
+        }
+    }
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self::new(
+            Self::DEFAULT_MAX_BYTES,
+            Self::DEFAULT_MAX_ARRAY_LEN,
+            Self::DEFAULT_MAX_DEPTH,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+enum LimitViolation {
+    BytesExceeded { actual: usize, max: usize },
+    ArrayLenExceeded { path: String, len: usize, max: usize },
+    DepthExceeded { path: String, depth: usize, max: usize },
+}
+
+impl LimitViolation {
+    fn message(&self) -> String {
+        match self {
+            Self::BytesExceeded { actual, max } => format!(
+                "payload size {actual} bytes exceeds limit {max} bytes"
+            ),
+            Self::ArrayLenExceeded { path, len, max } => format!(
+                "array length {len} exceeds limit {max} at {path}"
+            ),
+            Self::DepthExceeded { path, depth, max } => format!(
+                "max depth {max} exceeded at {path} (depth {depth})"
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn format_path(segments: &[PathSegment]) -> String {
+    if segments.is_empty() {
+        return "$".to_string();
+    }
+
+    let mut path = String::from("$");
+    for segment in segments {
+        match segment {
+            PathSegment::Key(key) => {
+                path.push('/');
+                path.push_str(key);
+            }
+            PathSegment::Index(index) => {
+                path.push('/');
+                path.push_str(&index.to_string());
+            }
+        }
+    }
+    path
+}
+
+fn check_limits(
+    value: &serde_json::Value,
+    limits: &Limits,
+    depth: usize,
+    path: &mut Vec<PathSegment>,
+) -> Result<(), LimitViolation> {
+    if let Some(max_depth) = limits.max_depth {
+        if depth > max_depth {
+            return Err(LimitViolation::DepthExceeded {
+                path: format_path(path),
+                depth,
+                max: max_depth,
+            });
+        }
+    }
+
+    match value {
+        serde_json::Value::Array(items) => {
+            if let Some(max_array_len) = limits.max_array_len {
+                if items.len() > max_array_len {
+                    return Err(LimitViolation::ArrayLenExceeded {
+                        path: format_path(path),
+                        len: items.len(),
+                        max: max_array_len,
+                    });
+                }
+            }
+            for (index, item) in items.iter().enumerate() {
+                path.push(PathSegment::Index(index));
+                check_limits(item, limits, depth.saturating_add(1), path)?;
+                path.pop();
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                path.push(PathSegment::Key(key.clone()));
+                check_limits(value, limits, depth.saturating_add(1), path)?;
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Enforce payload size, array length, and depth limits.
+///
+/// # Errors
+/// Returns `FcpError::InvalidRequest` when limits are exceeded.
+pub fn enforce_limits(value: &serde_json::Value, limits: &Limits) -> Result<(), FcpError> {
+    if let Some(max_bytes) = limits.max_bytes {
+        let size = serde_json::to_vec(value).map_err(|e| FcpError::Internal {
+            message: format!("failed to measure payload size: {e}"),
+        })?;
+        if size.len() > max_bytes {
+            return Err(FcpError::InvalidRequest {
+                code: INVALID_REQUEST_LIMITS_CODE,
+                message: LimitViolation::BytesExceeded {
+                    actual: size.len(),
+                    max: max_bytes,
+                }
+                .message(),
+            });
+        }
+    }
+
+    if limits.max_array_len.is_some() || limits.max_depth.is_some() {
+        let mut path = Vec::new();
+        if let Err(violation) = check_limits(value, limits, 1, &mut path) {
+            return Err(FcpError::InvalidRequest {
+                code: INVALID_REQUEST_LIMITS_CODE,
+                message: violation.message(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

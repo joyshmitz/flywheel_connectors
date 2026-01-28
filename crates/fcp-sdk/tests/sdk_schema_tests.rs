@@ -615,6 +615,80 @@ mod schema_validation_helper_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Limits Helper Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod limits_helper_tests {
+    use super::*;
+
+    #[test]
+    fn default_limits_allow_small_payload() {
+        let value = json!({ "ok": true });
+        enforce_limits(&value, &Limits::default()).expect("small payload should pass");
+    }
+
+    #[test]
+    fn limits_reject_max_bytes() {
+        let value = json!({ "message": "this is definitely longer than ten bytes" });
+        let limits = Limits {
+            max_bytes: Some(10),
+            max_array_len: None,
+            max_depth: None,
+        };
+
+        let err = enforce_limits(&value, &limits).expect_err("payload should exceed size limit");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("payload size"));
+                assert!(message.contains("exceeds limit"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limits_reject_array_length() {
+        let value = json!([1, 2, 3]);
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: Some(2),
+            max_depth: Some(8),
+        };
+
+        let err = enforce_limits(&value, &limits).expect_err("array should exceed length limit");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("array length"));
+                assert!(message.contains("$"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limits_reject_depth() {
+        let value = json!({ "a": { "b": { "c": 1 } } });
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: None,
+            max_depth: Some(2),
+        };
+
+        let err = enforce_limits(&value, &limits).expect_err("payload should exceed depth limit");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("max depth"));
+                assert!(message.contains("$/a/b"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Schema Evolution Tests (V2-only patterns)
 // ─────────────────────────────────────────────────────────────────────────────
 
