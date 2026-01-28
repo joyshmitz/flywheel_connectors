@@ -4,6 +4,7 @@
 //! - [`SupervisorConfig`]: Configuration for backoff, retry budgets, and lifecycle management
 //! - [`StreamingSession`]: Trait for streaming connectors to manage session state
 //! - [`PollingCursor`]: Trait for polling connectors to manage cursor/offset state
+//! - [`CursorStore`]: Mesh-backed cursor state helper for polling connectors
 //! - [`HealthTracker`]: Health state machine with transition rules
 //!
 //! # Design Principles
@@ -29,11 +30,15 @@
 //! }
 //! ```
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use fcp_core::{HealthSnapshot, HealthState};
+use fcp_core::{
+    ConnectorId, ConnectorStateObject, CursorState, HealthSnapshot, HealthState, InstanceId,
+    ObjectHeader, ObjectId, Signature, ZoneId,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SupervisorConfig
@@ -490,6 +495,265 @@ impl PollingCursor for InMemoryPollingCursor {
     fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // In-memory: nothing to restore
         Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CursorStore (mesh-backed cursor state helper)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lease metadata required for cursor state writes.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorLease {
+    /// Fencing token from the authorizing lease.
+    pub lease_seq: u64,
+    /// Lease object ID granting write authority.
+    pub lease_object_id: ObjectId,
+}
+
+/// Errors returned by cursor store operations.
+#[derive(Debug, thiserror::Error)]
+pub enum CursorStoreError {
+    /// Underlying storage failed.
+    #[error("cursor store backend error: {0}")]
+    Storage(String),
+
+    /// Lease fencing token regressed.
+    #[error("stale lease_seq (current {current}, incoming {incoming})")]
+    StaleLeaseSeq {
+        /// Current lease sequence.
+        current: u64,
+        /// Incoming lease sequence.
+        incoming: u64,
+    },
+
+    /// Offset moved backwards.
+    #[error("offset regression (current {current}, incoming {incoming})")]
+    OffsetRegression {
+        /// Current offset value.
+        current: i64,
+        /// Incoming offset value.
+        incoming: i64,
+    },
+
+    /// Watermark moved backwards.
+    #[error("watermark regression (current {current}, incoming {incoming})")]
+    WatermarkRegression {
+        /// Current watermark.
+        current: u64,
+        /// Incoming watermark.
+        incoming: u64,
+    },
+
+    /// Cursor encoding failed.
+    #[error("cursor encoding failed: {0}")]
+    CursorEncoding(String),
+
+    /// Cursor decoding failed.
+    #[error("cursor decoding failed: {0}")]
+    CursorDecoding(String),
+}
+
+/// Backend for storing and retrieving connector state objects.
+pub trait CursorStoreBackend: Send + Sync {
+    /// Load the latest state object (head) and its object id.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError::Storage`] if the backend cannot load state.
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError>;
+
+    /// Persist a new state object and return its object id.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError::Storage`] if the backend cannot persist state.
+    fn store_state_object(&self, state: ConnectorStateObject)
+    -> Result<ObjectId, CursorStoreError>;
+}
+
+/// Cursor store helper that builds lease-fenced state objects.
+#[derive(Debug)]
+pub struct CursorStore<B: CursorStoreBackend> {
+    backend: B,
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    instance_id: Option<InstanceId>,
+    head: Option<ObjectId>,
+    seq: u64,
+    last_cursor: Option<CursorState>,
+    last_lease_seq: u64,
+}
+
+impl<B: CursorStoreBackend> CursorStore<B> {
+    /// Create a new cursor store helper.
+    pub const fn new(backend: B, connector_id: ConnectorId, zone_id: ZoneId) -> Self {
+        Self {
+            backend,
+            connector_id,
+            zone_id,
+            instance_id: None,
+            head: None,
+            seq: 0,
+            last_cursor: None,
+            last_lease_seq: 0,
+        }
+    }
+
+    /// Attach an instance id to state objects produced by this store.
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: InstanceId) -> Self {
+        self.instance_id = Some(instance_id);
+        self
+    }
+
+    /// Load the latest cursor state from the backend.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError`] if the backend fails or the cursor payload is invalid.
+    pub fn load_cursor(&mut self) -> Result<Option<CursorState>, CursorStoreError> {
+        let Some((head_id, head)) = self.backend.load_head()? else {
+            return Ok(None);
+        };
+
+        let cursor = CursorState::from_cbor(&head.state_cbor)
+            .map_err(|err| CursorStoreError::CursorDecoding(err.to_string()))?;
+
+        self.head = Some(head_id);
+        self.seq = head.seq;
+        self.last_cursor = Some(cursor.clone());
+        self.last_lease_seq = head.lease_seq;
+
+        Ok(Some(cursor))
+    }
+
+    /// Commit a new cursor state, enforcing lease fencing and monotonic rules.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError`] if monotonicity checks fail, the cursor cannot be
+    /// encoded, or the backend cannot persist the state object.
+    pub fn commit_cursor(
+        &mut self,
+        cursor: CursorState,
+        mut header: ObjectHeader,
+        lease: CursorLease,
+        signature: Signature,
+    ) -> Result<ObjectId, CursorStoreError> {
+        self.validate_commit(&cursor, lease.lease_seq)?;
+
+        if !header.refs.contains(&lease.lease_object_id) {
+            header.refs.push(lease.lease_object_id);
+        }
+
+        let state_cbor = cursor
+            .to_cbor()
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+
+        let next_seq = if self.head.is_some() { self.seq + 1 } else { 0 };
+        let prev = self.head;
+
+        let updated_at = header.created_at;
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: self.connector_id.clone(),
+            instance_id: self.instance_id.clone(),
+            zone_id: self.zone_id.clone(),
+            prev,
+            seq: next_seq,
+            state_cbor,
+            updated_at,
+            lease_seq: lease.lease_seq,
+            lease_object_id: lease.lease_object_id,
+            signature,
+        };
+
+        let object_id = self.backend.store_state_object(state_obj)?;
+        self.head = Some(object_id);
+        self.seq = next_seq;
+        self.last_cursor = Some(cursor);
+        self.last_lease_seq = lease.lease_seq;
+
+        Ok(object_id)
+    }
+
+    /// Return the current head object id, if any.
+    #[must_use]
+    pub const fn head(&self) -> Option<ObjectId> {
+        self.head
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    fn validate_commit(
+        &self,
+        cursor: &CursorState,
+        lease_seq: u64,
+    ) -> Result<(), CursorStoreError> {
+        if lease_seq < self.last_lease_seq {
+            return Err(CursorStoreError::StaleLeaseSeq {
+                current: self.last_lease_seq,
+                incoming: lease_seq,
+            });
+        }
+
+        if let Some(previous) = &self.last_cursor {
+            if let (Some(current), Some(incoming)) = (previous.offset, cursor.offset)
+                && incoming < current
+            {
+                return Err(CursorStoreError::OffsetRegression { current, incoming });
+            }
+
+            if let (Some(current), Some(incoming)) = (previous.watermark, cursor.watermark)
+                && incoming < current
+            {
+                return Err(CursorStoreError::WatermarkRegression { current, incoming });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// In-memory cursor store backend for tests and local development.
+#[derive(Debug, Default)]
+pub struct InMemoryCursorStoreBackend {
+    state: Mutex<InMemoryCursorStoreState>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryCursorStoreState {
+    next_id: u64,
+    objects: Vec<(ObjectId, ConnectorStateObject)>,
+}
+
+impl InMemoryCursorStoreBackend {
+    /// Create a new in-memory backend.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl CursorStoreBackend for InMemoryCursorStoreBackend {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CursorStoreError::Storage("cursor store mutex poisoned".into()))?;
+        Ok(state.objects.last().cloned())
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CursorStoreError::Storage("cursor store mutex poisoned".into()))?;
+        let byte = u8::try_from(state.next_id % 256).unwrap_or(0);
+        let object_id = ObjectId::from_bytes([byte; 32]);
+        state.next_id = state.next_id.wrapping_add(1);
+        state.objects.push((object_id, state_obj));
+        drop(state);
+        Ok(object_id)
     }
 }
 

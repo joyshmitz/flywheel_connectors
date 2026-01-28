@@ -219,6 +219,25 @@ pub struct ConnectorStateDelta {
 }
 ```
 
+**Cursor State Schema (NORMATIVE for polling connectors):**
+
+Polling connectors SHOULD store cursor/offset state in `ConnectorStateObject.state_cbor` using
+canonical CBOR (no schema hash prefix). The canonical schema is:
+
+```rust
+/// Canonical cursor state payload (stored in ConnectorStateObject.state_cbor)
+pub struct CursorState {
+    pub offset: Option<i64>,        // e.g., update_id + 1
+    pub last_seen_id: Option<String>,
+    pub watermark: Option<u64>,     // Unix seconds
+}
+```
+
+**Monotonicity rules:**
+- `offset` MUST be non-decreasing.
+- `watermark` MUST be non-decreasing if present.
+- `last_seen_id` SHOULD only move forward per connector-specific ordering.
+
 **Single-Writer Semantics (NORMATIVE):**
 
 For any connector declaring `singleton_writer = true` in its manifest, the MeshNode MUST ensure

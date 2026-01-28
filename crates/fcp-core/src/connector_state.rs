@@ -21,6 +21,7 @@
 //! - Fork detection MUST pause connector execution and require resolution
 //! - Snapshots enable compaction of older state objects
 
+use fcp_cbor::{SerializationError, to_canonical_cbor};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -472,6 +473,74 @@ pub struct ConnectorStateSnapshot {
 
     /// Ed25519 signature over the canonical snapshot.
     pub signature: Signature,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cursor State Schema (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Canonical cursor state payload for polling connectors (NORMATIVE).
+///
+/// This struct defines the canonical schema stored inside
+/// [`ConnectorStateObject::state_cbor`] for cursor/offset-based polling.
+///
+/// # Monotonicity Rules
+/// - `offset` MUST be monotonic (non-decreasing).
+/// - `watermark` MUST be monotonic if used (typically a Unix timestamp).
+/// - `last_seen_id` SHOULD only advance forward (connector-specific ordering).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorState {
+    /// Numeric offset (e.g., `update_id` + 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
+
+    /// Last seen identifier (e.g., message id, history id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_id: Option<String>,
+
+    /// Watermark timestamp (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<u64>,
+}
+
+impl CursorState {
+    /// Encode this cursor state as canonical CBOR (no schema hash prefix).
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical CBOR encoding fails.
+    pub fn to_cbor(&self) -> Result<Vec<u8>, SerializationError> {
+        to_canonical_cbor(self)
+    }
+
+    /// Decode cursor state from canonical CBOR.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if decoding fails, if trailing bytes are
+    /// present, or if the encoding is not canonical.
+    pub fn from_cbor(bytes: &[u8]) -> Result<Self, SerializationError> {
+        let mut reader = bytes;
+        let decoded: Self = ciborium::de::from_reader(&mut reader)?;
+        if !reader.is_empty() {
+            return Err(SerializationError::TrailingBytes);
+        }
+
+        let canonical = to_canonical_cbor(&decoded)?;
+        if canonical != bytes {
+            return Err(SerializationError::NonCanonicalEncoding);
+        }
+
+        Ok(decoded)
+    }
+}
+
+/// Decode a cursor state from a connector state object.
+///
+/// # Errors
+/// Returns a [`SerializationError`] if the embedded `state_cbor` is invalid.
+pub fn cursor_state_from_object(
+    state_obj: &ConnectorStateObject,
+) -> Result<CursorState, SerializationError> {
+    CursorState::from_cbor(&state_obj.state_cbor)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1012,6 +1081,9 @@ impl SnapshotConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Provenance, TaintLevel};
+    use fcp_cbor::SchemaId;
+    use semver::Version;
 
     // ─────────────────────────────────────────────────────────────────────────
     // CrdtType Tests
@@ -1079,6 +1151,113 @@ mod tests {
     fn connector_state_model_default_is_stateless() {
         let model = ConnectorStateModel::default();
         assert!(model.is_stateless());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CursorState Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_state_cbor_roundtrip() {
+        let state = CursorState {
+            offset: Some(42),
+            last_seen_id: Some("msg_123".to_string()),
+            watermark: Some(1_700_000_000),
+        };
+
+        let encoded = state.to_cbor().unwrap();
+        let decoded = CursorState::from_cbor(&encoded).unwrap();
+
+        assert_eq!(state, decoded);
+    }
+
+    #[test]
+    fn cursor_state_cbor_deterministic() {
+        let state = CursorState {
+            offset: Some(7),
+            last_seen_id: Some("cursor_abc".to_string()),
+            watermark: Some(1_700_000_111),
+        };
+
+        let encoded1 = state.to_cbor().unwrap();
+        let encoded2 = state.to_cbor().unwrap();
+
+        assert_eq!(encoded1, encoded2);
+    }
+
+    #[test]
+    fn cursor_state_cbor_golden_vector() {
+        let state = CursorState {
+            offset: Some(1),
+            last_seen_id: Some("a".to_string()),
+            watermark: Some(2),
+        };
+
+        let encoded = state.to_cbor().unwrap();
+        let expected =
+            hex::decode("a3666f6666736574016977617465726d61726b026c6c6173745f7365656e5f69646161")
+                .unwrap();
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn cursor_state_from_cbor_rejects_trailing_bytes() {
+        let state = CursorState {
+            offset: Some(9),
+            last_seen_id: Some("trail".to_string()),
+            watermark: Some(3),
+        };
+
+        let mut encoded = state.to_cbor().unwrap();
+        encoded.push(0x00);
+
+        let err = CursorState::from_cbor(&encoded).unwrap_err();
+        assert!(matches!(err, SerializationError::TrailingBytes));
+    }
+
+    #[test]
+    fn cursor_state_from_object_uses_state_cbor() {
+        let state = CursorState {
+            offset: Some(100),
+            last_seen_id: Some("last_id".to_string()),
+            watermark: Some(1_700_000_222),
+        };
+        let state_cbor = state.to_cbor().unwrap();
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "CursorState", Version::new(1, 0, 0)),
+            zone_id: ZoneId::work(),
+            created_at: 0,
+            provenance: Provenance {
+                origin_zone: ZoneId::work(),
+                chain: Vec::new(),
+                taint: TaintLevel::Untainted,
+                elevated: false,
+                elevation_token: None,
+            },
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 1,
+            state_cbor,
+            updated_at: 1_700_000_000,
+            lease_seq: 1,
+            lease_object_id: test_object_id("lease"),
+            signature: Signature::zero(),
+        };
+
+        let decoded = cursor_state_from_object(&state_obj).unwrap();
+        assert_eq!(decoded, state);
     }
 
     #[test]

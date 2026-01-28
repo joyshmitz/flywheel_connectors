@@ -2093,10 +2093,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "fcp-cbor",
  "fcp-core",
  "fcp-manifest",
  "futures-util",
  "jsonschema",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.17",

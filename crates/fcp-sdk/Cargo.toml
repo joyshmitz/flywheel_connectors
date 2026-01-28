@@ -27,3 +27,5 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+fcp-cbor = { path = "../fcp-cbor" }
+semver = { workspace = true }

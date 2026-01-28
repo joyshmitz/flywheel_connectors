@@ -56,7 +56,7 @@ pub use crate::Principal;
 
 // Archetypes and state models
 pub use crate::{
-    ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel,
+    ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel, CursorState,
 };
 
 // Streaming helpers
@@ -66,9 +66,10 @@ pub use crate::streaming::{
 
 // Runtime supervision helpers
 pub use crate::runtime::{
-    HealthTracker, HealthTransition, InMemoryPollingCursor, InMemoryStreamingSession, PollResult,
-    PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingSession, SupervisorConfig,
-    SupervisorOutcome,
+    CursorLease, CursorStore, CursorStoreBackend, CursorStoreError, HealthTracker,
+    HealthTransition, InMemoryCursorStoreBackend, InMemoryPollingCursor, InMemoryStreamingSession,
+    PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingSession,
+    SupervisorConfig, SupervisorOutcome,
 };
 
 // Schema validation helpers

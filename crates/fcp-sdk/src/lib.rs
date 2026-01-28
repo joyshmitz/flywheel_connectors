@@ -76,6 +76,7 @@ pub use fcp_core::{
     // Cost and availability
     CostEstimate,
     CurrencyCost,
+    CursorState,
     // Error types
     ErrorCategory,
     // Events
