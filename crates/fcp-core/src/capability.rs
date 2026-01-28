@@ -1068,6 +1068,7 @@ impl CapabilityVerifier {
     pub fn verify(
         &self,
         token: &CapabilityToken,
+        required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
     ) -> FcpResult<CwtClaims> {
@@ -1110,9 +1111,14 @@ impl CapabilityVerifier {
             // Deserialize CapabilityGrant array
             let grants: Vec<CapabilityGrant> = Self::deserialize_cbor(caps_val)?;
 
-            let op_allowed = grants
-                .iter()
-                .any(|g| g.operation.as_ref().is_none_or(|op| op == operation));
+            let op_allowed = grants.iter().any(|g| {
+                // Must match the required capability
+                if g.capability != *required_capability {
+                    return false;
+                }
+                // Must match the operation (or be a wildcard)
+                g.operation.as_ref().is_none_or(|op| op == operation)
+            });
 
             if !op_allowed {
                 return Err(FcpError::OperationNotGranted {
@@ -1124,6 +1130,19 @@ impl CapabilityVerifier {
             // The builder uses fcp2_claims::OPERATIONS for string list.
             // Let's check that too.
             if let Some(ops_val) = claims.get(fcp2_claims::OPERATIONS) {
+                // Check if the token is for the required capability
+                if let Some(cap_id) = claims.get_capability_id() {
+                    if cap_id != required_capability.as_str() {
+                        return Err(FcpError::OperationNotGranted {
+                            operation: operation.0.clone(),
+                        });
+                    }
+                } else {
+                    return Err(FcpError::MissingField {
+                        field: "cap_id".into(),
+                    });
+                }
+
                 // Array of strings
                 let ops: Vec<String> = Self::deserialize_cbor(ops_val)?;
                 if !ops.contains(&operation.0) {
@@ -1596,12 +1615,45 @@ mod tests {
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
 
         let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
 
         let claims = verifier
-            .verify(&token, &op, &[])
+            .verify(&token, &cap, &op, &[])
             .expect("Verification failed");
 
         assert_eq!(claims.get_capability_id(), Some("cap.test"));
+    }
+
+    #[test]
+    fn verify_rejects_capability_mismatch() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        // Token grants "cap.benign" with operations "op.test"
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.benign")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken { raw: cose_token };
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        
+        let op = OperationId::new("op.test").unwrap();
+        // We TRY to use "cap.critical"
+        let required_cap = CapabilityId::new("cap.critical").unwrap();
+
+        let result = verifier.verify(&token, &required_cap, &op, &[]);
+        
+        // Should fail because token has "cap.benign", but we needed "cap.critical"
+        // even though the operation "op.test" matched the list!
+        assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
     }
 
     #[test]
@@ -1624,8 +1676,9 @@ mod tests {
         let token = CapabilityToken { raw: cose_token };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::ZoneViolation { .. })));
     }
 
@@ -1649,8 +1702,9 @@ mod tests {
         let token = CapabilityToken { raw: cose_token };
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
     }
 
