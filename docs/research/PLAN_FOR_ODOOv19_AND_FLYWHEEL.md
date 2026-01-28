@@ -10,13 +10,24 @@
 
 Цей документ описує план інтеграції Odoo v19 з FCP (Flywheel Connector Protocol) через створення `fcp-odoo` connector.
 
-**Ключові інсайти v2.0:**
+**Ключові інсайти v2.1:**
 - Odoo v19 Quality API = **Enterprise Process Quality Framework** (не тільки виробництво)
 - **Process Decomposition:** Operations + Gates + Decisions
 - **Policy Profiles:** Автоматизація залежить від типу підприємства (ФОП/ТОВ/ПАТ)
 - **Operations як Skills:** Атомарні, автоматизовані дії
+- **FCP PostureAttestation** → Enterprise Posture через `Custom()` extension (NEW v2.1)
+- **Shamir's Secret Sharing** → Quorum Gates через `fcp-crypto` (NEW v2.1)
+- **Policy Simulation** → `fcp policy simulate` для тестування (NEW v2.1)
 
 **Мета:** Забезпечити безпечну, policy-aware взаємодію AI-асистентів з Odoo v19.
+
+### FCP Modules (Code-Verified)
+
+| Module | Path | Relevance |
+|--------|------|-----------|
+| posture.rs | `crates/fcp-core/src/posture.rs` | `PostureAttributeKey::Custom()` for Enterprise Type |
+| shamir.rs | `crates/fcp-crypto/src/shamir.rs` | k-of-n threshold for Quorum Gates |
+| policy/mod.rs | `crates/fcp-cli/src/policy/mod.rs` | `fcp policy simulate` command |
 
 ---
 
@@ -64,6 +75,14 @@
 | Імплементувати TovGeneral profile | High | 1 день |
 | Імплементувати PatPublic profile | Medium | 1 день |
 | Написати profile tests | High | 1 день |
+| Інтегрувати PostureAttestation::Custom() | High | 1 день |
+
+**FCP Integration Note (v2.1):**
+```rust
+// Use existing PostureAttributeKey::Custom() for Enterprise Type
+PostureAttributeKey::Custom("ua.enterprise.type".into())
+// Values: "fop", "tov", "pat"
+```
 
 **Acceptance Criteria:**
 - [ ] `cargo build` проходить
@@ -224,6 +243,17 @@ operations:
 | Phase Gate → ZoneCheckpoint mapping | High | 3 дні |
 | Quorum signature per enterprise type | High | 3 дні |
 | Checkpoint verification | High | 2 дні |
+| Shamir integration for k-of-n gates | High | 2 дні |
+
+**FCP Integration Note (v2.1):**
+```rust
+// Use existing fcp-crypto Shamir for quorum gates
+use fcp_crypto::shamir::{split_secret, reconstruct_secret};
+
+// ПАТ: 3-of-5 quorum for critical approvals
+let shares = split_secret(&gate_token, 3, 5)?;
+// Distribute to: QA, Manager, Director, Auditor, Compliance
+```
 
 #### 6.2 Enterprise Type Migration
 
@@ -310,6 +340,9 @@ operations:
 | **Rate limiting** | fcp-sdk/ratelimit | Upstream модуль, готовий до використання |
 | **Lifecycle** | fcp-core/lifecycle | Canary deployments, health tracking |
 | **Connector pattern** | anthropic референс | JSON-RPC protocol loop, BaseConnector |
+| Enterprise type encoding | PostureAttestation::Custom() | Native FCP extension point (v2.1) |
+| Quorum implementation | Shamir k-of-n | Existing fcp-crypto module (v2.1) |
+| Policy testing | `fcp policy simulate` | No execution side effects (v2.1) |
 
 ### 3.2 Closed Questions (v2.1)
 
@@ -318,6 +351,9 @@ operations:
 | Який API використовувати? | JSON-2 API | XML-RPC/JSON-RPC deprecated, видалення в Odoo 20 |
 | Чи використовувати fcp-graphql? | НІ | Odoo не має GraphQL API |
 | Connector base | BaseConnector | З fcp-core, референс anthropic connector |
+| How to encode enterprise type? | `PostureAttributeKey::Custom()` | posture.rs |
+| How to implement quorum gates? | Shamir k-of-n from fcp-crypto | shamir.rs |
+| How to test policies safely? | `fcp policy simulate` command | policy/mod.rs |
 
 ### 3.3 Open Questions
 
@@ -390,6 +426,32 @@ tests/
 | Operations | 85% |
 | Integration | 80% |
 
+### 5.3 Policy Simulation Testing (NEW v2.1)
+
+**Use `fcp policy simulate` for testing:**
+
+```bash
+# Test ФОП profile - should auto-approve quality check
+fcp policy simulate \
+  --connector=fcp.odoo \
+  --operation=quality.check.create \
+  --posture='{"ua.enterprise.type":"fop"}' \
+  --zone=z:work
+
+# Test ПАТ profile - should require gate
+fcp policy simulate \
+  --connector=fcp.odoo \
+  --operation=quality.check.create \
+  --posture='{"ua.enterprise.type":"pat"}' \
+  --zone=z:work
+```
+
+| Scenario | Expected for ФОП | Expected for ПАТ |
+|----------|------------------|------------------|
+| quality.check.create | Auto | Gate Required |
+| capa.approve | Gate (1) | Gate (3-of-5) |
+| payment.execute | Auto | Gate Required |
+
 ---
 
 ## 6. Risk Management
@@ -436,7 +498,7 @@ Phase 6: Advanced     [                    ]   0%
 |------|---------|--------|
 | 2026-01-27 | 1.0.0 | Initial plan |
 | 2026-01-27 | 2.0.0 | Added Process Decomposition, Policy Profiles, Enterprise Types |
-| 2026-01-28 | 2.1.0 | JSON-2 API (факт), upstream модулі integration, architecture decisions |
+| 2026-01-28 | 2.1.0 | JSON-2 API, upstream modules, FCP module mappings (PostureAttestation, Shamir, Policy Simulate) |
 
 ---
 
@@ -480,4 +542,4 @@ Phase 6: Advanced     [                    ]   0%
 
 *Plan updated: 2026-01-28*
 *Version: 2.1.0*
-*Key changes: JSON-2 API decision, upstream modules integration, flywheel ecosystem overview*
+*Key changes: JSON-2 API, upstream modules, FCP module mappings, flywheel ecosystem overview*

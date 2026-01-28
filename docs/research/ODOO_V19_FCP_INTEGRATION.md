@@ -36,6 +36,15 @@ z:community = 40   (командна робота)
 z:public    = 20   (публічні API)
 ```
 
+**Релевантні модулі FCP (станом на 2026-01-28):**
+
+| Модуль | Призначення | Релевантність для Odoo |
+|--------|-------------|------------------------|
+| `fcp-core/posture.rs` | Device Posture Attestation | Розширюється на Enterprise Posture |
+| `fcp-core/policy.rs` | Policy Simulation | Тестування Profile gates |
+| `fcp-crypto/shamir.rs` | Shamir's Secret Sharing k-of-n | Quorum для ПАТ approval gates |
+| `fcp-cli policy simulate` | CLI для симуляції policy decisions | Валідація без виконання |
+
 ### 1.2 Odoo v19 Quality API - Enterprise Process Quality Framework
 
 **Призначення:** Система управління якістю **ВСІХ бізнес-процесів підприємства** на основі циклу Plan-Do-Check-Act.
@@ -244,6 +253,59 @@ odoo.tax.classify = true         # Gate: головбух
 odoo.audit.sign = true           # Gate: аудитор
 odoo.board.approve = true        # Gate: наглядова рада
 ```
+
+### 3.4 FCP PostureAttestation → Enterprise Posture
+
+**Факт:** `fcp-core/posture.rs` (767 рядків) реалізує Device Posture Attestation. Цю систему можна розширити на Enterprise Posture.
+
+**Існуючі PostureAttributeKey:**
+```rust
+pub enum PostureAttributeKey {
+    OsType, OsVersion, DiskEncryption, FirewallEnabled,
+    ScreenLockEnabled, ScreenLockTimeout, AntivirusActive,
+    DeviceManaged, SecureBootEnabled, TpmPresent,
+    Custom(String)  // ← Точка розширення
+}
+```
+
+**Маппінг на Enterprise Posture:**
+```rust
+// Використання Custom для enterprise attributes
+PostureAttributeKey::Custom("enterprise_type")     // "fop" | "tov" | "pat"
+PostureAttributeKey::Custom("tax_system")          // "simplified" | "general"
+PostureAttributeKey::Custom("accounting_standard") // "cash" | "accrual"
+PostureAttributeKey::Custom("audit_required")      // bool
+PostureAttributeKey::Custom("ecp_enabled")         // bool (електронний цифровий підпис)
+```
+
+**PostureRequirements для Policy Profile:**
+```rust
+// Приклад: вимоги для ТОВ на загальній системі
+let tov_requirements = PostureRequirements::builder()
+    .require_custom("enterprise_type", "tov")
+    .require_custom("tax_system", "general")
+    .require_custom("ecp_enabled", true)
+    .build();
+```
+
+### 3.5 Shamir's Secret Sharing для Quorum Gates
+
+**Факт:** `fcp-crypto/shamir.rs` (1181 рядків) реалізує k-of-n secret sharing.
+
+**Застосування для ПАТ approval gates:**
+```
+Quorum для Phase Gate (ПАТ):
+- k = 3 (мінімум підписів)
+- n = 5 (всього учасників: QA, Ops, Finance, Legal, Director)
+
+split_secret(decision_key, k=3, n=5) → 5 shares
+reconstruct_secret([share_qa, share_ops, share_finance]) → decision_key
+```
+
+**Переваги:**
+- Жоден учасник не може самостійно затвердити
+- Криптографічно гарантований quorum
+- Audit trail через ZoneCheckpoint
 
 ---
 
@@ -507,7 +569,47 @@ impl OdooClient {
 }
 ```
 
-### 5.3 Operations Map
+### 5.3 Gateway Patterns (flywheel_gateway референс)
+
+**Факт:** flywheel_gateway (коміт c4d9d93) містить патерни, релевантні для fcp-odoo:
+
+| Файл | Патерн | Застосування в Odoo |
+|------|--------|---------------------|
+| `agent-state-machine.ts` | `hasAgentState()` + перевірка дублікатів | Gate state machine |
+| `checkpoint.ts` | `transferCheckpoint(id, targetAgentId)` | Gate ownership transfer |
+| `handoff-transfer.service.ts` | Реальна імплементація (не stub) | Gate handoff між операторами |
+| `dashboard.service.ts` | SQLite/Drizzle ORM замість Map | Gate state persistence |
+| `mcp-agentmail.ts` | Повертає error details замість throw | Error handling для gates |
+
+**Патерн transferCheckpoint:**
+```typescript
+// apps/gateway/src/services/checkpoint.ts
+export async function transferCheckpoint(
+  checkpointId: string,
+  targetAgentId: string,
+): Promise<void> {
+  await db.update(checkpointsTable)
+    .set({ agentId: targetAgentId })
+    .where(eq(checkpointsTable.id, checkpointId));
+}
+```
+
+**Патерн hasAgentState:**
+```typescript
+// apps/gateway/src/services/agent-state-machine.ts
+export function hasAgentState(agentId: string): boolean {
+  return agentStates.has(agentId);
+}
+
+export function initializeAgentState(agentId: string): AgentStateRecord {
+  if (agentStates.has(agentId)) {
+    throw new Error(`Agent state already exists for ${agentId}`);
+  }
+  // ...
+}
+```
+
+### 5.4 Operations Map
 
 | Domain | Operation | Capability | Can be Skill? |
 |--------|-----------|------------|---------------|
@@ -732,6 +834,39 @@ let state_model = ConnectorStateModel::Crdt {
 8. Done - 3 human gates
 ```
 
+### 6.4 Сценарій: Policy Simulation перед deployment
+
+**Факт:** `fcp policy simulate` дозволяє тестувати policy decisions без виконання.
+
+**Використання:**
+```bash
+# Симулювати approval для ТОВ
+fcp policy simulate --input policy_test.json
+
+# policy_test.json
+{
+  "zone_policy": {
+    "zone_id": "z:work",
+    "enterprise_type": "TOV_general",
+    "gates": ["accounting_entry", "tax_classification"]
+  },
+  "invoke_request": {
+    "operation": "stock.accounting",
+    "principal": "ai_agent_001"
+  }
+}
+```
+
+**Результат:** `DecisionReceipt` без реального виконання:
+```json
+{
+  "decision": "GATE_REQUIRED",
+  "gate": "accounting_entry",
+  "required_role": "accountant",
+  "simulation": true
+}
+```
+
 ---
 
 ## 7. Проблеми, які вирішує інтеграція
@@ -924,16 +1059,29 @@ Phase Gates автоматично створюють immutable checkpoints з q
 
 ---
 
-## 12. Change Log
+## 12. Відповіді на питання (з досліджень коду)
+
+### З аналізу fcp-core та flywheel_gateway (2026-01-28):
+
+| Питання | Відповідь | Джерело |
+|---------|-----------|---------|
+| Як реалізувати Enterprise Type? | Через `PostureAttributeKey::Custom()` | `fcp-core/posture.rs` |
+| Як реалізувати quorum для ПАТ? | Shamir's Secret Sharing k-of-n | `fcp-crypto/shamir.rs` |
+| Як тестувати Policy Profiles? | `fcp policy simulate` | `fcp-cli/policy/mod.rs` |
+| Як персистувати Gate state? | SQLite/Drizzle (не Map) | `gateway/dashboard.service.ts` |
+| Як transfer Gate ownership? | `transferCheckpoint()` | `gateway/checkpoint.ts` |
+| Як перевіряти існування state? | `hasAgentState()` перед init | `gateway/agent-state-machine.ts` |
+
+## 13. Change Log
 
 | Дата | Версія | Зміни |
 |------|--------|-------|
 | 2026-01-27 | 1.0.0 | Початкове дослідження |
 | 2026-01-27 | 2.0.0 | Process Decomposition, Policy Profiles, Enterprise Types |
-| 2026-01-28 | 2.1.0 | Інтеграція upstream модулів, факти про Odoo API, архітектура на основі існуючих connectors |
+| 2026-01-28 | 2.1.0 | Інтеграція upstream модулів, факти про Odoo API, архітектура на основі існуючих connectors, FCP module mappings, Gateway patterns |
 
 ---
 
 *Документ оновлено: 2026-01-28*
 *Версія: 2.1.0*
-*Ключові зміни: Odoo JSON-2 API (факт), інтеграція fcp-sdk/ratelimit, fcp-core/lifecycle, connector pattern з anthropic референсу*
+*Ключові зміни v2.1: JSON-2 API Client, upstream modules, FCP Posture mapping, Shamir quorum, Gateway patterns, Policy Simulation*

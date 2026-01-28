@@ -1,7 +1,7 @@
 # AGENTS.md - Odoo v19 + FCP Integration Project
 
-**Версія:** 2.0.0
-**Дата:** 2026-01-27
+**Версія:** 2.1.0
+**Дата:** 2026-01-28
 
 ---
 
@@ -103,6 +103,14 @@ Automatable = CAN ∧ SHOULD ∧ ¬HAS_BLOCKING_GATE
 - Capabilities (криптографічні дозволи)
 - OperationReceipt (ідемпотентність)
 - ZoneCheckpoint (audit trail)
+
+**Релевантні модулі FCP (NEW v2.1):**
+
+| Модуль | Файл | Застосування |
+|--------|------|--------------|
+| PostureAttestation | `fcp-core/posture.rs` | Enterprise Type через `Custom()` |
+| PolicySimulation | `fcp-core/policy.rs` | Тестування gates без виконання |
+| ShamirSecretSharing | `fcp-crypto/shamir.rs` | Quorum k-of-n для ПАТ |
 
 ### 2. Розуміння Odoo v19 Quality API
 
@@ -390,6 +398,85 @@ impl Gate {
 }
 ```
 
+### Pattern 4: Gateway Patterns (NEW v2.1)
+
+**Референс:** `flywheel_gateway` (коміт c4d9d93)
+
+```typescript
+// Pattern: State existence check before init
+// Файл: agent-state-machine.ts
+export function hasAgentState(agentId: string): boolean {
+  return agentStates.has(agentId);
+}
+
+export function initializeAgentState(agentId: string): AgentStateRecord {
+  if (agentStates.has(agentId)) {
+    throw new Error(`Agent state already exists for ${agentId}`);
+  }
+  // ...
+}
+```
+
+```typescript
+// Pattern: Checkpoint ownership transfer
+// Файл: checkpoint.ts
+export async function transferCheckpoint(
+  checkpointId: string,
+  targetAgentId: string,
+): Promise<void> {
+  const result = await db
+    .update(checkpointsTable)
+    .set({ agentId: targetAgentId })
+    .where(eq(checkpointsTable.id, checkpointId))
+    .returning({ id: checkpointsTable.id });
+
+  if (result.length === 0) {
+    throw new CheckpointError("CHECKPOINT_NOT_FOUND", `...`);
+  }
+}
+```
+
+```typescript
+// Pattern: Safe stream reading with limits
+// Файл: rch.service.ts
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+
+async function readStreamSafe(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+): Promise<string> {
+  // Prevents memory exhaustion from large outputs
+  // ...
+}
+```
+
+### Pattern 5: Enterprise Posture (NEW v2.1)
+
+```rust
+// Використання fcp-core/posture.rs для Enterprise Type
+use fcp_core::{PostureAttributeKey, PostureRequirements};
+
+let enterprise_posture = PostureRequirements::builder()
+    .require_custom("enterprise_type", "tov")
+    .require_custom("tax_system", "general")
+    .require_custom("ecp_enabled", true)
+    .build();
+```
+
+### Pattern 6: Quorum via Shamir (NEW v2.1)
+
+```rust
+// Використання fcp-crypto/shamir.rs для quorum gates
+use fcp_crypto::shamir::{split_secret, reconstruct_secret};
+
+// Phase Gate для ПАТ: потрібно 3 з 5 підписів
+let shares = split_secret(&decision_key, 3, 5)?;
+
+// Distribute shares to: QA, Ops, Finance, Legal, Director
+// Reconstruct when 3+ approve:
+let key = reconstruct_secret(&[share_qa, share_ops, share_finance])?;
+```
+
 ---
 
 ## Типові помилки
@@ -515,11 +602,15 @@ async fn get_receiving_steps(&self, ctx: &Context) -> Result<Vec<Step>> {
 | Document | Location |
 |----------|----------|
 | FCP Spec | `/FCP_Specification_V2.md` |
-| Research v2.0 | `/docs/research/ODOO_V19_FCP_INTEGRATION.md` |
+| Research v2.1 | `/docs/research/ODOO_V19_FCP_INTEGRATION.md` |
 | Plan | `/docs/research/PLAN_FOR_ODOOv19_AND_FLYWHEEL.md` |
 | Odoo PDCA | `/Users/sd/projects/odoov19/EXPLAIN.md` |
+| **FCP Posture** | `/crates/fcp-core/src/posture.rs` |
+| **FCP Policy** | `/crates/fcp-core/src/policy.rs` |
+| **FCP Shamir** | `/crates/fcp-crypto/src/shamir.rs` |
+| **Gateway Patterns** | `flywheel_gateway/apps/gateway/src/services/` |
 
 ---
 
-*Версія: 2.0.0 | Дата: 2026-01-27*
-*Ключові зміни: Process Decomposition, Policy Profiles, Enterprise Types*
+*Версія: 2.1.0 | Дата: 2026-01-28*
+*Ключові зміни v2.1: Gateway Patterns, FCP Posture/Policy/Shamir modules, Enterprise Posture pattern*
