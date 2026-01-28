@@ -34,5 +34,11 @@ fcp-tailscale = { path = "../fcp-tailscale" }
 name = "fcp-vecgen"
 path = "src/bin/vecgen.rs"
 
+[[bin]]
+name = "fcp-reqcheck"
+path = "src/bin/reqcheck.rs"
+
 [dev-dependencies]
 pretty_assertions.workspace = true
+uuid.workspace = true
+fcp-testkit = { path = "../fcp-testkit" }

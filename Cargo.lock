@@ -1728,12 +1728,14 @@ dependencies = [
  "fcp-protocol",
  "fcp-store",
  "fcp-tailscale",
+ "fcp-testkit",
  "hex",
  "jsonschema",
  "pretty_assertions",
  "semver",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1749,6 +1751,7 @@ dependencies = [
  "ed25519-dalek",
  "fcp-cbor",
  "fcp-crypto",
+ "fcp-testkit",
  "futures-util",
  "hex",
  "rand 0.8.5",

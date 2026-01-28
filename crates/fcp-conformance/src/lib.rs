@@ -23,6 +23,7 @@
 pub mod compliance;
 pub mod harness;
 pub mod interop;
+pub mod reqcheck;
 pub mod schemas;
 pub mod vecgen;
 pub mod vectors;

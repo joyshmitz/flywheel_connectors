@@ -212,6 +212,7 @@ fn base_zone_policy(zone: ZoneId) -> ZonePolicyObject {
         capability_ceiling: Vec::new(),
         transport_policy: ZoneTransportPolicy::default(),
         decision_receipts: fcp_core::DecisionReceiptPolicy::default(),
+        requires_posture: None,
     }
 }
 
@@ -255,6 +256,7 @@ fn base_simulation_input(
         capability_id: Some("cap.read".to_string()),
         provenance_record: Some(ProvenanceRecord::new(ZoneId::work())),
         now_ms: Some(BASE_TIMESTAMP_MS),
+        posture_attestation: None,
     }
 }
 
@@ -646,6 +648,7 @@ fn e2e_harness_zone_mismatch_error() {
         capability_id: Some("cap.read".to_string()),
         provenance_record: None,
         now_ms: Some(BASE_TIMESTAMP_MS),
+        posture_attestation: None,
     };
 
     // This should return an error, not a receipt
