@@ -98,6 +98,7 @@ fn base_policy(zone: ZoneId) -> ZonePolicyObject {
         capability_ceiling: Vec::new(),
         transport_policy: ZoneTransportPolicy::default(),
         decision_receipts: fcp_core::DecisionReceiptPolicy::default(),
+        requires_posture: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn base_simulation_input(
         capability_id: None,
         provenance_record: Some(ProvenanceRecord::new(ZoneId::work())),
         now_ms: Some(NOW_MS),
+        posture_attestation: None,
     }
 }
 
