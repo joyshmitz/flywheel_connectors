@@ -6,6 +6,8 @@
 //! - State model serialization
 //! - Archetype associations
 
+use std::sync::Arc;
+
 use fcp_cbor::SchemaId;
 use fcp_core::{ObjectHeader, Signature};
 use fcp_sdk::prelude::*;
@@ -261,6 +263,119 @@ fn cursor_store_rejects_stale_lease_seq() {
             Signature::zero(),
         )
         .expect_err("stale lease_seq should be rejected");
+
+    assert!(matches!(err, CursorStoreError::StaleLeaseSeq { .. }));
+}
+
+#[test]
+fn cursor_store_rejects_watermark_regression() {
+    let backend = InMemoryCursorStoreBackend::new();
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    store
+        .commit_cursor(
+            CursorState {
+                offset: Some(10),
+                last_seen_id: None,
+                watermark: Some(200),
+            },
+            test_header(1_700_000_020),
+            CursorLease {
+                lease_seq: 1,
+                lease_object_id: ObjectId::from_bytes([0x35; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("initial commit should succeed");
+
+    let err = store
+        .commit_cursor(
+            CursorState {
+                offset: Some(11),
+                last_seen_id: None,
+                watermark: Some(100),
+            },
+            test_header(1_700_000_021),
+            CursorLease {
+                lease_seq: 2,
+                lease_object_id: ObjectId::from_bytes([0x36; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect_err("watermark regression should be rejected");
+
+    assert!(matches!(err, CursorStoreError::WatermarkRegression { .. }));
+}
+
+#[test]
+fn cursor_store_failover_rejects_stale_writer() {
+    let backend = Arc::new(InMemoryCursorStoreBackend::new());
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store_a = CursorStore::new(Arc::clone(&backend), connector_id.clone(), zone_id.clone());
+    let mut store_b = CursorStore::new(Arc::clone(&backend), connector_id, zone_id);
+
+    store_a
+        .commit_cursor(
+            CursorState {
+                offset: Some(1),
+                last_seen_id: None,
+                watermark: Some(10),
+            },
+            test_header(1_700_000_030),
+            CursorLease {
+                lease_seq: 1,
+                lease_object_id: ObjectId::from_bytes([0x41; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("first writer commit should succeed");
+
+    let loaded = store_b
+        .load_cursor()
+        .expect("second writer should load cursor")
+        .expect("cursor should be present");
+    assert_eq!(loaded.offset, Some(1));
+
+    store_b
+        .commit_cursor(
+            CursorState {
+                offset: Some(2),
+                last_seen_id: None,
+                watermark: Some(20),
+            },
+            test_header(1_700_000_031),
+            CursorLease {
+                lease_seq: 2,
+                lease_object_id: ObjectId::from_bytes([0x42; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("second writer commit should succeed");
+
+    let refreshed = store_a
+        .load_cursor()
+        .expect("first writer reload should succeed")
+        .expect("cursor should be present");
+    assert_eq!(refreshed.offset, Some(2));
+
+    let err = store_a
+        .commit_cursor(
+            CursorState {
+                offset: Some(3),
+                last_seen_id: None,
+                watermark: Some(30),
+            },
+            test_header(1_700_000_032),
+            CursorLease {
+                lease_seq: 1,
+                lease_object_id: ObjectId::from_bytes([0x43; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect_err("stale lease after failover should be rejected");
 
     assert!(matches!(err, CursorStoreError::StaleLeaseSeq { .. }));
 }
