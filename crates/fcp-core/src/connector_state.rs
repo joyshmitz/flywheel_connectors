@@ -488,7 +488,7 @@ pub struct ConnectorStateSnapshot {
 /// 1. Pause connector execution immediately
 /// 2. Log the fork event for audit
 /// 3. Require manual resolution OR automated "choose-by-lease" recovery
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkEvent {
     /// The common predecessor.
     pub common_prev: ObjectId,
@@ -524,6 +524,345 @@ pub enum ForkResolution {
 
     /// Merge both branches (only valid for CRDT state).
     CrdtMerge,
+}
+
+impl ForkResolution {
+    /// Check if this resolution strategy is valid for the given state model.
+    #[must_use]
+    pub const fn is_valid_for(&self, model: &ConnectorStateModel) -> bool {
+        match self {
+            Self::ChooseByLease => model.is_singleton_writer(),
+            Self::ManualResolution => true, // Always valid
+            Self::CrdtMerge => model.is_crdt(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fork Detection and Resolution (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result of fork detection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateForkDetectionResult {
+    /// No fork detected; single consistent head.
+    NoFork {
+        /// Current head object ID.
+        head: ObjectId,
+        /// Current sequence number.
+        seq: u64,
+    },
+    /// Fork detected with competing heads.
+    ForkDetected(ForkEvent),
+}
+
+impl StateForkDetectionResult {
+    /// Returns true if a fork was detected.
+    #[must_use]
+    pub const fn is_fork(&self) -> bool {
+        matches!(self, Self::ForkDetected(_))
+    }
+
+    /// Get fork event if one was detected.
+    #[must_use]
+    pub const fn fork_event(&self) -> Option<&ForkEvent> {
+        match self {
+            Self::ForkDetected(event) => Some(event),
+            Self::NoFork { .. } => None,
+        }
+    }
+}
+
+impl ForkEvent {
+    /// Create a new fork event.
+    #[must_use]
+    pub const fn new(
+        common_prev: ObjectId,
+        branch_a: ObjectId,
+        branch_b: ObjectId,
+        fork_seq: u64,
+        detected_at: u64,
+        zone_id: ZoneId,
+        connector_id: ConnectorId,
+    ) -> Self {
+        Self {
+            common_prev,
+            branch_a,
+            branch_b,
+            fork_seq,
+            detected_at,
+            zone_id,
+            connector_id,
+        }
+    }
+
+    /// Determine the winning branch using lease-based resolution.
+    ///
+    /// Returns the object ID of the branch with the higher `lease_seq`.
+    /// If `lease_seq` values are equal, returns `None` (requires manual resolution).
+    #[must_use]
+    pub fn resolve_by_lease(
+        &self,
+        lease_seq_a: u64,
+        lease_seq_b: u64,
+    ) -> Option<ObjectId> {
+        use std::cmp::Ordering;
+        match lease_seq_a.cmp(&lease_seq_b) {
+            Ordering::Greater => Some(self.branch_a),
+            Ordering::Less => Some(self.branch_b),
+            Ordering::Equal => None, // Tie - requires manual resolution
+        }
+    }
+}
+
+/// Fork resolution outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkResolutionOutcome {
+    /// The fork that was resolved.
+    pub fork_event: ForkEvent,
+    /// Resolution strategy used.
+    pub strategy: ForkResolution,
+    /// Winning branch object ID (if resolved).
+    pub winning_head: Option<ObjectId>,
+    /// Timestamp when resolution occurred.
+    pub resolved_at: u64,
+    /// Whether resolution succeeded.
+    pub resolved: bool,
+    /// Reason if resolution failed.
+    pub failure_reason: Option<String>,
+}
+
+impl ForkResolutionOutcome {
+    /// Create a successful resolution outcome.
+    #[must_use]
+    pub const fn success(
+        fork_event: ForkEvent,
+        strategy: ForkResolution,
+        winning_head: ObjectId,
+        resolved_at: u64,
+    ) -> Self {
+        Self {
+            fork_event,
+            strategy,
+            winning_head: Some(winning_head),
+            resolved_at,
+            resolved: true,
+            failure_reason: None,
+        }
+    }
+
+    /// Create a failed resolution outcome.
+    #[must_use]
+    pub fn failure(
+        fork_event: ForkEvent,
+        strategy: ForkResolution,
+        resolved_at: u64,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            fork_event,
+            strategy,
+            winning_head: None,
+            resolved_at,
+            resolved: false,
+            failure_reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Fork detector for connector state objects.
+///
+/// Tracks state objects indexed by their `prev` pointer to detect forks
+/// (multiple objects with the same `prev`).
+#[derive(Debug, Default)]
+pub struct StateForkDetector {
+    /// Map from `prev` object ID to list of state objects pointing to it.
+    /// A fork exists when any `prev` has more than one child.
+    children_by_prev: std::collections::HashMap<ObjectId, Vec<ObjectId>>,
+    /// Map from object ID to its sequence number.
+    seq_by_id: std::collections::HashMap<ObjectId, u64>,
+    /// Map from object ID to its `lease_seq` (for resolution).
+    lease_seq_by_id: std::collections::HashMap<ObjectId, u64>,
+}
+
+impl StateForkDetector {
+    /// Create a new fork detector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a state object for fork detection.
+    ///
+    /// Call this for each state object received. The detector will track
+    /// parent-child relationships to detect forks.
+    pub fn register(
+        &mut self,
+        object_id: ObjectId,
+        prev: Option<ObjectId>,
+        seq: u64,
+        lease_seq: u64,
+    ) {
+        self.seq_by_id.insert(object_id, seq);
+        self.lease_seq_by_id.insert(object_id, lease_seq);
+
+        if let Some(prev_id) = prev {
+            self.children_by_prev
+                .entry(prev_id)
+                .or_default()
+                .push(object_id);
+        }
+    }
+
+    /// Check for forks in the registered state objects.
+    ///
+    /// Returns the first detected fork, if any.
+    #[must_use]
+    pub fn detect_fork(
+        &self,
+        zone_id: ZoneId,
+        connector_id: ConnectorId,
+        now: u64,
+    ) -> StateForkDetectionResult {
+        // Find any prev with multiple children (fork point)
+        for (prev_id, children) in &self.children_by_prev {
+            if children.len() > 1 {
+                // Fork detected: multiple objects share the same prev
+                let branch_a = children[0];
+                let branch_b = children[1];
+                let fork_seq = self.seq_by_id.get(&branch_a).copied().unwrap_or(0);
+
+                return StateForkDetectionResult::ForkDetected(ForkEvent::new(
+                    *prev_id,
+                    branch_a,
+                    branch_b,
+                    fork_seq,
+                    now,
+                    zone_id,
+                    connector_id,
+                ));
+            }
+        }
+
+        // No fork - find the latest head
+        let (head, seq) = self
+            .seq_by_id
+            .iter()
+            .max_by_key(|(_, seq)| *seq)
+            .map_or((ObjectId::from_bytes([0u8; 32]), 0), |(id, seq)| (*id, *seq));
+
+        StateForkDetectionResult::NoFork { head, seq }
+    }
+
+    /// Get the `lease_seq` for a given object ID.
+    #[must_use]
+    pub fn lease_seq(&self, object_id: &ObjectId) -> Option<u64> {
+        self.lease_seq_by_id.get(object_id).copied()
+    }
+
+    /// Resolve a fork using the specified strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `fork` - The fork event to resolve
+    /// * `strategy` - Resolution strategy to use
+    /// * `model` - State model (for validation)
+    /// * `now` - Current timestamp
+    ///
+    /// # Errors
+    ///
+    /// Returns a failure outcome if the strategy is invalid for the model
+    /// or if lease-based resolution results in a tie.
+    #[must_use]
+    pub fn resolve(
+        &self,
+        fork: &ForkEvent,
+        strategy: ForkResolution,
+        model: &ConnectorStateModel,
+        now: u64,
+    ) -> ForkResolutionOutcome {
+        if !strategy.is_valid_for(model) {
+            return ForkResolutionOutcome::failure(
+                fork.clone(),
+                strategy,
+                now,
+                format!("strategy {strategy:?} is not valid for state model {model}"),
+            );
+        }
+
+        match strategy {
+            ForkResolution::ChooseByLease => {
+                let lease_seq_a = self.lease_seq(&fork.branch_a).unwrap_or(0);
+                let lease_seq_b = self.lease_seq(&fork.branch_b).unwrap_or(0);
+
+                fork.resolve_by_lease(lease_seq_a, lease_seq_b).map_or_else(
+                    || {
+                        ForkResolutionOutcome::failure(
+                            fork.clone(),
+                            strategy,
+                            now,
+                            format!("lease_seq tie ({lease_seq_a} == {lease_seq_b}); manual resolution required"),
+                        )
+                    },
+                    |winner| ForkResolutionOutcome::success(fork.clone(), strategy, winner, now),
+                )
+            }
+            ForkResolution::ManualResolution => ForkResolutionOutcome::failure(
+                fork.clone(),
+                strategy,
+                now,
+                "manual resolution requires explicit head selection",
+            ),
+            ForkResolution::CrdtMerge => {
+                // CRDT merge would happen at the delta level, not here
+                // This just signals that merge is the strategy
+                ForkResolutionOutcome::failure(
+                    fork.clone(),
+                    strategy,
+                    now,
+                    "CRDT merge requires delta-level merging (not implemented in detector)",
+                )
+            }
+        }
+    }
+
+    /// Resolve a fork by explicitly selecting a head.
+    ///
+    /// Used for manual resolution when an operator chooses the winning branch.
+    #[must_use]
+    pub fn resolve_manual(
+        &self,
+        fork: &ForkEvent,
+        selected_head: ObjectId,
+        now: u64,
+    ) -> ForkResolutionOutcome {
+        // Validate the selected head is one of the fork branches
+        if selected_head != fork.branch_a && selected_head != fork.branch_b {
+            return ForkResolutionOutcome::failure(
+                fork.clone(),
+                ForkResolution::ManualResolution,
+                now,
+                format!(
+                    "selected head {} is not one of the fork branches ({} or {})",
+                    selected_head, fork.branch_a, fork.branch_b
+                ),
+            );
+        }
+
+        ForkResolutionOutcome::success(
+            fork.clone(),
+            ForkResolution::ManualResolution,
+            selected_head,
+            now,
+        )
+    }
+
+    /// Clear all tracked state (for testing or reset).
+    pub fn clear(&mut self) {
+        self.children_by_prev.clear();
+        self.seq_by_id.clear();
+        self.lease_seq_by_id.clear();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -849,5 +1188,249 @@ mod tests {
             let deserialized: ForkResolution = serde_json::from_str(&json).unwrap();
             assert_eq!(resolution, deserialized);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Fork Detection Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn test_object_id(label: &str) -> ObjectId {
+        ObjectId::test_id(label)
+    }
+
+    fn test_connector_id() -> ConnectorId {
+        ConnectorId::from_static("fcp.test:fork:v1")
+    }
+
+    #[test]
+    fn fork_detector_no_fork_single_chain() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let obj1 = test_object_id("obj1");
+        let obj2 = test_object_id("obj2");
+
+        // Linear chain: genesis -> obj1 -> obj2
+        detector.register(genesis, None, 0, 100);
+        detector.register(obj1, Some(genesis), 1, 100);
+        detector.register(obj2, Some(obj1), 2, 100);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+
+        assert!(!result.is_fork());
+        if let StateForkDetectionResult::NoFork { head, seq } = result {
+            assert_eq!(head, obj2);
+            assert_eq!(seq, 2);
+        }
+    }
+
+    #[test]
+    fn fork_detector_detects_fork() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        // Fork: genesis -> branch_a AND genesis -> branch_b
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 101);
+        detector.register(branch_b, Some(genesis), 1, 102);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+
+        assert!(result.is_fork());
+        let fork = result.fork_event().unwrap();
+        assert_eq!(fork.common_prev, genesis);
+        assert_eq!(fork.fork_seq, 1);
+        // branch_a and branch_b should be the two competing heads (order may vary)
+        assert!(
+            (fork.branch_a == branch_a && fork.branch_b == branch_b)
+                || (fork.branch_a == branch_b && fork.branch_b == branch_a)
+        );
+    }
+
+    #[test]
+    fn fork_resolve_by_lease_higher_wins() {
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        let fork = ForkEvent::new(
+            genesis,
+            branch_a,
+            branch_b,
+            1,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        );
+
+        // branch_a has higher lease_seq
+        let winner = fork.resolve_by_lease(200, 100);
+        assert_eq!(winner, Some(branch_a));
+
+        // branch_b has higher lease_seq
+        let winner = fork.resolve_by_lease(100, 200);
+        assert_eq!(winner, Some(branch_b));
+
+        // Tie - no winner
+        let winner = fork.resolve_by_lease(100, 100);
+        assert!(winner.is_none());
+    }
+
+    #[test]
+    fn fork_detector_resolve_by_lease_success() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 200); // Higher lease_seq
+        detector.register(branch_b, Some(genesis), 1, 150);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_001,
+        );
+
+        assert!(outcome.resolved);
+        assert_eq!(outcome.winning_head, Some(branch_a));
+    }
+
+    #[test]
+    fn fork_detector_resolve_invalid_strategy() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 200);
+        detector.register(branch_b, Some(genesis), 1, 150);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+
+        // ChooseByLease is not valid for CRDT model
+        let outcome = detector.resolve(
+            fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::Crdt {
+                crdt_type: CrdtType::LwwMap,
+            },
+            1_700_000_001,
+        );
+
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("not valid"));
+    }
+
+    #[test]
+    fn fork_detector_manual_resolution() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 100);
+        detector.register(branch_b, Some(genesis), 1, 100);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+
+        // Manually select branch_b as winner
+        let outcome = detector.resolve_manual(fork, branch_b, 1_700_000_001);
+
+        assert!(outcome.resolved);
+        assert_eq!(outcome.winning_head, Some(branch_b));
+        assert_eq!(outcome.strategy, ForkResolution::ManualResolution);
+    }
+
+    #[test]
+    fn fork_detector_manual_resolution_invalid_head() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let branch_a = test_object_id("branch_a");
+        let branch_b = test_object_id("branch_b");
+        let invalid_head = test_object_id("invalid");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(branch_a, Some(genesis), 1, 100);
+        detector.register(branch_b, Some(genesis), 1, 100);
+
+        let result = detector.detect_fork(ZoneId::work(), test_connector_id(), 1_700_000_000);
+        let fork = result.fork_event().unwrap();
+
+        // Try to select an invalid head
+        let outcome = detector.resolve_manual(fork, invalid_head, 1_700_000_001);
+
+        assert!(!outcome.resolved);
+        assert!(outcome.failure_reason.unwrap().contains("not one of the fork branches"));
+    }
+
+    #[test]
+    fn fork_resolution_is_valid_for_model() {
+        assert!(ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::SingletonWriter));
+        assert!(!ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::Stateless));
+        assert!(!ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::LwwMap,
+        }));
+
+        assert!(ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::SingletonWriter));
+        assert!(ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::Stateless));
+        assert!(ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::LwwMap,
+        }));
+
+        assert!(!ForkResolution::CrdtMerge.is_valid_for(&ConnectorStateModel::SingletonWriter));
+        assert!(ForkResolution::CrdtMerge.is_valid_for(&ConnectorStateModel::Crdt {
+            crdt_type: CrdtType::LwwMap,
+        }));
+    }
+
+    #[test]
+    fn fork_detector_clear() {
+        let mut detector = StateForkDetector::new();
+        let genesis = test_object_id("genesis");
+        let obj1 = test_object_id("obj1");
+
+        detector.register(genesis, None, 0, 100);
+        detector.register(obj1, Some(genesis), 1, 100);
+
+        assert!(detector.lease_seq(&genesis).is_some());
+
+        detector.clear();
+
+        assert!(detector.lease_seq(&genesis).is_none());
+    }
+
+    #[test]
+    fn state_fork_detection_result_serde() {
+        let no_fork = StateForkDetectionResult::NoFork {
+            head: test_object_id("head"),
+            seq: 42,
+        };
+        let json = serde_json::to_string(&no_fork).unwrap();
+        let decoded: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.is_fork());
+
+        let fork = StateForkDetectionResult::ForkDetected(ForkEvent::new(
+            test_object_id("prev"),
+            test_object_id("a"),
+            test_object_id("b"),
+            10,
+            1_700_000_000,
+            ZoneId::work(),
+            test_connector_id(),
+        ));
+        let json = serde_json::to_string(&fork).unwrap();
+        let decoded: StateForkDetectionResult = serde_json::from_str(&json).unwrap();
+        assert!(decoded.is_fork());
     }
 }
