@@ -14,7 +14,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_core::{
     ApprovalMode as CoreApprovalMode, CapabilityId, ConnectorId, IdValidationError,
-    IdempotencyClass, RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
+    IdempotencyClass, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool,
+    RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
 };
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,8 @@ pub struct ConnectorManifest {
     pub event_caps: Option<EventCapsSection>,
     pub sandbox: SandboxSection,
     #[serde(default)]
+    pub rate_limits: Option<RateLimitsSection>,
+    #[serde(default)]
     pub signatures: Option<SignaturesSection>,
     #[serde(default)]
     pub supply_chain: Option<SupplyChainSection>,
@@ -134,6 +137,9 @@ impl ConnectorManifest {
             caps.validate()?;
         }
         self.sandbox.validate()?;
+        if let Some(ref rate_limits) = self.rate_limits {
+            rate_limits.validate()?;
+        }
         if let Some(ref sigs) = self.signatures {
             sigs.validate()?;
         }
@@ -339,6 +345,9 @@ pub enum ManifestError {
 
     #[error("invalid rate limit: {0}")]
     RateLimit(#[from] fcp_core::RateLimitValidationError),
+
+    #[error("invalid rate limit declaration: {0}")]
+    RateLimitDeclaration(#[from] RateLimitDeclarationError),
 }
 
 /// `[manifest]` section (NORMATIVE).
@@ -1363,6 +1372,107 @@ impl EventCapsSection {
         }
         Ok(())
     }
+}
+
+/// `[rate_limits]` section for connector-level rate limit pool declarations.
+///
+/// Defines named rate limit pools that can be referenced by operations to share
+/// quota buckets across multiple operations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitsSection {
+    /// Named rate limit pools with configuration.
+    #[serde(default)]
+    pub pools: Vec<RateLimitPoolSection>,
+    /// Map of operation names to pool IDs they consume.
+    /// Operations can consume from multiple pools (e.g., both RPM and token limits).
+    #[serde(default)]
+    pub operation_pools: std::collections::HashMap<String, Vec<String>>,
+}
+
+impl RateLimitsSection {
+    fn validate(&self) -> Result<(), ManifestError> {
+        // Convert to fcp_core declarations and validate
+        let decls = self.to_declarations();
+        decls.validate()?;
+        Ok(())
+    }
+
+    /// Convert to the canonical `RateLimitDeclarations` type.
+    #[must_use]
+    pub fn to_declarations(&self) -> RateLimitDeclarations {
+        use fcp_core::{RateLimitConfig, RateLimitEnforcement, RateLimitScope, RateLimitUnit};
+        use std::time::Duration;
+
+        let limits = self
+            .pools
+            .iter()
+            .map(|pool| RateLimitPool {
+                id: pool.id.clone(),
+                description: pool.description.clone().unwrap_or_default(),
+                config: RateLimitConfig {
+                    requests: pool.requests,
+                    window: Duration::from_millis(pool.window_ms),
+                    burst: pool.burst,
+                    unit: pool.unit.as_ref().map_or(RateLimitUnit::Requests, |u| {
+                        match u.as_str() {
+                            "tokens" => RateLimitUnit::Tokens,
+                            "bytes" => RateLimitUnit::Bytes,
+                            "custom" => RateLimitUnit::Custom,
+                            _ => RateLimitUnit::Requests,
+                        }
+                    }),
+                },
+                enforcement: pool.enforcement.as_ref().map_or(
+                    RateLimitEnforcement::Hard,
+                    |e| match e.as_str() {
+                        "soft" => RateLimitEnforcement::Soft,
+                        "advisory" => RateLimitEnforcement::Advisory,
+                        _ => RateLimitEnforcement::Hard,
+                    },
+                ),
+                scope: pool.scope.as_ref().map_or(RateLimitScope::Instance, |s| {
+                    match s.as_str() {
+                        "credential" => RateLimitScope::Credential,
+                        "global" => RateLimitScope::Global,
+                        _ => RateLimitScope::Instance,
+                    }
+                }),
+            })
+            .collect();
+
+        RateLimitDeclarations {
+            limits,
+            tool_pool_map: self.operation_pools.clone(),
+        }
+    }
+}
+
+/// A rate limit pool declaration in TOML-friendly format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitPoolSection {
+    /// Unique identifier for this pool (e.g., `api_global`, `openai_tokens`).
+    pub id: String,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Maximum requests/tokens/bytes per window (bucket size). Must be > 0.
+    pub requests: u32,
+    /// Window duration in milliseconds. Must be > 0.
+    pub window_ms: u64,
+    /// Optional burst allowance (tokens above max that can accumulate).
+    #[serde(default)]
+    pub burst: Option<u32>,
+    /// Unit of measurement: "requests" (default), "tokens", "bytes", "custom".
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// Enforcement: "hard" (default), "soft", "advisory".
+    #[serde(default)]
+    pub enforcement: Option<String>,
+    /// Scope: "instance" (default), "credential", "global".
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 /// `[sandbox]` section (NORMATIVE).
