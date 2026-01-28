@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -754,6 +754,19 @@ impl CursorStoreBackend for InMemoryCursorStoreBackend {
         state.objects.push((object_id, state_obj));
         drop(state);
         Ok(object_id)
+    }
+}
+
+impl CursorStoreBackend for Arc<InMemoryCursorStoreBackend> {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        self.as_ref().load_head()
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        self.as_ref().store_state_object(state_obj)
     }
 }
 

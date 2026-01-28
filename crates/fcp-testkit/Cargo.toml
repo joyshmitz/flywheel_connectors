@@ -26,6 +26,8 @@ tokio-stream.workspace = true
 # Serialization
 serde.workspace = true
 serde_json.workspace = true
+fcp-cbor = { path = "../fcp-cbor" }
+semver.workspace = true
 
 # Error handling
 thiserror.workspace = true
@@ -49,6 +51,4 @@ reqwest.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
-fcp-cbor = { path = "../fcp-cbor" }
-semver.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

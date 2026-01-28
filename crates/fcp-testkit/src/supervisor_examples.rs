@@ -331,7 +331,7 @@ impl FakePollingConnector {
 // CursorStore Polling Example
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A polling connector example that persists cursor state via CursorStore.
+/// A polling connector example that persists cursor state via `CursorStore`.
 ///
 /// Demonstrates lease acquisition (`CursorLease`), cursor load, commit, and snapshot creation.
 pub struct FakeCursorStoreConnector {
@@ -361,7 +361,11 @@ impl FakeCursorStoreConnector {
         Arc::clone(&self.backend)
     }
 
-    /// Execute a single poll + commit cycle using CursorStore.
+    /// Execute a single poll + commit cycle using `CursorStore`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cursor store cannot load or commit the cursor state.
     ///
     /// Returns the committed cursor state.
     pub fn run_once(
@@ -380,11 +384,9 @@ impl FakeCursorStoreConnector {
             _ => Vec::new(),
         };
 
-        let mut cursor = if let Some(offset) = offset {
+        let mut cursor = offset.map_or_else(InMemoryPollingCursor::new, |offset| {
             InMemoryPollingCursor::with_offset(offset)
-        } else {
-            InMemoryPollingCursor::new()
-        };
+        });
 
         let mut last_seen = None;
         for update in updates {
