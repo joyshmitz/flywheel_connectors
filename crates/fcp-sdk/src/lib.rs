@@ -213,7 +213,15 @@ impl SchemaValidator {
         let details: Vec<String> = self
             .validator
             .iter_errors(value)
-            .map(|e| e.to_string())
+            .map(|error| {
+                let path = error.instance_path.to_string();
+                let message = error.masked().to_string();
+                if path.is_empty() {
+                    message
+                } else {
+                    format!("{path}: {message}")
+                }
+            })
             .collect();
 
         if details.is_empty() {
@@ -237,6 +245,83 @@ pub fn validate_json_schema(
     value: &serde_json::Value,
 ) -> Result<(), SchemaValidationError> {
     SchemaValidator::compile(schema)?.validate(value)
+}
+
+const INVALID_REQUEST_SCHEMA_CODE: u16 = 1001;
+const MAX_SCHEMA_ERRORS: usize = 5;
+
+fn format_schema_errors(errors: &[String]) -> String {
+    if errors.is_empty() {
+        return "schema validation failed".to_string();
+    }
+
+    let mut message = errors
+        .iter()
+        .take(MAX_SCHEMA_ERRORS)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    if errors.len() > MAX_SCHEMA_ERRORS {
+        use std::fmt::Write;
+
+        let _ = write!(
+            message,
+            "; +{} more",
+            errors.len().saturating_sub(MAX_SCHEMA_ERRORS)
+        );
+    }
+
+    message
+}
+
+/// Validate input payloads against a JSON Schema and map failures to `FcpError::InvalidRequest`.
+///
+/// # Errors
+/// Returns `FcpError::InvalidRequest` when the input value does not match the schema, or
+/// `FcpError::Internal` if the schema itself is invalid.
+pub fn validate_input(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), FcpError> {
+    match validate_json_schema(schema, value) {
+        Ok(()) => Ok(()),
+        Err(SchemaValidationError::InvalidSchema { message }) => Err(FcpError::Internal {
+            message: format!("input schema invalid: {message}"),
+        }),
+        Err(SchemaValidationError::ValidationFailed { errors, .. }) => {
+            Err(FcpError::InvalidRequest {
+                code: INVALID_REQUEST_SCHEMA_CODE,
+                message: format!(
+                    "input schema validation failed: {}",
+                    format_schema_errors(&errors)
+                ),
+            })
+        }
+    }
+}
+
+/// Validate output payloads against a JSON Schema and map failures to `FcpError::Internal`.
+///
+/// # Errors
+/// Returns `FcpError::Internal` when the output value does not match the schema or the schema is
+/// invalid.
+pub fn validate_output(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), FcpError> {
+    match validate_json_schema(schema, value) {
+        Ok(()) => Ok(()),
+        Err(SchemaValidationError::InvalidSchema { message }) => Err(FcpError::Internal {
+            message: format!("output schema invalid: {message}"),
+        }),
+        Err(SchemaValidationError::ValidationFailed { errors, .. }) => Err(FcpError::Internal {
+            message: format!(
+                "output schema validation failed: {}",
+                format_schema_errors(&errors)
+            ),
+        }),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

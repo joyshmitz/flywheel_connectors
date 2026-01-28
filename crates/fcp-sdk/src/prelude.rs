@@ -73,7 +73,9 @@ pub use crate::runtime::{
 };
 
 // Schema validation helpers
-pub use crate::{SchemaValidationError, SchemaValidator, validate_json_schema};
+pub use crate::{
+    SchemaValidationError, SchemaValidator, validate_input, validate_json_schema, validate_output,
+};
 
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};

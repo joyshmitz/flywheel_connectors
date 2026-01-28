@@ -541,6 +541,80 @@ mod schema_validation_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Schema Validation Helper Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod schema_validation_helper_tests {
+    use super::*;
+
+    #[test]
+    fn validate_input_maps_to_invalid_request() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "secret": { "type": "string", "maxLength": 5 }
+            },
+            "required": ["secret"]
+        });
+
+        let value = json!({ "secret": "supersecret" });
+
+        let err = validate_input(&schema, &value).expect_err("validation should fail");
+
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1001);
+                assert!(message.contains("input schema validation failed"));
+                assert!(message.contains("/secret"));
+                assert!(!message.contains("supersecret"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_maps_to_internal() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            },
+            "required": ["id"]
+        });
+
+        let value = json!({ "id": 42 });
+
+        let err = validate_output(&schema, &value).expect_err("output validation should fail");
+
+        match err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("output schema validation failed"));
+                assert!(message.contains("/id"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_input_invalid_schema_maps_to_internal() {
+        let schema = json!({
+            "type": "bogus"
+        });
+
+        let value = json!({ "value": "ok" });
+
+        let err = validate_input(&schema, &value).expect_err("schema compile should fail");
+
+        match err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("input schema invalid"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Schema Evolution Tests (V2-only patterns)
 // ─────────────────────────────────────────────────────────────────────────────
 

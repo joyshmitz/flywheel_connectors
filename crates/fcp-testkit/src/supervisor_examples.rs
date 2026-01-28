@@ -431,6 +431,10 @@ impl FakeCursorStoreConnector {
     }
 
     /// Build a snapshot object from cursor state (example only).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cursor state cannot be encoded to canonical CBOR.
     #[must_use]
     pub fn build_snapshot(
         covers_head: ObjectId,
@@ -439,7 +443,7 @@ impl FakeCursorStoreConnector {
         zone_id: ZoneId,
         snapshotted_at: u64,
     ) -> ConnectorStateSnapshot {
-        let state_cbor = cursor_state.to_cbor().unwrap_or_default();
+        let state_cbor = cursor_state.to_cbor().expect("cursor state should encode");
         let header = ObjectHeader {
             schema: SchemaId::new("fcp.test", "ConnectorStateSnapshot", Version::new(1, 0, 0)),
             zone_id: zone_id.clone(),
