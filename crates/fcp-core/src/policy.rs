@@ -873,18 +873,20 @@ fn check_posture(
     requirements: &crate::posture::PostureRequirements,
     input: &PolicyDecisionInput<'_>,
 ) -> Option<DecisionReasonCode> {
-    use crate::posture::PostureCheckResult;
+    use crate::posture::{PostureAttestation, PostureCheckResult};
 
     let Some(attestation) = input.posture_attestation else {
         return Some(DecisionReasonCode::PostureAttestationMissing);
     };
 
-    if !attestation.is_valid() {
-        return Some(DecisionReasonCode::PostureAttestationInvalid);
-    }
-
+    // Check expiry first (before is_valid which also checks expiry)
     if attestation.is_expired() {
         return Some(DecisionReasonCode::PostureAttestationExpired);
+    }
+
+    // Check schema validity
+    if attestation.schema != PostureAttestation::SCHEMA {
+        return Some(DecisionReasonCode::PostureAttestationInvalid);
     }
 
     match requirements.is_satisfied_by(attestation) {
