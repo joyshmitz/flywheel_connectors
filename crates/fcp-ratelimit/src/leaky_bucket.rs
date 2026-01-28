@@ -64,7 +64,7 @@ impl LeakyBucket {
 
         if leaked > 0.0 {
             *level = (*level - leaked).max(0.0);
-            drop(level); // drop lock before acquiring last_leak lock? No, I hold both.
+            drop(level);
             *last_leak = now;
         }
     }
@@ -135,8 +135,11 @@ impl RateLimiter for LeakyBucket {
     }
 
     async fn reset(&self) {
-        *self.level.lock() = 0.0;
-        *self.last_leak.lock() = Instant::now();
+        // Acquire locks in same order as leak() to prevent deadlock: last_leak then level
+        let mut last_leak = self.last_leak.lock();
+        let mut level = self.level.lock();
+        *level = 0.0;
+        *last_leak = Instant::now();
     }
 
     fn state(&self) -> RateLimitState {
@@ -248,15 +251,27 @@ impl RateLimiter for SmoothPacer {
     }
 
     fn state(&self) -> RateLimitState {
-        let remaining = self.remaining();
+        let last_time_val = *self.last_request.lock();
+        let (remaining, reset_after) = if let Some(last) = last_time_val {
+            let elapsed = Instant::now().duration_since(last);
+            if elapsed >= self.min_interval {
+                (1, Duration::ZERO)
+            } else {
+                (
+                    0,
+                    self.min_interval
+                        .checked_sub(elapsed)
+                        .unwrap_or(Duration::ZERO),
+                )
+            }
+        } else {
+            (1, Duration::ZERO)
+        };
+
         RateLimitState {
             limit: 1,
             remaining,
-            reset_after: if remaining > 0 {
-                Duration::ZERO
-            } else {
-                self.min_interval
-            },
+            reset_after,
             is_limited: remaining == 0,
         }
     }
