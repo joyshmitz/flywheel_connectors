@@ -580,6 +580,50 @@ async fn execute_query_retries_on_500() {
 }
 
 #[tokio::test]
+async fn execute_query_non_idempotent_no_retry() {
+    let mut ctx = TestContext::new("execute_query_non_idempotent_no_retry");
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(SequenceResponder {
+            counter: counter_clone,
+        })
+        .mount(&server)
+        .await;
+
+    let retry = RetryPolicy {
+        max_attempts: 2,
+        base_delay: Duration::from_millis(5),
+        max_delay: Duration::from_millis(10),
+        max_jitter: Duration::from_millis(0),
+        strategy: RetryStrategy::IdempotentOnly,
+    };
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_retry_policy(retry)
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_strict::<MutationQuery>(IdVars {
+            id: "user-9".to_string(),
+        })
+        .await
+        .expect_err("mutation should not retry");
+
+    ctx.assert_true(
+        matches!(err, GraphqlClientError::HttpStatus { .. }),
+        "expected HTTP status error",
+    );
+    let attempts = counter.load(Ordering::SeqCst);
+    ctx.assert_eq(attempts, 1_usize, "mutation should not retry");
+    ctx.finalize("pass", Some(serde_json::json!({ "attempts": attempts })));
+}
+
+#[tokio::test]
 async fn schema_validation_rejects_invalid_response() {
     let mut ctx = TestContext::new("schema_validation_rejects_invalid_response");
     let server = MockServer::start().await;
@@ -616,4 +660,244 @@ async fn schema_validation_rejects_invalid_response() {
         "pass",
         Some(serde_json::json!({"validation_mode": "response"})),
     );
+}
+
+#[tokio::test]
+async fn paginate_cursor_collects_items() {
+    let mut ctx = TestContext::new("paginate_cursor_collects_items");
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let result = paginate_cursor(None, None, move |_cursor| {
+        let counter = counter_clone.clone();
+        async move {
+            let step = counter.fetch_add(1, Ordering::SeqCst);
+            if step == 0 {
+                Ok(CursorPage {
+                    items: vec![1, 2],
+                    page_info: CursorPageInfo {
+                        has_next_page: true,
+                        end_cursor: Some("cursor-1".to_string()),
+                        total_count: Some(3),
+                    },
+                })
+            } else {
+                Ok(CursorPage {
+                    items: vec![3],
+                    page_info: CursorPageInfo {
+                        has_next_page: false,
+                        end_cursor: None,
+                        total_count: Some(3),
+                    },
+                })
+            }
+        }
+    })
+    .await;
+
+    let items = result.expect("pagination should succeed");
+    ctx.assert_eq(items, vec![1, 2, 3], "unexpected cursor items");
+    ctx.assert_eq(
+        counter.load(Ordering::SeqCst),
+        2_usize,
+        "expected two pages",
+    );
+    ctx.finalize("pass", Some(serde_json::json!({"pages": 2})));
+}
+
+#[tokio::test]
+async fn paginate_cursor_limit_exceeded() {
+    let mut ctx = TestContext::new("paginate_cursor_limit_exceeded");
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let result = paginate_cursor(
+        Some("cursor-0".to_string()),
+        Some(PageLimit::new(2)),
+        move |_cursor| {
+            let counter = counter_clone.clone();
+            async move {
+                let step = counter.fetch_add(1, Ordering::SeqCst);
+                if step == 0 {
+                    Ok(CursorPage {
+                        items: vec![1, 2],
+                        page_info: CursorPageInfo {
+                            has_next_page: true,
+                            end_cursor: Some("cursor-1".to_string()),
+                            total_count: Some(4),
+                        },
+                    })
+                } else {
+                    Ok(CursorPage {
+                        items: vec![3, 4],
+                        page_info: CursorPageInfo {
+                            has_next_page: false,
+                            end_cursor: None,
+                            total_count: Some(4),
+                        },
+                    })
+                }
+            }
+        },
+    )
+    .await;
+
+    ctx.assert_true(
+        matches!(result, Err(PaginationError::LimitExceeded(_))),
+        "expected pagination limit error",
+    );
+    ctx.assert_eq(
+        counter.load(Ordering::SeqCst),
+        2_usize,
+        "expected two page fetches",
+    );
+    ctx.finalize("pass", Some(serde_json::json!({"limit": 2})));
+}
+
+#[tokio::test]
+async fn paginate_offset_collects_items() {
+    let mut ctx = TestContext::new("paginate_offset_collects_items");
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let result = paginate_offset(0, None, move |offset| {
+        let counter = counter_clone.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            if offset == 0 {
+                Ok(OffsetPage {
+                    items: vec![10, 11],
+                    next_offset: Some(2),
+                    total_count: Some(3),
+                })
+            } else {
+                Ok(OffsetPage {
+                    items: vec![12],
+                    next_offset: None,
+                    total_count: Some(3),
+                })
+            }
+        }
+    })
+    .await;
+
+    let items = result.expect("offset pagination should succeed");
+    ctx.assert_eq(items, vec![10, 11, 12], "unexpected offset items");
+    ctx.assert_eq(
+        counter.load(Ordering::SeqCst),
+        2_usize,
+        "expected two pages",
+    );
+    ctx.finalize("pass", Some(serde_json::json!({"pages": 2})));
+}
+
+#[tokio::test]
+async fn paginate_offset_limit_exceeded() {
+    let mut ctx = TestContext::new("paginate_offset_limit_exceeded");
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let result = paginate_offset(0, Some(PageLimit::new(2)), move |offset| {
+        let counter = counter_clone.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            if offset == 0 {
+                Ok(OffsetPage {
+                    items: vec![20, 21],
+                    next_offset: Some(2),
+                    total_count: Some(4),
+                })
+            } else {
+                Ok(OffsetPage {
+                    items: vec![22, 23],
+                    next_offset: None,
+                    total_count: Some(4),
+                })
+            }
+        }
+    })
+    .await;
+
+    ctx.assert_true(
+        matches!(result, Err(PaginationError::LimitExceeded(_))),
+        "expected offset pagination limit error",
+    );
+    ctx.assert_eq(
+        counter.load(Ordering::SeqCst),
+        2_usize,
+        "expected two page fetches",
+    );
+    ctx.finalize("pass", Some(serde_json::json!({"limit": 2})));
+}
+
+#[tokio::test]
+async fn subscription_receives_next_message() {
+    let mut ctx = TestContext::new("subscription_receives_next_message");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut ws = accept_async(stream).await.expect("accept ws");
+
+        let init = ws.next().await.expect("init message").expect("init ok");
+        let init_text = init.into_text().expect("init text");
+        let init_value: serde_json::Value = serde_json::from_str(&init_text).expect("init json");
+        assert_eq!(
+            init_value.get("type").and_then(serde_json::Value::as_str),
+            Some("connection_init")
+        );
+
+        let ack = serde_json::json!({ "type": "connection_ack" });
+        ws.send(Message::Text(ack.to_string().into()))
+            .await
+            .expect("ack send");
+
+        let subscribe = ws
+            .next()
+            .await
+            .expect("subscribe message")
+            .expect("subscribe ok");
+        let subscribe_text = subscribe.into_text().expect("subscribe text");
+        let subscribe_value: serde_json::Value =
+            serde_json::from_str(&subscribe_text).expect("subscribe json");
+        assert_eq!(
+            subscribe_value
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("subscribe")
+        );
+
+        let next = serde_json::json!({
+            "type": "next",
+            "id": "1",
+            "payload": {
+                "data": { "viewer": { "id": "sub-1" } }
+            }
+        });
+        ws.send(Message::Text(next.to_string().into()))
+            .await
+            .expect("next send");
+
+        let complete = serde_json::json!({ "type": "complete", "id": "1" });
+        ws.send(Message::Text(complete.to_string().into()))
+            .await
+            .expect("complete send");
+    });
+
+    let url = format!("ws://{}", addr);
+    let client = GraphqlSubscriptionClient::new(url, "test");
+    let mut stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+
+    let next = stream.next().await.expect("stream item");
+    let response = next.expect("subscription response");
+    ctx.assert_true(response.errors.is_empty(), "subscription errors");
+    let viewer = response.data.expect("missing data");
+    ctx.assert_eq(viewer.viewer.id, "sub-1".to_string(), "subscriber id");
+
+    server_task.await.expect("server task");
+    ctx.finalize("pass", Some(serde_json::json!({"subscription": "next"})));
 }
