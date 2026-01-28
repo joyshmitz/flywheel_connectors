@@ -103,6 +103,7 @@ fn parse_simulation_input(raw: &str) -> Result<PolicySimulationInput> {
         capability_id: None,
         provenance_record: None,
         now_ms: None,
+        posture_attestation: None,
     })
 }
 
@@ -131,6 +132,7 @@ fn default_zone_policy(invoke: &InvokeRequest) -> ZonePolicyObject {
         capability_ceiling: Vec::new(),
         transport_policy: fcp_core::ZoneTransportPolicy::default(),
         decision_receipts: DecisionReceiptPolicy::default(),
+        requires_posture: None,
     }
 }
 
