@@ -8,7 +8,8 @@ use fcp_cbor::SchemaId;
 use fcp_core::{
     ApprovalScope, ApprovalToken, ConfidentialityLevel, ConnectorId, DecisionReasonCode,
     DeclassificationScope, NodeId, NodeSignature, ObjectHeader, ObjectId, OperationId,
-    PolicyDecisionInput, PolicyEngine, PolicyPattern, Provenance, ProvenanceRecord, RoleGraph,
+    PolicyDecisionInput, PolicyEngine, PolicyPattern, PostureAttestation, PostureAttributeKey,
+    PostureAttributeValue, PostureRequirements, Provenance, ProvenanceRecord, RoleGraph,
     RoleGraphError, RoleObject, SafetyTier, SanitizerReceipt, TaintFlag, TransportMode, ZoneId,
     ZonePolicyObject, ZoneTransportPolicy,
 };
@@ -78,6 +79,7 @@ fn base_policy(zone: ZoneId) -> ZonePolicyObject {
         capability_ceiling: vec![],
         transport_policy: ZoneTransportPolicy::default(),
         decision_receipts: fcp_core::DecisionReceiptPolicy::default(),
+        requires_posture: None,
     }
 }
 
@@ -124,6 +126,7 @@ fn decision_vector_allow_basic() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -166,6 +169,7 @@ fn decision_vector_denies_checkpoint_stale() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -209,6 +213,7 @@ fn decision_vector_denies_transport_derp() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -250,6 +255,7 @@ fn decision_vector_denies_principal_deny() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -291,6 +297,7 @@ fn decision_vector_denies_capability_not_allowed() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -330,6 +337,7 @@ fn decision_vector_denies_capability_ceiling() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -371,6 +379,7 @@ fn decision_vector_denies_connector_deny() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -412,6 +421,7 @@ fn decision_vector_denies_capability_deny() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -450,6 +460,7 @@ fn decision_vector_denies_missing_execution_approval() {
         revocation_fresh: true,
         execution_approval_required: true,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -488,6 +499,7 @@ fn decision_vector_denies_public_input_dangerous() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -543,6 +555,7 @@ fn decision_vector_allows_after_sanitize_unverified_link() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -580,6 +593,7 @@ fn decision_vector_requires_declassification() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -670,6 +684,7 @@ fn decision_vector_execution_scope_binding() {
         revocation_fresh: true,
         execution_approval_required: true,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -840,6 +855,7 @@ fn decision_vector_denies_revocation_stale() {
         revocation_fresh: false, // <-- stale revocation state
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -887,6 +903,7 @@ fn decision_vector_denies_transport_funnel() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -930,6 +947,7 @@ fn decision_vector_denies_transport_lan() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -973,6 +991,7 @@ fn decision_vector_allows_transport_derp() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1015,6 +1034,7 @@ fn decision_vector_denies_connector_on_deny_list() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1056,6 +1076,7 @@ fn decision_vector_denies_connector_not_allowed() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1101,6 +1122,7 @@ fn decision_vector_denies_capability_on_deny_list() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1147,6 +1169,7 @@ fn pattern_matching_exact() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input_alice);
@@ -1197,6 +1220,7 @@ fn pattern_matching_wildcard_suffix() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input_admin);
@@ -1246,6 +1270,7 @@ fn pattern_matching_wildcard_prefix() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input_user_alice);
@@ -1306,6 +1331,7 @@ fn pattern_matching_multiple_patterns() {
             revocation_fresh: true,
             execution_approval_required: false,
             now_ms: 1_700_000_000_000,
+            posture_attestation: None,
         };
 
         let decision = engine.evaluate_invoke(&input);
@@ -1351,6 +1377,7 @@ fn pattern_deny_takes_precedence() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1409,6 +1436,7 @@ fn sanitizer_receipt_invalid() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1501,6 +1529,7 @@ fn decision_vector_denies_execution_approval_missing() {
         revocation_fresh: true,
         execution_approval_required: true, // <-- requires approval
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1611,6 +1640,7 @@ fn decision_vector_capability_ceiling_allows_within() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1645,6 +1675,7 @@ fn decision_vector_empty_ceiling_allows_all() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1702,6 +1733,7 @@ fn decision_vector_denies_expired_approval_token() {
         revocation_fresh: true,
         execution_approval_required: true,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1746,6 +1778,7 @@ fn decision_vector_denies_principal_not_allowed() {
         revocation_fresh: true,
         execution_approval_required: false,
         now_ms: 1_700_000_000_000,
+        posture_attestation: None,
     };
 
     let decision = engine.evaluate_invoke(&input);
@@ -1755,4 +1788,298 @@ fn decision_vector_denies_principal_not_allowed() {
     );
 
     make_allow_vector("decision_deny_principal_not_allowed", &decision);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Posture Attestation Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn create_valid_attestation(node_id: &str) -> PostureAttestation {
+    use chrono::{Duration, Utc};
+    let mut attributes = HashMap::new();
+    attributes.insert(
+        PostureAttributeKey::OsType,
+        PostureAttributeValue::String("macos".to_string()),
+    );
+    attributes.insert(
+        PostureAttributeKey::OsVersion,
+        PostureAttributeValue::String("14.2.1".to_string()),
+    );
+    attributes.insert(
+        PostureAttributeKey::DiskEncryption,
+        PostureAttributeValue::Bool(true),
+    );
+    attributes.insert(
+        PostureAttributeKey::FirewallEnabled,
+        PostureAttributeValue::Bool(true),
+    );
+
+    PostureAttestation {
+        schema: PostureAttestation::SCHEMA.to_string(),
+        attestation_id: "att-12345".to_string(),
+        node_id: NodeId::new(node_id),
+        attributes,
+        issued_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(24),
+        verifier_id: "trusted-verifier".to_string(),
+        signature: "signature".to_string(),
+        verifier_kid: "kid-1".to_string(),
+    }
+}
+
+#[test]
+fn decision_vector_denies_posture_attestation_missing() {
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    policy.requires_posture = Some(
+        PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .build(),
+    );
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-posture-missing"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: None,
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::PostureAttestationMissing
+    );
+}
+
+#[test]
+fn decision_vector_denies_posture_attestation_expired() {
+    use chrono::{Duration, Utc};
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    policy.requires_posture = Some(
+        PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .build(),
+    );
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    // Create an expired attestation
+    let mut attestation = create_valid_attestation("node-1");
+    attestation.expires_at = Utc::now() - Duration::hours(1);
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-posture-expired"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: Some(&attestation),
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::PostureAttestationExpired
+    );
+}
+
+#[test]
+fn decision_vector_denies_posture_requirement_not_met() {
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    // Require OS version 15.0, but attestation has 14.2.1
+    policy.requires_posture = Some(
+        PostureRequirements::builder()
+            .require_os_min_version("15.0")
+            .build(),
+    );
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let attestation = create_valid_attestation("node-1");
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-posture-unmet"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: Some(&attestation),
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::PostureRequirementNotMet
+    );
+}
+
+#[test]
+fn decision_vector_allows_with_valid_posture() {
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    policy.requires_posture = Some(
+        PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .require_os_min_version("14.0")
+            .build(),
+    );
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let attestation = create_valid_attestation("node-1");
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-posture-valid"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: Some(&attestation),
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(decision.reason_code, DecisionReasonCode::Allow);
+}
+
+#[test]
+fn decision_vector_allows_without_posture_requirement() {
+    // When no posture requirements are set, attestation is optional
+    let zone = ZoneId::work();
+    let policy = base_policy(zone.clone());
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-no-posture-req"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: None,
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(decision.reason_code, DecisionReasonCode::Allow);
+}
+
+#[test]
+fn decision_vector_denies_posture_verifier_not_allowed() {
+    let zone = ZoneId::work();
+    let mut policy = base_policy(zone.clone());
+    policy.requires_posture = Some(
+        PostureRequirements::builder()
+            .require_disk_encryption(true)
+            .allow_verifier("specific-verifier")
+            .build(),
+    );
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    // Attestation from a different verifier
+    let attestation = create_valid_attestation("node-1");
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-posture-verifier"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.read"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.read"),
+        safety_tier: SafetyTier::Safe,
+        provenance: ProvenanceRecord::new(ZoneId::work()),
+        approval_tokens: &[],
+        sanitizer_receipts: &[],
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: Some(&attestation),
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::PostureVerifierNotAllowed
+    );
 }

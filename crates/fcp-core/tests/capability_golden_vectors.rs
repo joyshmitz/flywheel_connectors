@@ -226,8 +226,9 @@ mod token_field_validation {
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
+        let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::MissingField { .. })),
             "missing zone_id should fail verification: {result:?}"
@@ -255,8 +256,9 @@ mod token_field_validation {
         // Verifier expects z:work
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
+        let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::ZoneViolation { .. })),
             "zone mismatch should fail: {result:?}"
@@ -283,8 +285,9 @@ mod token_field_validation {
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.write"); // Not granted
+        let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
             "ungranted operation should fail: {result:?}"
@@ -310,11 +313,12 @@ mod token_field_validation {
         let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let cap = CapabilityId::new("cap.test").unwrap();
 
         // All these operations should be accepted
         for op_name in ["op.read", "op.write", "op.delete"] {
             let op = OperationId::from_static(op_name);
-            let result = verifier.verify(&token, &op, &[]);
+            let result = verifier.verify(&token, &cap, &op, &[]);
             assert!(result.is_ok(), "operation {op_name} should be accepted");
         }
     }
@@ -370,13 +374,14 @@ mod resource_constraints {
         let token = create_token_with_constraints(&sk, &constraints);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
+        let cap = CapabilityId::new("cap.test").unwrap();
 
         // Allowed resource should pass
-        let result = verifier.verify(&token, &op, &["/api/v1/users".into()]);
+        let result = verifier.verify(&token, &cap, &op, &["/api/v1/users".into()]);
         assert!(result.is_ok(), "allowed resource should pass");
 
         // Disallowed resource should fail
-        let result = verifier.verify(&token, &op, &["/private/secrets".into()]);
+        let result = verifier.verify(&token, &cap, &op, &["/private/secrets".into()]);
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
             "disallowed resource should fail: {result:?}"
@@ -400,13 +405,14 @@ mod resource_constraints {
         let token = create_token_with_constraints(&sk, &constraints);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
+        let cap = CapabilityId::new("cap.test").unwrap();
 
         // Non-denied resource should pass
-        let result = verifier.verify(&token, &op, &["/api/v1/users".into()]);
+        let result = verifier.verify(&token, &cap, &op, &["/api/v1/users".into()]);
         assert!(result.is_ok(), "non-denied resource should pass");
 
         // Denied resource should fail
-        let result = verifier.verify(&token, &op, &["/admin/users".into()]);
+        let result = verifier.verify(&token, &cap, &op, &["/admin/users".into()]);
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
             "denied resource should fail: {result:?}"
@@ -430,10 +436,12 @@ mod resource_constraints {
         let token = create_token_with_constraints(&sk, &constraints);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
+        let cap = CapabilityId::new("cap.test").unwrap();
 
         // All allowed
         let result = verifier.verify(
             &token,
+            &cap,
             &op,
             &["/api/v1/users".into(), "/api/v2/items".into()],
         );
@@ -442,6 +450,7 @@ mod resource_constraints {
         // One disallowed
         let result = verifier.verify(
             &token,
+            &cap,
             &op,
             &["/api/v1/users".into(), "/private/data".into()],
         );
@@ -801,8 +810,9 @@ mod adversarial_attacks {
         // Verifier enforces z:owner
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::owner(), InstanceId::new());
         let op = OperationId::from_static("op.admin");
+        let cap = CapabilityId::new("cap.admin").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::ZoneViolation { .. })),
             "zone escalation should fail: {result:?}"
@@ -829,10 +839,11 @@ mod adversarial_attacks {
         let token = CapabilityToken { raw: cose_token };
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let cap = CapabilityId::new("cap.files").unwrap();
 
         // Attempt to use for write operation
         let op_write = OperationId::from_static("op.write");
-        let result = verifier.verify(&token, &op_write, &[]);
+        let result = verifier.verify(&token, &cap, &op_write, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
             "operation escalation should fail: {result:?}"
@@ -840,7 +851,7 @@ mod adversarial_attacks {
 
         // Attempt to use for delete operation
         let op_delete = OperationId::from_static("op.delete");
-        let result = verifier.verify(&token, &op_delete, &[]);
+        let result = verifier.verify(&token, &cap, &op_delete, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
             "operation escalation should fail: {result:?}"
@@ -871,8 +882,9 @@ mod adversarial_attacks {
         // Verifier now uses NEW key
         let verifier = CapabilityVerifier::new(new_pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
+        let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &op, &[]);
+        let result = verifier.verify(&token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::InvalidSignature)),
             "old key should fail after rotation: {result:?}"
@@ -942,12 +954,13 @@ mod adversarial_attacks {
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.read");
+        let cap = CapabilityId::new("cap.files").unwrap();
 
         // Paths that don't start with /safe/ should be blocked
         let blocked_paths = ["/unsafe/file", "/etc/passwd", "/root/data"];
 
         for path in blocked_paths {
-            let result = verifier.verify(&token, &op, &[path.into()]);
+            let result = verifier.verify(&token, &cap, &op, &[path.into()]);
             assert!(
                 result.is_err(),
                 "path '{path}' should be blocked: {result:?}"
@@ -955,11 +968,11 @@ mod adversarial_attacks {
         }
 
         // Clean path should work
-        let result = verifier.verify(&token, &op, &["/safe/file.txt".into()]);
+        let result = verifier.verify(&token, &cap, &op, &["/safe/file.txt".into()]);
         assert!(result.is_ok(), "clean safe path should work");
 
         // Nested path should work
-        let result = verifier.verify(&token, &op, &["/safe/deeply/nested/file.txt".into()]);
+        let result = verifier.verify(&token, &cap, &op, &["/safe/deeply/nested/file.txt".into()]);
         assert!(result.is_ok(), "nested safe path should work");
     }
 }
