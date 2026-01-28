@@ -21,12 +21,12 @@
 //! // Use with StreamingSession trait
 //! ```
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use fcp_sdk::runtime::{
-    InMemoryPollingCursor, InMemoryStreamingSession, PollResult, PollingSupervisor,
-    PollingSupervisorStats, PollingCursor, StreamingSession, SupervisorConfig, SupervisorOutcome,
+    InMemoryPollingCursor, InMemoryStreamingSession, PollResult, PollingCursor, PollingSupervisor,
+    PollingSupervisorStats, StreamingSession, SupervisorConfig, SupervisorOutcome,
 };
 use tokio::sync::watch;
 
@@ -522,9 +522,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Run briefly then shutdown
-        let handle = tokio::spawn({
-            async move { connector.run(shutdown_rx).await }
-        });
+        let handle = tokio::spawn({ async move { connector.run(shutdown_rx).await } });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         shutdown_tx.send(true).unwrap();

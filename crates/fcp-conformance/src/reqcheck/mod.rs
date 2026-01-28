@@ -278,9 +278,7 @@ impl RequirementsIndexParser {
                     section: entry.section.clone(),
                     line_number: Some(entry.line_number),
                     warning_type: "duplicate_section".to_string(),
-                    message: format!(
-                        "Section appears multiple times (first at line {prev_line})"
-                    ),
+                    message: format!("Section appears multiple times (first at line {prev_line})"),
                 });
             } else {
                 seen_sections.insert(entry.section.clone(), entry.line_number);
@@ -678,7 +676,10 @@ mod tests {
         );
 
         capture.assert_valid();
-        assert!(result.is_ok(), "Should parse tables with empty cells gracefully");
+        assert!(
+            result.is_ok(),
+            "Should parse tables with empty cells gracefully"
+        );
     }
 
     #[test]
@@ -763,12 +764,7 @@ mod tests {
         let capture = LogCapture::new();
 
         // Bead IDs with unknown prefixes should be rejected
-        let invalid_ids = [
-            "unknown-abc123",
-            "random-xyz",
-            "test-9999",
-            "foo-bar",
-        ];
+        let invalid_ids = ["unknown-abc123", "random-xyz", "test-9999", "foo-bar"];
 
         let mut all_rejected = true;
         for id in &invalid_ids {
@@ -829,7 +825,10 @@ mod tests {
         );
 
         capture.assert_valid();
-        assert!(all_valid, "All valid bead IDs should be recognized: {failed_ids:?}");
+        assert!(
+            all_valid,
+            "All valid bead IDs should be recognized: {failed_ids:?}"
+        );
     }
 
     #[test]

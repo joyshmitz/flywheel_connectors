@@ -100,7 +100,11 @@ mod e2e_reproducible {
     #[test]
     fn reproducible_build_produces_identical_hash() {
         let capture = LogCapture::new();
-        let correlation_id = format!("repro-{}-{}", std::process::id(), Utc::now().timestamp_millis());
+        let correlation_id = format!(
+            "repro-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
         let start = Instant::now();
 
         // Setup: Create test connector in temp directory
@@ -163,7 +167,11 @@ mod e2e_reproducible {
     #[test]
     fn packaged_artifact_has_valid_metadata() {
         let capture = LogCapture::new();
-        let correlation_id = format!("meta-{}-{}", std::process::id(), Utc::now().timestamp_millis());
+        let correlation_id = format!(
+            "meta-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
         let start = Instant::now();
 
         let temp = TempDir::new().expect("tempdir");
@@ -199,29 +207,37 @@ mod e2e_reproducible {
             .get("build_metadata_path")
             .and_then(|v| v.as_str())
             .expect("build_metadata_path");
-        let metadata: Value = serde_json::from_str(
-            &fs::read_to_string(metadata_path).expect("read build metadata"),
-        )
-        .expect("parse build metadata");
+        let metadata: Value =
+            serde_json::from_str(&fs::read_to_string(metadata_path).expect("read build metadata"))
+                .expect("parse build metadata");
 
         let rust_version = metadata
             .get("rust_version")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         // rust_version can be "unknown" if rustc isn't available, but should exist
-        assert!(metadata.get("rust_version").is_some(), "rust_version key should exist");
+        assert!(
+            metadata.get("rust_version").is_some(),
+            "rust_version key should exist"
+        );
 
         let _cargo_version = metadata
             .get("cargo_version")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        assert!(metadata.get("cargo_version").is_some(), "cargo_version key should exist");
+        assert!(
+            metadata.get("cargo_version").is_some(),
+            "cargo_version key should exist"
+        );
 
         let target_triple = metadata
             .get("target_triple")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        assert!(metadata.get("target_triple").is_some(), "target_triple key should exist");
+        assert!(
+            metadata.get("target_triple").is_some(),
+            "target_triple key should exist"
+        );
 
         let profile = metadata
             .get("profile")
@@ -272,7 +288,11 @@ mod e2e_reproducible {
     #[test]
     fn packaged_binary_exists_and_has_content() {
         let capture = LogCapture::new();
-        let correlation_id = format!("bin-{}-{}", std::process::id(), Utc::now().timestamp_millis());
+        let correlation_id = format!(
+            "bin-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
         let start = Instant::now();
 
         let temp = TempDir::new().expect("tempdir");
@@ -291,7 +311,10 @@ mod e2e_reproducible {
 
         // Verify binary exists
         let binary_file = std::path::Path::new(binary_path);
-        assert!(binary_file.exists(), "Binary file should exist at {binary_path}");
+        assert!(
+            binary_file.exists(),
+            "Binary file should exist at {binary_path}"
+        );
 
         // Verify binary has content
         let metadata = fs::metadata(binary_file).expect("binary metadata");

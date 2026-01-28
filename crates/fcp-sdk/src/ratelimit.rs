@@ -121,12 +121,15 @@ impl PoolState {
     fn try_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
         self.maybe_reset_window();
 
-        let effective_limit = self.config.config.requests
-            + self.config.config.burst.unwrap_or(0);
+        let effective_limit = self.config.config.requests + self.config.config.burst.unwrap_or(0);
 
         if self.count + amount > effective_limit {
             let retry_after_ms = self.ms_until_reset();
-            return Err(RateLimitError::for_pool(&self.config, self.count, retry_after_ms));
+            return Err(RateLimitError::for_pool(
+                &self.config,
+                self.count,
+                retry_after_ms,
+            ));
         }
 
         self.count += amount;
@@ -147,8 +150,7 @@ impl PoolState {
     /// Get current status.
     fn status(&mut self) -> RateLimitStatus {
         self.maybe_reset_window();
-        let effective_limit = self.config.config.requests
-            + self.config.config.burst.unwrap_or(0);
+        let effective_limit = self.config.config.requests + self.config.config.burst.unwrap_or(0);
         let remaining = effective_limit.saturating_sub(self.count);
         let reset_at = {
             let elapsed_secs = self.window_start.elapsed().as_secs();
@@ -442,13 +444,13 @@ mod tests {
     #[test]
     fn tracker_from_declarations() {
         let decls = RateLimitDeclarations {
-            limits: vec![
-                test_pool("api", 10, 60),
-                test_pool("tokens", 1000, 3600),
-            ],
+            limits: vec![test_pool("api", 10, 60), test_pool("tokens", 1000, 3600)],
             tool_pool_map: HashMap::from([
                 ("send".to_string(), vec!["api".to_string()]),
-                ("generate".to_string(), vec!["api".to_string(), "tokens".to_string()]),
+                (
+                    "generate".to_string(),
+                    vec!["api".to_string(), "tokens".to_string()],
+                ),
             ]),
         };
 
@@ -464,9 +466,7 @@ mod tests {
     fn tracker_consume_and_limit() {
         let decls = RateLimitDeclarations {
             limits: vec![test_pool("api", 3, 60)],
-            tool_pool_map: HashMap::from([
-                ("send".to_string(), vec!["api".to_string()]),
-            ]),
+            tool_pool_map: HashMap::from([("send".to_string(), vec!["api".to_string()])]),
         };
 
         let tracker = RateLimitTracker::from_declarations(&decls);
@@ -487,13 +487,11 @@ mod tests {
     #[test]
     fn tracker_operation_status() {
         let decls = RateLimitDeclarations {
-            limits: vec![
-                test_pool("api", 10, 60),
-                test_pool("tokens", 1000, 3600),
-            ],
-            tool_pool_map: HashMap::from([
-                ("generate".to_string(), vec!["api".to_string(), "tokens".to_string()]),
-            ]),
+            limits: vec![test_pool("api", 10, 60), test_pool("tokens", 1000, 3600)],
+            tool_pool_map: HashMap::from([(
+                "generate".to_string(),
+                vec!["api".to_string(), "tokens".to_string()],
+            )]),
         };
 
         let tracker = RateLimitTracker::from_declarations(&decls);
@@ -559,9 +557,7 @@ mod tests {
 
         let decls = RateLimitDeclarations {
             limits: vec![pool],
-            tool_pool_map: HashMap::from([
-                ("op".to_string(), vec!["soft".to_string()]),
-            ]),
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["soft".to_string()])]),
         };
 
         let tracker = RateLimitTracker::from_declarations(&decls);

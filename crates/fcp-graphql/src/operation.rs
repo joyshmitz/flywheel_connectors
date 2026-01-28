@@ -39,7 +39,7 @@ pub trait GraphqlOperation {
     /// Variables type.
     type Variables: Serialize + Send + Sync;
     /// Response data type.
-    type ResponseData: for<'de> Deserialize<'de> + Send + Sync;
+    type ResponseData: Serialize + for<'de> Deserialize<'de> + Send + Sync;
 
     /// GraphQL query text.
     const QUERY: &'static str;
@@ -126,6 +126,7 @@ impl<V> GraphqlBatchItem<V> {
 
 /// GraphQL response container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct GraphqlResponse<T> {
     /// Response data.
     #[serde(default)]

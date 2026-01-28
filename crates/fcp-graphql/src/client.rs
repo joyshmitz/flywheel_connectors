@@ -1,16 +1,16 @@
 //! GraphQL HTTP client implementation.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, RETRY_AFTER};
-use serde::de::DeserializeOwned;
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::error::{GraphqlClientError, GraphqlError};
@@ -74,7 +74,11 @@ pub struct GraphqlClientMetricsSnapshot {
 
 #[derive(Debug, Clone)]
 struct DedupState {
-    inner: Arc<tokio::sync::Mutex<HashMap<u64, Shared<BoxFuture<'static, Result<Vec<u8>, GraphqlClientError>>>>>>,
+    inner: Arc<
+        tokio::sync::Mutex<
+            HashMap<u64, Shared<BoxFuture<'static, Result<Vec<u8>, GraphqlClientError>>>>,
+        >,
+    >,
 }
 
 impl DedupState {
@@ -212,7 +216,11 @@ impl GraphqlClient {
         let endpoint = endpoint.into();
         let config = GraphqlClientConfig::default();
         Self::with_config(endpoint.clone(), config).unwrap_or_else(|_| {
-            Self::new_with_client(endpoint, reqwest::Client::new(), GraphqlClientConfig::default())
+            Self::new_with_client(
+                endpoint,
+                reqwest::Client::new(),
+                GraphqlClientConfig::default(),
+            )
         })
     }
 
@@ -261,8 +269,13 @@ impl GraphqlClient {
     ) -> Result<GraphqlResponse<O::ResponseData>, GraphqlClientError> {
         let request = GraphqlRequest::new(GraphqlQuery::from_static(O::QUERY), variables)
             .with_operation_name(O::OPERATION_NAME);
-        self.execute_request(request, O::variables_schema(), O::response_schema(), O::is_idempotent())
-            .await
+        self.execute_request(
+            request,
+            O::variables_schema(),
+            O::response_schema(),
+            O::is_idempotent(),
+        )
+        .await
     }
 
     /// Execute a typed operation and return data only (error on GraphQL errors).
@@ -291,7 +304,7 @@ impl GraphqlClient {
     ) -> Result<GraphqlResponse<R>, GraphqlClientError>
     where
         V: Serialize,
-        R: DeserializeOwned,
+        R: DeserializeOwned + Serialize,
     {
         if let (SchemaValidationMode::VariablesAndResponse, Some(schema)) =
             (self.config.validation, variables_schema)
@@ -320,8 +333,10 @@ impl GraphqlClient {
         let bytes = self.execute_bytes(body, idempotent).await?;
         let mut response: GraphqlResponse<R> = serde_json::from_slice(&bytes)?;
 
-        if let (SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly, Some(schema)) =
-            (self.config.validation, response_schema)
+        if let (
+            SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly,
+            Some(schema),
+        ) = (self.config.validation, response_schema)
         {
             if let Some(ref data) = response.data {
                 let value = serde_json::to_value(data)?;
@@ -330,7 +345,9 @@ impl GraphqlClient {
         }
 
         if response.errors.is_empty() {
-            self.metrics.requests_success.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_success
+                .fetch_add(1, Ordering::Relaxed);
         } else {
             self.metrics.requests_error.fetch_add(1, Ordering::Relaxed);
         }
@@ -350,8 +367,13 @@ impl GraphqlClient {
                     .with_operation_name(O::OPERATION_NAME)
             })
             .collect();
-        self.execute_batch_request(items, O::variables_schema(), O::response_schema(), O::is_idempotent())
-            .await
+        self.execute_batch_request(
+            items,
+            O::variables_schema(),
+            O::response_schema(),
+            O::is_idempotent(),
+        )
+        .await
     }
 
     /// Execute a batch request with shared schemas.
@@ -364,7 +386,7 @@ impl GraphqlClient {
     ) -> Result<Vec<GraphqlResponse<R>>, GraphqlClientError>
     where
         V: Serialize,
-        R: DeserializeOwned,
+        R: DeserializeOwned + Serialize,
     {
         if let (SchemaValidationMode::VariablesAndResponse, Some(schema)) =
             (self.config.validation, variables_schema)
@@ -379,8 +401,10 @@ impl GraphqlClient {
         let bytes = self.execute_bytes(body, idempotent).await?;
         let mut response: Vec<GraphqlResponse<R>> = serde_json::from_slice(&bytes)?;
 
-        if let (SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly, Some(schema)) =
-            (self.config.validation, response_schema)
+        if let (
+            SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly,
+            Some(schema),
+        ) = (self.config.validation, response_schema)
         {
             for item in &response {
                 if let Some(ref data) = item.data {
@@ -391,7 +415,9 @@ impl GraphqlClient {
         }
 
         if response.iter().all(|item| item.errors.is_empty()) {
-            self.metrics.requests_success.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .requests_success
+                .fetch_add(1, Ordering::Relaxed);
         } else {
             self.metrics.requests_error.fetch_add(1, Ordering::Relaxed);
         }
@@ -410,11 +436,18 @@ impl GraphqlClient {
         if let Some(state) = &self.dedup_state {
             let key = hash_bytes(&body_bytes);
             let mut guard = state.inner.lock().await;
-            if let Some(shared) = guard.get(&key) {
-                drop(guard);
-                return shared.clone().await;
+            let existing = guard.get(&key).cloned();
+            drop(guard);
+            if let Some(shared) = existing {
+                return shared.await;
             }
-            let future = self.send_with_retry(body_bytes.clone(), idempotent).boxed().shared();
+
+            let client = self.clone();
+            let payload = body_bytes.clone();
+            let future = async move { client.send_with_retry(payload, idempotent).await }
+                .boxed()
+                .shared();
+            let mut guard = state.inner.lock().await;
             guard.insert(key, future.clone());
             drop(guard);
             let result = future.await;
@@ -440,7 +473,9 @@ impl GraphqlClient {
                     let decision = self.config.retry.decide(&err, attempt, idempotent);
                     match decision {
                         RetryDecision::RetryAfter(delay) => {
-                            self.metrics.requests_retried.fetch_add(1, Ordering::Relaxed);
+                            self.metrics
+                                .requests_retried
+                                .fetch_add(1, Ordering::Relaxed);
                             debug!("retrying GraphQL request after {:?}", delay);
                             tokio::time::sleep(delay).await;
                             attempt += 1;

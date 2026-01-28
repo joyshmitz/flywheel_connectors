@@ -1759,7 +1759,10 @@ test_op = ["pool"]
         let manifest = ConnectorManifest::parse_str(&toml)
             .unwrap_or_else(|e| panic!("enforcement={enforcement} should parse: {e}"));
         let rate_limits = manifest.rate_limits.expect("rate_limits should be present");
-        assert_eq!(rate_limits.pools[0].enforcement.as_deref(), Some(enforcement));
+        assert_eq!(
+            rate_limits.pools[0].enforcement.as_deref(),
+            Some(enforcement)
+        );
     }
 }
 
@@ -1869,5 +1872,8 @@ test_op = ["api"]
     assert_eq!(pool.scope, fcp_core::RateLimitScope::Credential);
 
     assert!(decls.tool_pool_map.contains_key("test_op"));
-    assert_eq!(decls.tool_pool_map.get("test_op").unwrap(), &vec!["api".to_string()]);
+    assert_eq!(
+        decls.tool_pool_map.get("test_op").unwrap(),
+        &vec!["api".to_string()]
+    );
 }

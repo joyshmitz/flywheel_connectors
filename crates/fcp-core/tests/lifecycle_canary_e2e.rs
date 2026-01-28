@@ -180,7 +180,10 @@ impl MockLifecycleManager {
 
 #[async_trait]
 impl LifecycleManager for MockLifecycleManager {
-    async fn get(&self, connector_id: &ConnectorId) -> Result<Option<LifecycleRecord>, LifecycleError> {
+    async fn get(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<Option<LifecycleRecord>, LifecycleError> {
         let records = self.records.read().await;
         Ok(records.get(connector_id).cloned())
     }
@@ -195,11 +198,16 @@ impl LifecycleManager for MockLifecycleManager {
 
     async fn promote(&self, connector_id: &ConnectorId) -> Result<LifecycleRecord, LifecycleError> {
         let mut records = self.records.write().await;
-        let record = records.get_mut(connector_id).ok_or_else(|| LifecycleError::NotFound {
-            connector_id: connector_id.clone(),
-        })?;
+        let record = records
+            .get_mut(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
 
-        record.transition(LifecycleState::Production, TransitionReason::ManualPromotion)?;
+        record.transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )?;
         let result = record.clone();
         drop(records);
         Ok(result)
@@ -211,9 +219,11 @@ impl LifecycleManager for MockLifecycleManager {
         reason: Option<String>,
     ) -> Result<LifecycleRecord, LifecycleError> {
         let mut records = self.records.write().await;
-        let record = records.get_mut(connector_id).ok_or_else(|| LifecycleError::NotFound {
-            connector_id: connector_id.clone(),
-        })?;
+        let record = records
+            .get_mut(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
 
         record.transition(
             LifecycleState::RolledBack,
@@ -226,9 +236,11 @@ impl LifecycleManager for MockLifecycleManager {
 
     async fn status(&self, connector_id: &ConnectorId) -> Result<LifecycleStatus, LifecycleError> {
         let records = self.records.read().await;
-        let record = records.get(connector_id).ok_or_else(|| LifecycleError::NotFound {
-            connector_id: connector_id.clone(),
-        })?;
+        let record = records
+            .get(connector_id)
+            .ok_or_else(|| LifecycleError::NotFound {
+                connector_id: connector_id.clone(),
+            })?;
 
         let status = LifecycleStatus {
             connector_id: connector_id.clone(),
@@ -277,11 +289,13 @@ async fn deploy_to_canary(
     version: semver::Version,
     policy: CanaryPolicy,
 ) -> LifecycleRecord {
-    let mut record = LifecycleRecord::new(connector_id, version)
-        .with_canary_policy(policy);
+    let mut record = LifecycleRecord::new(connector_id, version).with_canary_policy(policy);
 
     record
-        .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
         .expect("pending -> installing");
     record
         .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -332,7 +346,8 @@ async fn test_healthy_canary_promotes_to_production() {
     );
 
     // Deploy to canary
-    let mut record = deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
+    let mut record =
+        deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
 
     ctx.log_transition(
         &connector_id,
@@ -439,7 +454,8 @@ async fn test_unhealthy_canary_triggers_rollback() {
     );
 
     // Deploy to canary
-    let mut record = deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
+    let mut record =
+        deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
 
     ctx.log_transition(
         &connector_id,
@@ -543,12 +559,16 @@ async fn test_multi_version_canary_rollback() {
         .with_min_samples(5)
         .with_min_canary_duration(0);
 
-    let mut record_v1 = deploy_to_canary(&manager, connector_id.clone(), v1.clone(), policy.clone()).await;
+    let mut record_v1 =
+        deploy_to_canary(&manager, connector_id.clone(), v1.clone(), policy.clone()).await;
 
     // Simulate healthy v1 and promote
     add_health_samples(&mut record_v1, 50, 0);
     record_v1
-        .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
+        .transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )
         .expect("v1 -> production");
     manager.save(&record_v1).await.expect("save v1 production");
 
@@ -573,7 +593,10 @@ async fn test_multi_version_canary_rollback() {
         .with_previous_version(v1.clone());
 
     record_v2
-        .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
         .expect("v2 pending -> installing");
     record_v2
         .transition(
@@ -705,7 +728,7 @@ async fn test_canary_gray_zone_waits() {
     // Deploy with thresholds that create a gray zone
     let policy = CanaryPolicy::new()
         .with_promotion_threshold(95) // Need 95% to promote
-        .with_rollback_threshold(70)  // Below 70% triggers rollback
+        .with_rollback_threshold(70) // Below 70% triggers rollback
         .with_min_samples(10)
         .with_min_canary_duration(0);
 
@@ -718,7 +741,8 @@ async fn test_canary_gray_zone_waits() {
         })),
     );
 
-    let mut record = deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
+    let mut record =
+        deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
 
     // Simulate traffic in the gray zone (85% success rate)
     add_health_samples(&mut record, 85, 15);
@@ -794,7 +818,8 @@ async fn test_insufficient_samples_delays_promotion() {
         })),
     );
 
-    let mut record = deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
+    let mut record =
+        deploy_to_canary(&manager, connector_id.clone(), version.clone(), policy).await;
 
     // Add only 50 samples (below minimum) with 100% success
     add_health_samples(&mut record, 50, 0);

@@ -26,10 +26,11 @@ impl SchemaCache {
         }
 
         let value: Value = serde_json::from_str(schema)?;
-        let validator = Validator::new(&value).map_err(|err| GraphqlClientError::SchemaValidation {
-            message: "invalid JSON Schema".to_string(),
-            errors: vec![err.to_string()],
-        })?;
+        let validator =
+            Validator::new(&value).map_err(|err| GraphqlClientError::SchemaValidation {
+                message: "invalid JSON Schema".to_string(),
+                errors: vec![err.to_string()],
+            })?;
 
         let validator = Arc::new(validator);
         self.inner

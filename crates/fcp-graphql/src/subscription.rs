@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -46,7 +45,8 @@ impl Default for GraphqlSubscriptionConfig {
 }
 
 /// Subscription stream type.
-pub type GraphqlSubscriptionStream<T> = ReceiverStream<Result<GraphqlResponse<T>, GraphqlClientError>>;
+pub type GraphqlSubscriptionStream<T> =
+    ReceiverStream<Result<GraphqlResponse<T>, GraphqlClientError>>;
 
 /// GraphQL subscription client.
 #[derive(Debug, Clone)]
@@ -93,12 +93,13 @@ impl GraphqlSubscriptionClient {
             ws_config.headers.insert(key.clone(), value.clone());
         }
         let client = WsClient::with_config(self.url.clone(), ws_config);
-        let mut connection = client
-            .connect()
-            .await
-            .map_err(|err| GraphqlClientError::Protocol {
-                message: format!("{} websocket connect failed: {err}", self.service_name),
-            })?;
+        let mut connection =
+            client
+                .connect()
+                .await
+                .map_err(|err| GraphqlClientError::Protocol {
+                    message: format!("{} websocket connect failed: {err}", self.service_name),
+                })?;
 
         let init = GraphqlWsMessage {
             message_type: "connection_init".to_string(),
@@ -119,27 +120,24 @@ impl GraphqlSubscriptionClient {
                 let ack_msg = decode_ws_message(message)?;
                 if ack_msg.message_type != "connection_ack" {
                     return Err(GraphqlClientError::Protocol {
-                        message: format!(
-                            "expected connection_ack, got {}",
-                            ack_msg.message_type
-                        ),
+                        message: format!("expected connection_ack, got {}", ack_msg.message_type),
                     });
                 }
             }
             Ok(Ok(None)) => {
                 return Err(GraphqlClientError::Protocol {
                     message: "connection closed before ack".to_string(),
-                })
+                });
             }
             Ok(Err(err)) => {
                 return Err(GraphqlClientError::Protocol {
                     message: format!("{} connection error: {err}", self.service_name),
-                })
+                });
             }
             Err(_) => {
                 return Err(GraphqlClientError::Protocol {
                     message: format!("{} connection_ack timeout", self.service_name),
-                })
+                });
             }
         }
 
@@ -253,10 +251,12 @@ impl GraphqlSubscriptionClient {
 
 fn decode_ws_message(message: WsMessage) -> Result<GraphqlWsMessage, GraphqlClientError> {
     match message {
-        WsMessage::Text(text) => serde_json::from_str(&text)
-            .map_err(|err| GraphqlClientError::Json(err.to_string())),
-        WsMessage::Binary(binary) => serde_json::from_slice(&binary)
-            .map_err(|err| GraphqlClientError::Json(err.to_string())),
+        WsMessage::Text(text) => {
+            serde_json::from_str(&text).map_err(|err| GraphqlClientError::Json(err.to_string()))
+        }
+        WsMessage::Binary(binary) => {
+            serde_json::from_slice(&binary).map_err(|err| GraphqlClientError::Json(err.to_string()))
+        }
         WsMessage::Ping(_) | WsMessage::Pong(_) => Err(GraphqlClientError::Protocol {
             message: "unexpected websocket ping/pong".to_string(),
         }),

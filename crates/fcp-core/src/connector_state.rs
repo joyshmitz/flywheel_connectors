@@ -601,11 +601,7 @@ impl ForkEvent {
     /// Returns the object ID of the branch with the higher `lease_seq`.
     /// If `lease_seq` values are equal, returns `None` (requires manual resolution).
     #[must_use]
-    pub fn resolve_by_lease(
-        &self,
-        lease_seq_a: u64,
-        lease_seq_b: u64,
-    ) -> Option<ObjectId> {
+    pub fn resolve_by_lease(&self, lease_seq_a: u64, lease_seq_b: u64) -> Option<ObjectId> {
         use std::cmp::Ordering;
         match lease_seq_a.cmp(&lease_seq_b) {
             Ordering::Greater => Some(self.branch_a),
@@ -749,7 +745,9 @@ impl StateForkDetector {
             .seq_by_id
             .iter()
             .max_by_key(|(_, seq)| *seq)
-            .map_or((ObjectId::from_bytes([0u8; 32]), 0), |(id, seq)| (*id, *seq));
+            .map_or((ObjectId::from_bytes([0u8; 32]), 0), |(id, seq)| {
+                (*id, *seq)
+            });
 
         StateForkDetectionResult::NoFork { head, seq }
     }
@@ -1371,27 +1369,40 @@ mod tests {
         let outcome = detector.resolve_manual(fork, invalid_head, 1_700_000_001);
 
         assert!(!outcome.resolved);
-        assert!(outcome.failure_reason.unwrap().contains("not one of the fork branches"));
+        assert!(
+            outcome
+                .failure_reason
+                .unwrap()
+                .contains("not one of the fork branches")
+        );
     }
 
     #[test]
     fn fork_resolution_is_valid_for_model() {
         assert!(ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::SingletonWriter));
         assert!(!ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::Stateless));
-        assert!(!ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::Crdt {
-            crdt_type: CrdtType::LwwMap,
-        }));
+        assert!(
+            !ForkResolution::ChooseByLease.is_valid_for(&ConnectorStateModel::Crdt {
+                crdt_type: CrdtType::LwwMap,
+            })
+        );
 
-        assert!(ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::SingletonWriter));
+        assert!(
+            ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::SingletonWriter)
+        );
         assert!(ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::Stateless));
-        assert!(ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::Crdt {
-            crdt_type: CrdtType::LwwMap,
-        }));
+        assert!(
+            ForkResolution::ManualResolution.is_valid_for(&ConnectorStateModel::Crdt {
+                crdt_type: CrdtType::LwwMap,
+            })
+        );
 
         assert!(!ForkResolution::CrdtMerge.is_valid_for(&ConnectorStateModel::SingletonWriter));
-        assert!(ForkResolution::CrdtMerge.is_valid_for(&ConnectorStateModel::Crdt {
-            crdt_type: CrdtType::LwwMap,
-        }));
+        assert!(
+            ForkResolution::CrdtMerge.is_valid_for(&ConnectorStateModel::Crdt {
+                crdt_type: CrdtType::LwwMap,
+            })
+        );
     }
 
     #[test]

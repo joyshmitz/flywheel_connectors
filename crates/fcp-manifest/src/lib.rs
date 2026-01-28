@@ -14,8 +14,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_core::{
     ApprovalMode as CoreApprovalMode, CapabilityId, ConnectorId, IdValidationError,
-    IdempotencyClass, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool,
-    RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
+    IdempotencyClass, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool, RiskLevel,
+    SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
 };
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -1404,42 +1404,42 @@ impl RateLimitsSection {
         use fcp_core::{RateLimitConfig, RateLimitEnforcement, RateLimitScope, RateLimitUnit};
         use std::time::Duration;
 
-        let limits = self
-            .pools
-            .iter()
-            .map(|pool| RateLimitPool {
-                id: pool.id.clone(),
-                description: pool.description.clone().unwrap_or_default(),
-                config: RateLimitConfig {
-                    requests: pool.requests,
-                    window: Duration::from_millis(pool.window_ms),
-                    burst: pool.burst,
-                    unit: pool.unit.as_ref().map_or(RateLimitUnit::Requests, |u| {
-                        match u.as_str() {
-                            "tokens" => RateLimitUnit::Tokens,
-                            "bytes" => RateLimitUnit::Bytes,
-                            "custom" => RateLimitUnit::Custom,
-                            _ => RateLimitUnit::Requests,
+        let limits =
+            self.pools
+                .iter()
+                .map(|pool| RateLimitPool {
+                    id: pool.id.clone(),
+                    description: pool.description.clone().unwrap_or_default(),
+                    config: RateLimitConfig {
+                        requests: pool.requests,
+                        window: Duration::from_millis(pool.window_ms),
+                        burst: pool.burst,
+                        unit: pool.unit.as_ref().map_or(RateLimitUnit::Requests, |u| {
+                            match u.as_str() {
+                                "tokens" => RateLimitUnit::Tokens,
+                                "bytes" => RateLimitUnit::Bytes,
+                                "custom" => RateLimitUnit::Custom,
+                                _ => RateLimitUnit::Requests,
+                            }
+                        }),
+                    },
+                    enforcement: pool.enforcement.as_ref().map_or(
+                        RateLimitEnforcement::Hard,
+                        |e| match e.as_str() {
+                            "soft" => RateLimitEnforcement::Soft,
+                            "advisory" => RateLimitEnforcement::Advisory,
+                            _ => RateLimitEnforcement::Hard,
+                        },
+                    ),
+                    scope: pool.scope.as_ref().map_or(RateLimitScope::Instance, |s| {
+                        match s.as_str() {
+                            "credential" => RateLimitScope::Credential,
+                            "global" => RateLimitScope::Global,
+                            _ => RateLimitScope::Instance,
                         }
                     }),
-                },
-                enforcement: pool.enforcement.as_ref().map_or(
-                    RateLimitEnforcement::Hard,
-                    |e| match e.as_str() {
-                        "soft" => RateLimitEnforcement::Soft,
-                        "advisory" => RateLimitEnforcement::Advisory,
-                        _ => RateLimitEnforcement::Hard,
-                    },
-                ),
-                scope: pool.scope.as_ref().map_or(RateLimitScope::Instance, |s| {
-                    match s.as_str() {
-                        "credential" => RateLimitScope::Credential,
-                        "global" => RateLimitScope::Global,
-                        _ => RateLimitScope::Instance,
-                    }
-                }),
-            })
-            .collect();
+                })
+                .collect();
 
         RateLimitDeclarations {
             limits,

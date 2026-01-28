@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use pretty_assertions::assert_eq;
@@ -8,8 +8,7 @@ use wiremock::matchers::{body_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_graphql::{
-    GraphqlClientBuilder, GraphqlClientError, GraphqlOperation, RetryPolicy,
-    SchemaValidationMode,
+    GraphqlClientBuilder, GraphqlClientError, GraphqlOperation, RetryPolicy, SchemaValidationMode,
 };
 
 #[derive(Debug, Serialize)]

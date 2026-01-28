@@ -417,8 +417,12 @@ impl MeshNode {
     {
         request.validate_idempotency_key()?;
 
-        let claims =
-            verifier.verify(&request.capability_token, required_capability, &request.operation, resource_uris)?;
+        let claims = verifier.verify(
+            &request.capability_token,
+            required_capability,
+            &request.operation,
+            resource_uris,
+        )?;
 
         if let Some(holder_node) = claims.get_holder_node() {
             let proof = request.holder_proof.as_ref().ok_or_else(|| {

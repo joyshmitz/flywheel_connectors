@@ -1345,13 +1345,19 @@ mod tests {
         let recoverable: PollResult<i32> = PollResult::recoverable("timeout");
         assert!(matches!(
             recoverable,
-            PollResult::RecoverableError { retry_after_ms: None, .. }
+            PollResult::RecoverableError {
+                retry_after_ms: None,
+                ..
+            }
         ));
 
         let rate_limited: PollResult<i32> = PollResult::rate_limited("too fast", 5000);
         assert!(matches!(
             rate_limited,
-            PollResult::RecoverableError { retry_after_ms: Some(5000), .. }
+            PollResult::RecoverableError {
+                retry_after_ms: Some(5000),
+                ..
+            }
         ));
 
         let fatal: PollResult<i32> = PollResult::fatal("auth failed");
