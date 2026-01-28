@@ -223,6 +223,11 @@ async fn test_introspect_returns_rate_limits() {
             "Tool {} should reference discord_api rate limit",
             tool.name
         );
+        assert_eq!(tool.risk_level, RiskLevel::Low);
+        assert_eq!(tool.safety_tier, SafetyTier::Safe);
+        assert_eq!(tool.idempotency, IdempotencyClass::None);
+        assert_eq!(tool.approval_mode, Some(ApprovalMode::None));
+        assert!(tool.ai_hints.is_some());
     }
 }
 
