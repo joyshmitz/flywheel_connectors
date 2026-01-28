@@ -255,6 +255,7 @@ impl RateLimiter for FixedWindow {
         }
 
         let elapsed = now.duration_since(state.window_start);
+        drop(state);
         self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO)
     }
 
@@ -275,6 +276,7 @@ impl RateLimiter for FixedWindow {
 
         let remaining = self.limit.saturating_sub(state.count);
         let elapsed = now.duration_since(state.window_start);
+        drop(state);
         let reset_after = self.window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
 
         RateLimitState {

@@ -139,6 +139,7 @@ impl RateLimiter for LeakyBucket {
         let mut last_leak = self.last_leak.lock();
         let mut level = self.level.lock();
         *level = 0.0;
+        drop(level);
         *last_leak = Instant::now();
     }
 
@@ -252,7 +253,7 @@ impl RateLimiter for SmoothPacer {
 
     fn state(&self) -> RateLimitState {
         let last_time_val = *self.last_request.lock();
-        let (remaining, reset_after) = if let Some(last) = last_time_val {
+        let (remaining, reset_after) = last_time_val.map_or((1, Duration::ZERO), |last| {
             let elapsed = Instant::now().duration_since(last);
             if elapsed >= self.min_interval {
                 (1, Duration::ZERO)
@@ -264,9 +265,7 @@ impl RateLimiter for SmoothPacer {
                         .unwrap_or(Duration::ZERO),
                 )
             }
-        } else {
-            (1, Duration::ZERO)
-        };
+        });
 
         RateLimitState {
             limit: 1,
