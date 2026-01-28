@@ -60,3 +60,4 @@ chrono.workspace = true
 [dev-dependencies]
 # Testing
 serde_json.workspace = true
+rand_chacha = "0.3"

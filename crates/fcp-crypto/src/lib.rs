@@ -92,6 +92,7 @@ pub mod hkdf;
 pub mod hpke_seal;
 pub mod kid;
 pub mod mac;
+pub mod shamir;
 pub mod x25519;
 
 // Re-export commonly used types at crate root
@@ -107,4 +108,8 @@ pub use hkdf::{DerivedKey, Fcp2KeyDerivation, HkdfSha256, hkdf_sha256, hkdf_sha2
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};
+pub use shamir::{
+    SealedShamirShare, ShamirError, ShamirResult, ShamirShare, ZeroizingSecret, open_share,
+    reconstruct_secret, seal_share, split_and_seal, split_secret, split_secret_with_rng,
+};
 pub use x25519::{X25519PublicKey, X25519SecretKey, X25519SharedSecret};

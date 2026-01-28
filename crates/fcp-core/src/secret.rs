@@ -123,6 +123,169 @@ pub enum SecretFormat {
     WrappedKey,
 }
 
+/// Cryptographic secret sharing scheme (NORMATIVE per V2 Spec §17.3).
+///
+/// Determines the algorithm used to split secrets into threshold shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretSharingScheme {
+    /// Shamir's Secret Sharing over GF(2^8).
+    ///
+    /// Uses the same Galois field as AES, providing:
+    /// - Information-theoretic security (k-1 shares reveal nothing)
+    /// - Constant-time operations (timing-attack resistant)
+    /// - Efficient byte-by-byte processing
+    #[default]
+    ShamirGf256,
+}
+
+/// Secret rotation policy (NORMATIVE per V2 Spec §17.3).
+///
+/// Controls automatic rotation of threshold secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretRotationPolicy {
+    /// Rotate after this many seconds.
+    pub rotate_after_secs: u64,
+
+    /// Both old and new secrets are valid during this overlap window (seconds).
+    ///
+    /// This allows graceful migration without downtime.
+    pub overlap_secs: u64,
+}
+
+impl SecretRotationPolicy {
+    /// Create a new rotation policy.
+    #[must_use]
+    pub const fn new(rotate_after_secs: u64, overlap_secs: u64) -> Self {
+        Self {
+            rotate_after_secs,
+            overlap_secs,
+        }
+    }
+
+    /// Default policy: rotate every 90 days with 24-hour overlap.
+    #[must_use]
+    pub const fn default_policy() -> Self {
+        Self {
+            rotate_after_secs: 90 * 24 * 60 * 60, // 90 days
+            overlap_secs: 24 * 60 * 60,           // 24 hours
+        }
+    }
+
+    /// Check if rotation is due.
+    #[must_use]
+    pub const fn is_rotation_due(&self, secret_age_secs: u64) -> bool {
+        secret_age_secs >= self.rotate_after_secs
+    }
+
+    /// Check if we're in the overlap window.
+    #[must_use]
+    pub const fn in_overlap_window(&self, since_rotation_secs: u64) -> bool {
+        since_rotation_secs < self.overlap_secs
+    }
+}
+
+impl Default for SecretRotationPolicy {
+    fn default() -> Self {
+        Self::default_policy()
+    }
+}
+
+/// Threshold secret object (NORMATIVE per V2 Spec §17.3).
+///
+/// Stores a secret split into k-of-n shares using Shamir's Secret Sharing.
+/// Each share is wrapped (encrypted) to a specific node's X25519 key using HPKE.
+///
+/// **Design philosophy:** "Secrets are never complete anywhere."
+///
+/// Unlike `SecretObject` which stores encrypted raw secrets, this type
+/// distributes shares across nodes so no single node can reconstruct the
+/// secret without cooperation from k-1 others.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThresholdSecretObject {
+    /// Standard object header.
+    pub header: ObjectHeader,
+
+    /// Unique identifier for this secret.
+    pub secret_id: SecretId,
+
+    /// Zone binding.
+    pub zone_id: ZoneId,
+
+    /// Threshold: number of shares needed to reconstruct (k).
+    pub k: u8,
+
+    /// Total number of shares distributed (n).
+    pub n: u8,
+
+    /// Secret sharing scheme used.
+    pub scheme: SecretSharingScheme,
+
+    /// Wrapped shares keyed by node identifier.
+    ///
+    /// Each share is HPKE-sealed to the node's X25519 public key.
+    /// A node can only decrypt its own share.
+    pub wrapped_shares: std::collections::HashMap<String, WrappedShare>,
+
+    /// Rotation policy.
+    pub rotation: SecretRotationPolicy,
+
+    /// Secret type for application semantics.
+    pub secret_type: SecretType,
+
+    /// Human-readable label (MUST NOT contain secret material).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// When this secret was created (Unix timestamp).
+    pub created_at: u64,
+
+    /// When this secret expires (Unix timestamp).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+
+    /// Generation number (increments on rotation).
+    pub generation: u32,
+}
+
+impl ThresholdSecretObject {
+    /// Check if this secret has expired.
+    #[must_use]
+    pub fn is_expired(&self, now_unix: u64) -> bool {
+        self.expires_at.is_some_and(|exp| now_unix >= exp)
+    }
+
+    /// Check if rotation is due.
+    #[must_use]
+    pub const fn needs_rotation(&self, now_unix: u64) -> bool {
+        let age = now_unix.saturating_sub(self.created_at);
+        self.rotation.is_rotation_due(age)
+    }
+
+    /// Get the zone ID.
+    #[must_use]
+    pub const fn zone_id(&self) -> &ZoneId {
+        &self.zone_id
+    }
+}
+
+/// A wrapped (HPKE-sealed) share for a specific node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedShare {
+    /// Share index (1-based, corresponds to Shamir x-coordinate).
+    pub index: u8,
+
+    /// HPKE-sealed share data.
+    ///
+    /// Format: HPKE ciphertext sealed to the node's X25519 public key.
+    /// AAD binding includes: `zone_id`, `recipient_node_id`, `issued_at`.
+    #[serde(with = "crate::util::hex_or_bytes_vec")]
+    pub sealed_data: Vec<u8>,
+
+    /// Key ID of the recipient's X25519 key.
+    pub recipient_key_id: String,
+}
+
 /// Mesh-stored secret object (NORMATIVE).
 ///
 /// Secrets are stored/represented as mesh objects. The actual secret material
@@ -802,5 +965,166 @@ mod tests {
         assert_eq!(material.len(), 100);
         drop(material);
         // If we got here without panic, the drop succeeded
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretSharingScheme Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn secret_sharing_scheme_default_is_shamir() {
+        assert_eq!(
+            SecretSharingScheme::default(),
+            SecretSharingScheme::ShamirGf256
+        );
+    }
+
+    #[test]
+    fn secret_sharing_scheme_serialization() {
+        let scheme = SecretSharingScheme::ShamirGf256;
+        let json = serde_json::to_string(&scheme).unwrap();
+        assert_eq!(json, "\"shamir_gf256\"");
+
+        let deserialized: SecretSharingScheme = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, SecretSharingScheme::ShamirGf256);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SecretRotationPolicy Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rotation_policy_default() {
+        let policy = SecretRotationPolicy::default();
+        assert_eq!(policy.rotate_after_secs, 90 * 24 * 60 * 60); // 90 days
+        assert_eq!(policy.overlap_secs, 24 * 60 * 60); // 24 hours
+    }
+
+    #[test]
+    fn rotation_policy_is_rotation_due() {
+        let policy = SecretRotationPolicy::new(3600, 300); // 1 hour rotation, 5 min overlap
+
+        assert!(!policy.is_rotation_due(0));
+        assert!(!policy.is_rotation_due(3599));
+        assert!(policy.is_rotation_due(3600));
+        assert!(policy.is_rotation_due(7200));
+    }
+
+    #[test]
+    fn rotation_policy_in_overlap_window() {
+        let policy = SecretRotationPolicy::new(3600, 300); // 1 hour rotation, 5 min overlap
+
+        assert!(policy.in_overlap_window(0));
+        assert!(policy.in_overlap_window(299));
+        assert!(!policy.in_overlap_window(300));
+        assert!(!policy.in_overlap_window(600));
+    }
+
+    #[test]
+    fn rotation_policy_serialization_roundtrip() {
+        let policy = SecretRotationPolicy::new(86400, 3600);
+        let json = serde_json::to_string(&policy).unwrap();
+        let deserialized: SecretRotationPolicy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.rotate_after_secs, 86400);
+        assert_eq!(deserialized.overlap_secs, 3600);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ThresholdSecretObject Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn threshold_secret_is_expired() {
+        let secret = ThresholdSecretObject {
+            header: test_header(),
+            secret_id: SecretId::new(),
+            zone_id: ZoneId::work(),
+            k: 3,
+            n: 5,
+            scheme: SecretSharingScheme::ShamirGf256,
+            wrapped_shares: std::collections::HashMap::new(),
+            rotation: SecretRotationPolicy::default(),
+            secret_type: SecretType::EncryptionKey,
+            label: Some("test-threshold".into()),
+            created_at: 1_700_000_000,
+            expires_at: Some(1_700_001_000),
+            generation: 1,
+        };
+
+        assert!(!secret.is_expired(1_700_000_500));
+        assert!(!secret.is_expired(1_700_000_999));
+        assert!(secret.is_expired(1_700_001_000));
+        assert!(secret.is_expired(1_700_002_000));
+    }
+
+    #[test]
+    fn threshold_secret_no_expiry() {
+        let secret = ThresholdSecretObject {
+            header: test_header(),
+            secret_id: SecretId::new(),
+            zone_id: ZoneId::work(),
+            k: 2,
+            n: 3,
+            scheme: SecretSharingScheme::ShamirGf256,
+            wrapped_shares: std::collections::HashMap::new(),
+            rotation: SecretRotationPolicy::default(),
+            secret_type: SecretType::ApiKey,
+            label: None,
+            created_at: 1_700_000_000,
+            expires_at: None,
+            generation: 0,
+        };
+
+        assert!(!secret.is_expired(u64::MAX));
+    }
+
+    #[test]
+    fn threshold_secret_needs_rotation() {
+        let policy = SecretRotationPolicy::new(3600, 300); // 1 hour rotation
+        let secret = ThresholdSecretObject {
+            header: test_header(),
+            secret_id: SecretId::new(),
+            zone_id: ZoneId::work(),
+            k: 3,
+            n: 5,
+            scheme: SecretSharingScheme::ShamirGf256,
+            wrapped_shares: std::collections::HashMap::new(),
+            rotation: policy,
+            secret_type: SecretType::EncryptionKey,
+            label: None,
+            created_at: 1_700_000_000,
+            expires_at: None,
+            generation: 1,
+        };
+
+        // At creation time
+        assert!(!secret.needs_rotation(1_700_000_000));
+        // Before rotation
+        assert!(!secret.needs_rotation(1_700_003_599));
+        // At rotation time
+        assert!(secret.needs_rotation(1_700_003_600));
+        // After rotation time
+        assert!(secret.needs_rotation(1_700_007_200));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WrappedShare Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wrapped_share_serialization_roundtrip() {
+        let share = WrappedShare {
+            index: 1,
+            sealed_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            recipient_key_id: "node-123-x25519".into(),
+        };
+
+        let json = serde_json::to_string(&share).unwrap();
+        let deserialized: WrappedShare = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.index, 1);
+        assert_eq!(deserialized.sealed_data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(deserialized.recipient_key_id, "node-123-x25519");
     }
 }
