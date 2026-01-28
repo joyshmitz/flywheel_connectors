@@ -61,6 +61,12 @@ pub use crate::streaming::{
     AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SubscribeOutcome,
 };
 
+// Runtime supervision helpers
+pub use crate::runtime::{
+    HealthTracker, HealthTransition, InMemoryPollingCursor, InMemoryStreamingSession,
+    PollingCursor, StreamingSession, SupervisorConfig,
+};
+
 // Schema validation helpers
 pub use crate::{SchemaValidationError, SchemaValidator, validate_json_schema};
 
