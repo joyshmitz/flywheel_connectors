@@ -661,7 +661,7 @@ mod limits_helper_tests {
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("array length"));
-                assert!(message.contains("$"));
+                assert!(message.contains('$'));
             }
             other => panic!("unexpected error: {other:?}"),
         }

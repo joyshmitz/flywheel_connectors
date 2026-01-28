@@ -384,23 +384,34 @@ impl Default for Limits {
 
 #[derive(Debug, Clone)]
 enum LimitViolation {
-    BytesExceeded { actual: usize, max: usize },
-    ArrayLenExceeded { path: String, len: usize, max: usize },
-    DepthExceeded { path: String, depth: usize, max: usize },
+    PayloadTooLarge {
+        actual: usize,
+        max: usize,
+    },
+    ArrayTooLong {
+        path: String,
+        len: usize,
+        max: usize,
+    },
+    DepthTooDeep {
+        path: String,
+        depth: usize,
+        max: usize,
+    },
 }
 
 impl LimitViolation {
     fn message(&self) -> String {
         match self {
-            Self::BytesExceeded { actual, max } => format!(
-                "payload size {actual} bytes exceeds limit {max} bytes"
-            ),
-            Self::ArrayLenExceeded { path, len, max } => format!(
-                "array length {len} exceeds limit {max} at {path}"
-            ),
-            Self::DepthExceeded { path, depth, max } => format!(
-                "max depth {max} exceeded at {path} (depth {depth})"
-            ),
+            Self::PayloadTooLarge { actual, max } => {
+                format!("payload size {actual} bytes exceeds limit {max} bytes")
+            }
+            Self::ArrayTooLong { path, len, max } => {
+                format!("array length {len} exceeds limit {max} at {path}")
+            }
+            Self::DepthTooDeep { path, depth, max } => {
+                format!("max depth {max} exceeded at {path} (depth {depth})")
+            }
         }
     }
 }
@@ -440,7 +451,7 @@ fn check_limits(
 ) -> Result<(), LimitViolation> {
     if let Some(max_depth) = limits.max_depth {
         if depth > max_depth {
-            return Err(LimitViolation::DepthExceeded {
+            return Err(LimitViolation::DepthTooDeep {
                 path: format_path(path),
                 depth,
                 max: max_depth,
@@ -452,7 +463,7 @@ fn check_limits(
         serde_json::Value::Array(items) => {
             if let Some(max_array_len) = limits.max_array_len {
                 if items.len() > max_array_len {
-                    return Err(LimitViolation::ArrayLenExceeded {
+                    return Err(LimitViolation::ArrayTooLong {
                         path: format_path(path),
                         len: items.len(),
                         max: max_array_len,
@@ -490,7 +501,7 @@ pub fn enforce_limits(value: &serde_json::Value, limits: &Limits) -> Result<(), 
         if size.len() > max_bytes {
             return Err(FcpError::InvalidRequest {
                 code: INVALID_REQUEST_LIMITS_CODE,
-                message: LimitViolation::BytesExceeded {
+                message: LimitViolation::PayloadTooLarge {
                     actual: size.len(),
                     max: max_bytes,
                 }
