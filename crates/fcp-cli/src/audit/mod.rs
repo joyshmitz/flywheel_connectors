@@ -136,6 +136,10 @@ pub struct TimelineArgs {
     #[arg(long)]
     pub events: PathBuf,
 
+    /// Number of events to include (0 = all).
+    #[arg(long, short = 'n', default_value_t = 100)]
+    pub limit: usize,
+
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -299,6 +303,11 @@ fn run_timeline(args: &TimelineArgs) -> Result<()> {
     }
 
     records.sort_by_key(|a| a.event.seq);
+
+    if args.limit > 0 && records.len() > args.limit {
+        let start = records.len().saturating_sub(args.limit);
+        records = records.split_off(start);
+    }
 
     let outputs: Vec<AuditEventOutput> = records.iter().map(to_event_output).collect();
     if args.json {
