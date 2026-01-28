@@ -1728,12 +1728,14 @@ dependencies = [
  "fcp-protocol",
  "fcp-store",
  "fcp-tailscale",
+ "fcp-testkit",
  "hex",
  "jsonschema",
  "pretty_assertions",
  "semver",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
