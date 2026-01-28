@@ -1,7 +1,7 @@
 # PLAN: Odoo v19 + Flywheel Connectors Integration
 
-**Версія:** 2.0.0
-**Дата оновлення:** 2026-01-27
+**Версія:** 2.1.0
+**Дата оновлення:** 2026-01-28
 **Статус:** Planning Phase
 
 ---
@@ -71,20 +71,36 @@
 - [ ] Gates визначаються Policy Profile
 - [ ] Тести для всіх трьох profiles
 
-#### 1.3 Odoo Authentication
+#### 1.3 Odoo Authentication (JSON-2 API)
+
+**ФАКТ:** Odoo v19 рекомендує JSON-2 API. XML-RPC/JSON-RPC deprecated (видалення в Odoo 20).
 
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
-| Імплементувати API key auth | High | 1 день |
+| Імплементувати Bearer token auth | High | 1 день |
+| Підтримка `X-Odoo-Database` header | High | 0.5 дня |
 | Написати auth tests | High | 1 день |
 
-#### 1.4 HTTP Client Wrapper
+#### 1.4 JSON-2 API Client
+
+**Endpoint:** `POST /json/2/{model}/{method}`
 
 | Завдання | Пріоритет | Оцінка |
 |----------|-----------|--------|
-| Створити Odoo client struct | High | 1 день |
-| Імплементувати JSON-RPC calls | High | 2 дні |
-| Додати retry logic | Medium | 1 день |
+| Створити OdooClient struct (референс: anthropic/client.rs) | High | 1 день |
+| Імплементувати JSON-2 API calls | High | 2 дні |
+| Інтегрувати `fcp-sdk/ratelimit` | High | 1 день |
+| Додати retry logic з backoff | Medium | 1 день |
+
+#### 1.5 Rate Limiting Integration (NEW)
+
+**Модуль:** `fcp-sdk/ratelimit`
+
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| Визначити rate limit pools | High | 0.5 дня |
+| Інтегрувати RateLimitTracker | High | 1 день |
+| Тести rate limiting | Medium | 0.5 дня |
 
 ---
 
@@ -197,7 +213,7 @@ operations:
 
 ---
 
-### Phase 6: Advanced Features
+### Phase 6: Advanced Features & Upstream Integration
 **Тривалість:** 2-3 тижні
 **Статус:** Future
 
@@ -216,6 +232,26 @@ operations:
 | ФОП → ТОВ migration path | Medium | 2 дні |
 | Audit trail preservation | High | 2 дні |
 | Gate backfill strategy | Medium | 1 день |
+
+#### 6.3 Lifecycle Management Integration (NEW)
+
+**Модуль:** `fcp-core/lifecycle`
+
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| Інтегрувати LifecycleState machine | Medium | 2 дні |
+| Canary deployment для Odoo connector | Medium | 2 дні |
+| Auto-rollback on health failure | Medium | 1 день |
+
+#### 6.4 Multi-site Odoo Sync (NEW)
+
+**Модуль:** `fcp-core/connector_state` (fork detection)
+
+| Завдання | Пріоритет | Оцінка |
+|----------|-----------|--------|
+| CRDT state model для Quality Alerts | Low | 3 дні |
+| Fork detection handling | Low | 2 дні |
+| Resolution strategy | Low | 2 дні |
 
 ---
 
@@ -265,18 +301,32 @@ operations:
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
+| **Odoo API** | JSON-2 API | Офіційно рекомендований, RPC deprecated |
+| **GraphQL** | НЕ використовувати | Офіційно не підтримується Odoo v19 |
 | Process model | Decomposition | Flexibility per enterprise type |
 | Automation control | Policy Profiles | Compliance requirements vary |
 | Gate persistence | Database | State survives restarts |
 | SOP integration | As Skills source | Single source of truth |
+| **Rate limiting** | fcp-sdk/ratelimit | Upstream модуль, готовий до використання |
+| **Lifecycle** | fcp-core/lifecycle | Canary deployments, health tracking |
+| **Connector pattern** | anthropic референс | JSON-RPC protocol loop, BaseConnector |
 
-### 3.2 Open Questions
+### 3.2 Closed Questions (v2.1)
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Який API використовувати? | JSON-2 API | XML-RPC/JSON-RPC deprecated, видалення в Odoo 20 |
+| Чи використовувати fcp-graphql? | НІ | Odoo не має GraphQL API |
+| Connector base | BaseConnector | З fcp-core, референс anthropic connector |
+
+### 3.3 Open Questions
 
 | Question | Options | Decision By |
 |----------|---------|-------------|
 | Gate timeout default | 24h / 48h / configurable | Phase 2 |
 | Hybrid enterprise handling | Strict / Flexible | Phase 1 |
 | Profile switching runtime | Allowed / Restart required | Phase 1 |
+| Multi-site sync strategy | CRDT / Lease-based | Phase 6 |
 
 ---
 
@@ -386,6 +436,7 @@ Phase 6: Advanced     [                    ]   0%
 |------|---------|--------|
 | 2026-01-27 | 1.0.0 | Initial plan |
 | 2026-01-27 | 2.0.0 | Added Process Decomposition, Policy Profiles, Enterprise Types |
+| 2026-01-28 | 2.1.0 | JSON-2 API (факт), upstream модулі integration, architecture decisions |
 
 ---
 
@@ -394,15 +445,39 @@ Phase 6: Advanced     [                    ]   0%
 ### Immediate (цей тиждень):
 1. [ ] Review updated plan
 2. [ ] Decide on hybrid enterprise handling
-3. [ ] Create `connectors/odoo/` scaffold
+3. [ ] Create `connectors/odoo/` scaffold (референс: `connectors/anthropic/`)
 
 ### Short-term (наступні 2 тижні):
-1. [ ] Implement Policy Profile system
-2. [ ] Implement basic Gate system
-3. [ ] First working operation with profile-aware behavior
+1. [ ] Implement OdooClient з JSON-2 API
+2. [ ] Integrate `fcp-sdk/ratelimit`
+3. [ ] Implement Policy Profile system
+4. [ ] First working operation with profile-aware behavior
 
 ---
 
-*Plan updated: 2026-01-27*
-*Version: 2.0.0*
-*Key changes: Process Decomposition, Policy Profiles, Enterprise Types, Updated timeline*
+## 10. Flywheel Connectors Ecosystem (v2.1)
+
+### Доступні crates (25 штук)
+
+| Crate | Використання для Odoo |
+|-------|----------------------|
+| **fcp-core** | FcpConnector trait, BaseConnector, lifecycle, connector_state |
+| **fcp-sdk** | ratelimit, runtime supervision, prelude |
+| **fcp-manifest** | Manifest parsing, validation |
+| **fcp-crypto** | Capability verification |
+| **fcp-cbor** | CBOR encoding |
+| **fcp-testkit** | Testing utilities |
+
+### Референс connectors
+
+| Connector | Корисність |
+|-----------|-----------|
+| **anthropic** | Головний референс: повна реалізація, JSON-RPC loop, client pattern |
+| discord | Bidirectional events |
+| telegram | Operational |
+
+---
+
+*Plan updated: 2026-01-28*
+*Version: 2.1.0*
+*Key changes: JSON-2 API decision, upstream modules integration, flywheel ecosystem overview*

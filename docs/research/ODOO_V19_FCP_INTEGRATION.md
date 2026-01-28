@@ -1,7 +1,7 @@
 # Дослідження інтеграції Odoo v19 + FCP (Flywheel Connector Protocol)
 
-**Версія:** 2.0.0
-**Дата:** 2026-01-27
+**Версія:** 2.1.0
+**Дата:** 2026-01-28
 **Статус:** Дослідження (Research Phase)
 
 ---
@@ -341,17 +341,22 @@ automation_by_enterprise:
 
 ## 5. Архітектура fcp-odoo Connector
 
-### 5.1 Структура модуля
+### 5.1 Структура модуля (на основі існуючих connectors)
+
+**Референс:** `connectors/anthropic/` — найповніший приклад bidirectional connector.
 
 ```
-fcp-connectors/
+flywheel_connectors/
 └── connectors/
     └── odoo/
         ├── Cargo.toml
         ├── src/
-        │   ├── lib.rs
-        │   ├── connector.rs          # Головний connector
-        │   ├── policy_profiles/      # NEW: Enterprise profiles
+        │   ├── main.rs               # Entry point: JSON-RPC protocol loop
+        │   ├── connector.rs          # OdooConnector impl FcpConnector trait
+        │   ├── client.rs             # Odoo JSON-2 API HTTP client
+        │   ├── types.rs              # Odoo-specific types
+        │   ├── error.rs              # Error handling
+        │   ├── policy_profiles/      # Enterprise profiles
         │   │   ├── mod.rs
         │   │   ├── fop_simplified.rs
         │   │   ├── tov_general.rs
@@ -363,13 +368,66 @@ fcp-connectors/
         │   │   ├── knowledge.rs      # KB/SOP operations
         │   │   ├── inventory.rs      # Stock operations
         │   │   └── kpi.rs            # Metrics/KPI
-        │   ├── decomposition/        # NEW: Process decomposition
+        │   ├── decomposition/        # Process decomposition
         │   │   ├── mod.rs
         │   │   ├── patterns.rs       # Reusable patterns
         │   │   └── gates.rs          # Gate definitions
-        │   ├── auth.rs
-        │   └── types.rs
+        │   └── ratelimit.rs          # Rate limit pool definitions
         └── tests/
+```
+
+### 5.1.1 FcpConnector Trait Implementation
+
+**Путь референсу:** `crates/fcp-core/src/connector.rs:22-94`
+
+```rust
+#[async_trait]
+pub trait FcpConnector: Send + Sync {
+    fn id(&self) -> &ConnectorId;
+    async fn configure(&mut self, config: Value) -> FcpResult<()>;
+    async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse>;
+    async fn health(&self) -> HealthSnapshot;
+    fn metrics(&self) -> ConnectorMetrics;
+    async fn shutdown(&mut self, req: ShutdownRequest) -> FcpResult<()>;
+    fn introspect(&self) -> Introspection;
+    fn rate_limits(&self) -> RateLimitDeclarations;
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse>;
+    async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse>;
+    // ... subscribe, unsubscribe, ack, nack
+}
+```
+
+### 5.1.2 Protocol Loop Pattern
+
+**Путь референсу:** `connectors/anthropic/src/main.rs:36-119`
+
+```rust
+fn run_fcp_loop() -> Result<()> {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let mut connector = OdooConnector::new();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    for line in stdin.lock().lines() {
+        let request: Value = serde_json::from_str(&line?)?;
+        let method = request["method"].as_str().unwrap_or("");
+
+        let result = runtime.block_on(async {
+            match method {
+                "configure" => connector.handle_configure(request["params"].clone()).await,
+                "handshake" => connector.handle_handshake(request["params"].clone()).await,
+                "invoke" => connector.handle_invoke(request["params"].clone()).await,
+                // ...
+            }
+        });
+
+        writeln!(stdout, "{}", serde_json::to_string(&result)?)?;
+    }
+    Ok(())
+}
 ```
 
 ### 5.2 Connector Configuration з Policy Profile
@@ -383,26 +441,70 @@ fcp-connectors/
 name = "odoo"
 version = "0.2.0"
 zone = "z:work"
-archetypes = ["Operational", "Bidirectional"]
+archetypes = ["RequestResponse", "Bidirectional"]  # Per fcp-manifest archetypes
 
 [enterprise]
-# NEW: Enterprise type визначає policy profile
+# Enterprise type визначає policy profile
 type = "TOV_general"  # FOP_simplified | TOV_general | PAT_public | custom
 tax_system = "general"  # simplified | general
 
 [credentials]
+# JSON-2 API (Odoo v19 recommended)
 url = "https://odoo.example.com"
 database = "production"
-api_key = "${FCP_ODOO_API_KEY}"
+api_key = "${FCP_ODOO_API_KEY}"  # Bearer token for Authorization header
 
 [options]
 timeout_secs = 60
 max_retries = 3
 
+# Rate limits (використовує fcp-sdk/ratelimit)
+[rate_limits.pools]
+quality_read = { requests_per_minute = 100, enforcement = "hard" }
+quality_write = { requests_per_minute = 30, enforcement = "hard" }
+capa_operations = { requests_per_minute = 20, enforcement = "soft" }
+
 # Capabilities автоматично визначаються policy profile
 # Можна override для кастомізації:
 [capabilities.override]
 # odoo.custom.operation = true
+```
+
+### 5.2.1 Odoo JSON-2 API Client
+
+**HTTP Client pattern** (референс: `connectors/anthropic/src/client.rs`):
+
+```rust
+pub struct OdooClient {
+    http: reqwest::Client,
+    base_url: String,
+    database: String,
+    api_key: String,
+}
+
+impl OdooClient {
+    /// Call Odoo JSON-2 API
+    /// Endpoint: POST /json/2/{model}/{method}
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        model: &str,
+        method: &str,
+        args: Value,
+    ) -> Result<T, OdooError> {
+        let url = format!("{}/json/2/{}/{}", self.base_url, model, method);
+
+        let response = self.http
+            .post(&url)
+            .header("Authorization", format!("bearer {}", self.api_key))
+            .header("X-Odoo-Database", &self.database)
+            .json(&json!({ "params": args }))
+            .send()
+            .await?;
+
+        let result: OdooResponse<T> = response.json().await?;
+        result.into_result()
+    }
+}
 ```
 
 ### 5.3 Operations Map
@@ -429,6 +531,111 @@ max_retries = 3
 | **KPI** | `kpi.fpy.get` | `odoo.kpi.read` | Yes |
 | | `kpi.mttr.get` | `odoo.kpi.read` | Yes |
 | | `kpi.dashboard` | `odoo.kpi.read` | Yes |
+
+### 5.4 Інтеграція з новими FCP модулями (upstream v2.1)
+
+#### 5.4.1 Rate Limiting (`fcp-sdk/ratelimit`)
+
+**Путь:** `crates/fcp-sdk/src/ratelimit.rs`
+
+```rust
+use fcp_sdk::ratelimit::{RateLimitTracker, RateLimitError};
+
+impl OdooConnector {
+    fn rate_limits(&self) -> RateLimitDeclarations {
+        RateLimitDeclarations {
+            pools: vec![
+                RateLimitPool {
+                    id: "quality_read".into(),
+                    config: RateLimitConfig {
+                        requests_per_minute: 100,
+                        burst: 10,
+                    },
+                    enforcement: RateLimitEnforcement::Hard,
+                },
+                RateLimitPool {
+                    id: "quality_write".into(),
+                    config: RateLimitConfig {
+                        requests_per_minute: 30,
+                        burst: 5,
+                    },
+                    enforcement: RateLimitEnforcement::Hard,
+                },
+            ],
+        }
+    }
+
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        // Rate limit check before Odoo API call
+        let pool_id = self.get_pool_for_operation(&req.operation);
+        self.rate_tracker.try_consume(&pool_id)?;
+
+        // Proceed with Odoo call
+        self.client.call(...).await
+    }
+}
+```
+
+#### 5.4.2 Lifecycle Management (`fcp-core/lifecycle`)
+
+**Путь:** `crates/fcp-core/src/lifecycle.rs`
+
+```rust
+use fcp_core::lifecycle::{LifecycleState, LifecycleRecord, CanaryPolicy};
+
+// Connector lifecycle states:
+// Pending → Installing → Canary → Production
+//                          ↓
+//                     RolledBack
+
+// Canary policy для Odoo connector
+let canary_policy = CanaryPolicy {
+    traffic_percentage: 10,        // 10% traffic initially
+    duration_secs: 3600,           // 1 hour canary period
+    success_threshold: 0.99,       // 99% success rate required
+    auto_promote: true,            // Auto-promote if healthy
+};
+```
+
+#### 5.4.3 Runtime Supervision (`fcp-sdk/runtime`)
+
+**Путь:** `crates/fcp-sdk/src/runtime.rs`
+
+```rust
+use fcp_sdk::runtime::{SupervisorConfig, HealthTracker};
+
+let supervisor_config = SupervisorConfig {
+    base_backoff_ms: 1000,           // 1s initial backoff
+    max_backoff_ms: 60000,           // 60s max backoff
+    jitter_enabled: true,
+    max_consecutive_failures: 5,
+    cooldown_after_failure_ms: 300000, // 5min cooldown
+    heartbeat_interval_ms: 30000,      // 30s heartbeat
+};
+
+// Health tracking for Odoo connection
+let health_tracker = HealthTracker::new();
+health_tracker.record_success();  // After successful API call
+health_tracker.record_failure();  // After failed API call
+```
+
+#### 5.4.4 Fork Detection (`fcp-core/connector_state`)
+
+**Путь:** `crates/fcp-core/src/connector_state.rs`
+
+**Use case:** Multi-site Odoo deployments з синхронізацією Quality Alerts.
+
+```rust
+use fcp_core::connector_state::{ConnectorStateModel, CrdtType};
+
+// For multi-site Odoo sync
+let state_model = ConnectorStateModel::Crdt {
+    crdt_type: CrdtType::LwwMap,  // Last-write-wins for alert state
+};
+
+// Fork detection pauses connector until resolved
+// Higher lease_seq wins deterministically
+```
 
 ---
 
@@ -560,17 +767,45 @@ Phase Gates автоматично створюють immutable checkpoints з q
 
 ## 8. Технічні вимоги
 
-### 8.1 Odoo API Requirements
+### 8.1 Odoo v19 API Requirements (ФАКТИ)
 
-- JSON-RPC або XML-RPC доступ
-- API ключ або OAuth2
-- Права доступу до quality, stock, knowledge models
+**Офіційно підтримувані API:**
+
+| API | Статус | Endpoint | Рекомендація |
+|-----|--------|----------|--------------|
+| **JSON-2 API** | Новий, рекомендований | `/json/2/<model>/<method>` | **ВИКОРИСТОВУВАТИ** |
+| XML-RPC | DEPRECATED | `/xmlrpc`, `/xmlrpc/2` | НЕ використовувати |
+| JSON-RPC | DEPRECATED | `/jsonrpc` | НЕ використовувати |
+
+**ВАЖЛИВО:** XML-RPC та JSON-RPC будуть **ВИДАЛЕНІ в Odoo 20** (осінь 2026).
+
+**GraphQL:** Офіційного GraphQL API в Odoo v19 **НЕ ІСНУЄ**. Модуль `fcp-graphql` не застосовний для Odoo connector.
+
+**Автентифікація:**
+- API Keys через `Authorization: bearer {API_KEY}` HTTP заголовок
+- Ключі генеруються: Preferences > Account Security > New API Key
+- OAuth2 підтримується для Google, Azure
+- Заголовок `X-Odoo-Database` потрібен для multi-database серверів
+
+**Обмеження:** Зовнішній API доступний тільки на **Custom pricing plans** Odoo.
+
+**Динамічна документація:** Endpoint `/doc` генерує документацію всіх доступних моделей та методів.
 
 ### 8.2 FCP Requirements
 
+**Базові:**
 - Tailscale mesh membership
-- Rust nightly toolchain
+- Rust stable toolchain (2024 edition)
 - Policy Profile configuration
+
+**Нові модулі з upstream (v2.1):**
+
+| Модуль | Призначення | Застосування для Odoo |
+|--------|-------------|----------------------|
+| `fcp-sdk/ratelimit` | Rate limiting pools | Захист Odoo API від перевантаження |
+| `fcp-sdk/runtime` | Supervisor, health tracking | Управління станом connector |
+| `fcp-core/lifecycle` | State machine (Canary→Production) | Безпечний rollout |
+| `fcp-core/connector_state` | Fork detection, CRDT | Multi-site Odoo sync |
 
 ### 8.3 Enterprise-specific
 
@@ -661,23 +896,44 @@ Phase Gates автоматично створюють immutable checkpoints з q
 
 ## 11. Посилання та ресурси
 
-### FCP Documentation
-- `/FCP_Specification_V2.md` - Специфікація протоколу
-- `/docs/fcp_model_connectors_rust.md` - Гайд розробника
-- `/AGENTS.md` - AI agent guidelines
+### FCP Documentation (flywheel_connectors)
+- `crates/fcp-core/src/connector.rs` — FcpConnector trait definition
+- `crates/fcp-core/src/lifecycle.rs` — Lifecycle state machine
+- `crates/fcp-core/src/connector_state.rs` — State management, fork detection
+- `crates/fcp-sdk/src/ratelimit.rs` — Rate limiting
+- `crates/fcp-sdk/src/runtime.rs` — Supervisor, health tracking
+- `crates/fcp-manifest/src/lib.rs` — Manifest structure (99KB)
 
-### Odoo v19 Documentation
-- `/Users/sd/projects/odoov19/EXPLAIN.md` - PDCA система
-- `/Users/sd/projects/odoov19/docs/PRD.md` - PRD
-- Odoo Quality: https://www.odoo.com/documentation/19.0/
+### Existing Connectors (референс)
+- `connectors/anthropic/` — **Головний референс** (bidirectional, повна реалізація)
+- `connectors/discord/` — Bidirectional connector
+- `connectors/telegram/` — Operational connector
+- `connectors/twitter/` — Bidirectional connector
+- `connectors/openai/` — API connector
 
-### Existing Connectors
-- `connectors/twitter/` - Bidirectional connector
-- `connectors/telegram/` - Operational connector
-- `connectors/anthropic/` - API connector
+### Odoo v19 Official Documentation
+- [External JSON-2 API](https://www.odoo.com/documentation/19.0/developer/reference/external_api.html) — **Рекомендований API**
+- [External RPC API](https://www.odoo.com/documentation/19.0/developer/reference/external_rpc_api.html) — DEPRECATED
+- [Quality Module](https://www.odoo.com/documentation/19.0/applications/inventory_and_mrp/quality.html)
+- [ORM Changelog](https://www.odoo.com/documentation/19.0/developer/reference/backend/orm/changelog.html)
+
+### Важливі факти
+- **GraphQL:** Офіційно НЕ підтримується в Odoo v19
+- **XML-RPC/JSON-RPC:** Будуть видалені в Odoo 20 (осінь 2026)
+- **JSON-2 API:** Єдиний рекомендований спосіб інтеграції
 
 ---
 
-*Документ оновлено: 2026-01-27*
-*Версія: 2.0.0*
-*Ключові зміни: Process Decomposition model, Policy Profiles, Enterprise Types*
+## 12. Change Log
+
+| Дата | Версія | Зміни |
+|------|--------|-------|
+| 2026-01-27 | 1.0.0 | Початкове дослідження |
+| 2026-01-27 | 2.0.0 | Process Decomposition, Policy Profiles, Enterprise Types |
+| 2026-01-28 | 2.1.0 | Інтеграція upstream модулів, факти про Odoo API, архітектура на основі існуючих connectors |
+
+---
+
+*Документ оновлено: 2026-01-28*
+*Версія: 2.1.0*
+*Ключові зміни: Odoo JSON-2 API (факт), інтеграція fcp-sdk/ratelimit, fcp-core/lifecycle, connector pattern з anthropic референсу*

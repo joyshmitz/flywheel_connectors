@@ -16,9 +16,22 @@
 
 ## Статус досліджень
 
-| Тема | Статус | Дата оновлення |
-|------|--------|----------------|
-| Odoo v19 + FCP Integration | Research Complete | 2026-01-27 |
+| Тема | Статус | Версія | Дата оновлення |
+|------|--------|--------|----------------|
+| Odoo v19 + FCP Integration | Research Complete | v2.1.0 | 2026-01-28 |
+
+---
+
+## Ключові факти (v2.1)
+
+| Питання | Відповідь |
+|---------|-----------|
+| Odoo v19 API | **JSON-2 API** (рекомендований) |
+| XML-RPC/JSON-RPC | DEPRECATED, видалення в Odoo 20 |
+| GraphQL в Odoo | **НЕ існує** офіційно |
+| Connector референс | `connectors/anthropic/` |
+| Rate limiting | `fcp-sdk/ratelimit` |
+| Lifecycle | `fcp-core/lifecycle` |
 
 ---
 
@@ -38,4 +51,4 @@
 
 ---
 
-*Останнє оновлення: 2026-01-27*
+*Останнє оновлення: 2026-01-28*
