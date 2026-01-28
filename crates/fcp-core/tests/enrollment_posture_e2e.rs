@@ -10,8 +10,8 @@ use std::time::Instant;
 use chrono::{Duration, Utc};
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    DecisionReasonCode, DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceMetadata,
-    NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, PostureAttestation, PostureAttributeKey,
+    DecisionReasonCode, DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceMetadata, NodeId,
+    NodeSignature, ObjectHeader, ObjectIdKeyId, PostureAttestation, PostureAttributeKey,
     PostureAttributeValue, PostureCheckResult, PostureRequirements, Provenance, ZoneId,
     ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
 };
@@ -444,7 +444,8 @@ fn e2e_enrollment_without_posture_in_owner_zone_denied() {
         })),
     );
 
-    let (signing_secret, signing_key, encryption_key, issuance_key, _owner_key) = create_test_keys();
+    let (signing_secret, signing_key, encryption_key, issuance_key, _owner_key) =
+        create_test_keys();
     let device_id = "device-without-posture";
 
     // Create enrollment request
@@ -622,7 +623,9 @@ fn e2e_enrollment_with_insufficient_posture_denied() {
     let node_id = NodeId::new("device-insufficient-posture");
     let mut attestation = create_valid_attestation(&node_id);
     // Remove disk encryption from attestation
-    attestation.attributes.remove(&PostureAttributeKey::DiskEncryption);
+    attestation
+        .attributes
+        .remove(&PostureAttributeKey::DiskEncryption);
 
     let requirements = create_zone_posture_requirements();
 
@@ -828,7 +831,11 @@ fn e2e_full_enrollment_flow_with_posture() {
     );
 
     // Verify device received correct keys
-    ctx.assert_eq(&approval.device_id.as_str(), &device_id, "Device ID should match");
+    ctx.assert_eq(
+        &approval.device_id.as_str(),
+        &device_id,
+        "Device ID should match",
+    );
     ctx.assert_eq(
         &approval.signing_key.key_id(),
         &signing_key.key_id(),

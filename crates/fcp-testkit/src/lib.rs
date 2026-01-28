@@ -50,12 +50,14 @@ pub mod fixtures;
 mod harness;
 mod log_scan;
 mod mock_server;
+pub mod supervisor_examples;
 mod tracing_config;
 
 pub use assertions::*;
 pub use harness::*;
 pub use log_scan::*;
 pub use mock_server::*;
+pub use supervisor_examples::*;
 pub use tracing_config::*;
 
 // Re-export core types for convenience

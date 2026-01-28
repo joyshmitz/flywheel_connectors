@@ -529,12 +529,12 @@ pub struct CanaryPolicy {
 impl Default for CanaryPolicy {
     fn default() -> Self {
         Self {
-            promotion_threshold: 95,       // 95% success rate to promote
-            rollback_threshold: 80,        // 80% success rate triggers rollback
-            min_samples: 100,              // At least 100 invocations
-            min_canary_duration_secs: 300, // 5 minutes minimum
+            promotion_threshold: 95,        // 95% success rate to promote
+            rollback_threshold: 80,         // 80% success rate triggers rollback
+            min_samples: 100,               // At least 100 invocations
+            min_canary_duration_secs: 300,  // 5 minutes minimum
             max_canary_duration_secs: 3600, // 1 hour maximum
-            canary_traffic_percent: 10,    // 10% of traffic
+            canary_traffic_percent: 10,     // 10% of traffic
         }
     }
 }
@@ -671,7 +671,10 @@ impl std::error::Error for LifecycleError {}
 #[async_trait::async_trait]
 pub trait LifecycleManager: Send + Sync {
     /// Get the current lifecycle record for a connector.
-    async fn get(&self, connector_id: &ConnectorId) -> Result<Option<LifecycleRecord>, LifecycleError>;
+    async fn get(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<Option<LifecycleRecord>, LifecycleError>;
 
     /// Save a lifecycle record.
     async fn save(&self, record: &LifecycleRecord) -> Result<(), LifecycleError>;
@@ -805,7 +808,10 @@ mod tests {
 
         // Pending -> Installing
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         assert_eq!(record.state, LifecycleState::Installing);
 
@@ -832,8 +838,14 @@ mod tests {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
 
         // Pending -> Production is not allowed
-        let result = record.transition(LifecycleState::Production, TransitionReason::ManualPromotion);
-        assert!(matches!(result, Err(LifecycleError::InvalidTransition { .. })));
+        let result = record.transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleError::InvalidTransition { .. })
+        ));
     }
 
     #[test]
@@ -842,14 +854,20 @@ mod tests {
 
         // Pending -> Pending is not allowed
         let result = record.transition(LifecycleState::Pending, TransitionReason::InstallComplete);
-        assert!(matches!(result, Err(LifecycleError::InvalidTransition { .. })));
+        assert!(matches!(
+            result,
+            Err(LifecycleError::InvalidTransition { .. })
+        ));
     }
 
     #[test]
     fn lifecycle_record_rollback_from_canary() {
         let mut record = LifecycleRecord::new(test_connector_id(), test_version());
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -939,14 +957,20 @@ mod tests {
             .with_promotion_threshold(80)
             .with_rollback_threshold(90); // Higher than promotion!
 
-        assert!(matches!(policy.validate(), Err(LifecycleError::InvalidPolicy { .. })));
+        assert!(matches!(
+            policy.validate(),
+            Err(LifecycleError::InvalidPolicy { .. })
+        ));
     }
 
     #[test]
     fn canary_policy_validate_invalid_traffic() {
         let policy = CanaryPolicy::new().with_canary_traffic_percent(150);
 
-        assert!(matches!(policy.validate(), Err(LifecycleError::InvalidPolicy { .. })));
+        assert!(matches!(
+            policy.validate(),
+            Err(LifecycleError::InvalidPolicy { .. })
+        ));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -965,7 +989,10 @@ mod tests {
 
         // Transition to canary
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -990,7 +1017,10 @@ mod tests {
 
         // Transition to canary
         record
-            .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+            .transition(
+                LifecycleState::Installing,
+                TransitionReason::InstallComplete,
+            )
             .unwrap();
         record
             .transition(LifecycleState::Canary, TransitionReason::InstallComplete)

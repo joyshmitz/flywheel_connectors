@@ -12,8 +12,8 @@
 
 use chrono::Utc;
 use fcp_core::{
-    ConnectorId, ConnectorStateModel, CrdtType, ForkEvent, ForkResolution,
-    ForkResolutionOutcome, ObjectId, StateForkDetectionResult, StateForkDetector, ZoneId,
+    ConnectorId, ConnectorStateModel, CrdtType, ForkEvent, ForkResolution, ForkResolutionOutcome,
+    ObjectId, StateForkDetectionResult, StateForkDetector, ZoneId,
 };
 use fcp_testkit::LogCapture;
 use std::time::Instant;
@@ -98,7 +98,9 @@ impl TestContext {
             .to_string(),
         );
 
-        self.capture.validate_jsonl().expect("JSONL schema validation");
+        self.capture
+            .validate_jsonl()
+            .expect("JSONL schema validation");
     }
 }
 
@@ -316,7 +318,10 @@ fn lease_tie_requires_manual_resolution() {
 
     ctx.assert_true(!outcome.resolved, "Lease tie should not auto-resolve");
     ctx.assert_true(
-        outcome.failure_reason.as_ref().is_some_and(|r| r.contains("tie")),
+        outcome
+            .failure_reason
+            .as_ref()
+            .is_some_and(|r| r.contains("tie")),
         "Failure reason should mention tie",
     );
 
@@ -347,11 +352,19 @@ fn fork_event_serialization_roundtrip() {
     let json = serde_json::to_string(&fork).expect("serialize");
     let decoded: ForkEvent = serde_json::from_str(&json).expect("deserialize");
 
-    ctx.assert_eq(&decoded.common_prev, &fork.common_prev, "common_prev roundtrip");
+    ctx.assert_eq(
+        &decoded.common_prev,
+        &fork.common_prev,
+        "common_prev roundtrip",
+    );
     ctx.assert_eq(&decoded.branch_a, &fork.branch_a, "branch_a roundtrip");
     ctx.assert_eq(&decoded.branch_b, &fork.branch_b, "branch_b roundtrip");
     ctx.assert_eq(&decoded.fork_seq, &fork.fork_seq, "fork_seq roundtrip");
-    ctx.assert_eq(&decoded.detected_at, &fork.detected_at, "detected_at roundtrip");
+    ctx.assert_eq(
+        &decoded.detected_at,
+        &fork.detected_at,
+        "detected_at roundtrip",
+    );
 
     ctx.finish(&serde_json::json!({
         "connector_id": ctx.connector_id.to_string(),

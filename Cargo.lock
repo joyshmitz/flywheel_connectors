@@ -1837,6 +1837,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-graphql"
+version = "0.1.0"
+dependencies = [
+ "fcp-core",
+ "fcp-streaming",
+ "futures-util",
+ "jsonschema",
+ "pretty_assertions",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-host"
 version = "0.1.0"
 dependencies = [
@@ -2202,6 +2222,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-conformance",
  "fcp-core",
+ "fcp-sdk",
  "futures-util",
  "regex",
  "reqwest",

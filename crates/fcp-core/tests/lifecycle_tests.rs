@@ -157,11 +157,14 @@ const fn test_version() -> semver::Version {
 
 /// Create a lifecycle record transitioned to canary state.
 fn create_canary_record(policy: CanaryPolicy) -> LifecycleRecord {
-    let mut record = LifecycleRecord::new(test_connector_id(), test_version())
-        .with_canary_policy(policy);
+    let mut record =
+        LifecycleRecord::new(test_connector_id(), test_version()).with_canary_policy(policy);
 
     record
-        .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
         .expect("pending -> installing");
     record
         .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -183,16 +186,18 @@ fn test_valid_transition_sequence_to_production() {
         test_version(),
     );
 
-    ctx.log_phase("setup", Some(json!({"scenario": "happy_path_to_production"})));
+    ctx.log_phase(
+        "setup",
+        Some(json!({"scenario": "happy_path_to_production"})),
+    );
 
     // Create a new lifecycle record
-    let mut record = LifecycleRecord::new(test_connector_id(), test_version())
-        .with_canary_policy(
-            CanaryPolicy::new()
-                .with_promotion_threshold(90)
-                .with_min_samples(5)
-                .with_min_canary_duration(0),
-        );
+    let mut record = LifecycleRecord::new(test_connector_id(), test_version()).with_canary_policy(
+        CanaryPolicy::new()
+            .with_promotion_threshold(90)
+            .with_min_samples(5)
+            .with_min_canary_duration(0),
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -203,9 +208,16 @@ fn test_valid_transition_sequence_to_production() {
 
     // Transition: Pending → Installing
     record
-        .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
         .expect("pending -> installing");
-    ctx.log_transition(LifecycleState::Pending, LifecycleState::Installing, "InstallComplete");
+    ctx.log_transition(
+        LifecycleState::Pending,
+        LifecycleState::Installing,
+        "InstallComplete",
+    );
     ctx.assert_eq(
         &record.state,
         &LifecycleState::Installing,
@@ -216,7 +228,11 @@ fn test_valid_transition_sequence_to_production() {
     record
         .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
         .expect("installing -> canary");
-    ctx.log_transition(LifecycleState::Installing, LifecycleState::Canary, "InstallComplete");
+    ctx.log_transition(
+        LifecycleState::Installing,
+        LifecycleState::Canary,
+        "InstallComplete",
+    );
     ctx.assert_eq(
         &record.state,
         &LifecycleState::Canary,
@@ -242,7 +258,11 @@ fn test_valid_transition_sequence_to_production() {
             TransitionReason::AutoPromotion { health_score: 100 },
         )
         .expect("canary -> production");
-    ctx.log_transition(LifecycleState::Canary, LifecycleState::Production, "AutoPromotion");
+    ctx.log_transition(
+        LifecycleState::Canary,
+        LifecycleState::Production,
+        "AutoPromotion",
+    );
     ctx.assert_eq(
         &record.state,
         &LifecycleState::Production,
@@ -261,11 +281,7 @@ fn test_valid_transition_sequence_to_production() {
 /// Test manual promotion from canary to production.
 #[test]
 fn test_manual_promotion() {
-    let mut ctx = TestContext::new(
-        "manual_promotion",
-        test_connector_id(),
-        test_version(),
-    );
+    let mut ctx = TestContext::new("manual_promotion", test_connector_id(), test_version());
 
     ctx.log_phase("setup", Some(json!({"scenario": "manual_promotion"})));
 
@@ -273,9 +289,16 @@ fn test_manual_promotion() {
 
     // Manual promotion (even without meeting thresholds)
     record
-        .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
+        .transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )
         .expect("canary -> production");
-    ctx.log_transition(LifecycleState::Canary, LifecycleState::Production, "ManualPromotion");
+    ctx.log_transition(
+        LifecycleState::Canary,
+        LifecycleState::Production,
+        "ManualPromotion",
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -308,13 +331,27 @@ fn test_invalid_transition_rejected() {
     let mut record = LifecycleRecord::new(test_connector_id(), test_version());
 
     // Try to skip Installing and go directly to Production
-    let result = record.transition(LifecycleState::Production, TransitionReason::ManualPromotion);
+    let result = record.transition(
+        LifecycleState::Production,
+        TransitionReason::ManualPromotion,
+    );
 
-    ctx.assert_true(result.is_err(), "Should reject Pending -> Production transition");
+    ctx.assert_true(
+        result.is_err(),
+        "Should reject Pending -> Production transition",
+    );
 
     if let Err(LifecycleError::InvalidTransition { from, to }) = result {
-        ctx.assert_eq(&from, &LifecycleState::Pending, "From state should be Pending");
-        ctx.assert_eq(&to, &LifecycleState::Production, "To state should be Production");
+        ctx.assert_eq(
+            &from,
+            &LifecycleState::Pending,
+            "From state should be Pending",
+        );
+        ctx.assert_eq(
+            &to,
+            &LifecycleState::Production,
+            "To state should be Production",
+        );
         ctx.log_phase(
             "assert",
             Some(json!({
@@ -341,7 +378,10 @@ fn test_auto_rollback_on_health_failure() {
         test_version(),
     );
 
-    ctx.log_phase("setup", Some(json!({"scenario": "health_failure_rollback"})));
+    ctx.log_phase(
+        "setup",
+        Some(json!({"scenario": "health_failure_rollback"})),
+    );
 
     // Create canary with specific thresholds
     let mut record = create_canary_record(
@@ -391,7 +431,11 @@ fn test_auto_rollback_on_health_failure() {
         )
         .expect("canary -> rolled_back");
 
-    ctx.log_transition(LifecycleState::Canary, LifecycleState::RolledBack, "AutoRollback");
+    ctx.log_transition(
+        LifecycleState::Canary,
+        LifecycleState::RolledBack,
+        "AutoRollback",
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -417,7 +461,10 @@ fn test_manual_rollback_from_production() {
 
     // First promote to production
     record
-        .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
+        .transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )
         .expect("canary -> production");
 
     // Then rollback
@@ -430,7 +477,11 @@ fn test_manual_rollback_from_production() {
         )
         .expect("production -> rolled_back");
 
-    ctx.log_transition(LifecycleState::Production, LifecycleState::RolledBack, "ManualRollback");
+    ctx.log_transition(
+        LifecycleState::Production,
+        LifecycleState::RolledBack,
+        "ManualRollback",
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -465,7 +516,11 @@ fn test_recovery_from_rollback() {
         )
         .expect("canary -> rolled_back");
 
-    ctx.log_transition(LifecycleState::Canary, LifecycleState::RolledBack, "AutoRollback");
+    ctx.log_transition(
+        LifecycleState::Canary,
+        LifecycleState::RolledBack,
+        "AutoRollback",
+    );
 
     // Retry: RolledBack → Canary
     record
@@ -478,7 +533,11 @@ fn test_recovery_from_rollback() {
         )
         .expect("rolled_back -> canary");
 
-    ctx.log_transition(LifecycleState::RolledBack, LifecycleState::Canary, "NewVersion");
+    ctx.log_transition(
+        LifecycleState::RolledBack,
+        LifecycleState::Canary,
+        "NewVersion",
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -502,7 +561,10 @@ fn test_disable_after_repeated_failures() {
         test_version(),
     );
 
-    ctx.log_phase("setup", Some(json!({"scenario": "repeated_failures_disable"})));
+    ctx.log_phase(
+        "setup",
+        Some(json!({"scenario": "repeated_failures_disable"})),
+    );
 
     let mut record = create_canary_record(CanaryPolicy::new());
 
@@ -516,7 +578,11 @@ fn test_disable_after_repeated_failures() {
             },
         )
         .expect("first rollback");
-    ctx.log_transition(LifecycleState::Canary, LifecycleState::RolledBack, "AutoRollback#1");
+    ctx.log_transition(
+        LifecycleState::Canary,
+        LifecycleState::RolledBack,
+        "AutoRollback#1",
+    );
 
     // Retry
     record
@@ -533,7 +599,11 @@ fn test_disable_after_repeated_failures() {
             },
         )
         .expect("second rollback");
-    ctx.log_transition(LifecycleState::Canary, LifecycleState::RolledBack, "AutoRollback#2");
+    ctx.log_transition(
+        LifecycleState::Canary,
+        LifecycleState::RolledBack,
+        "AutoRollback#2",
+    );
 
     // After repeated failures, disable the connector
     record
@@ -544,7 +614,11 @@ fn test_disable_after_repeated_failures() {
             },
         )
         .expect("rolled_back -> disabled");
-    ctx.log_transition(LifecycleState::RolledBack, LifecycleState::Disabled, "Disabled");
+    ctx.log_transition(
+        LifecycleState::RolledBack,
+        LifecycleState::Disabled,
+        "Disabled",
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -593,7 +667,11 @@ fn test_reenable_disabled_connector() {
             },
         )
         .expect("disabled -> canary");
-    ctx.log_transition(LifecycleState::Disabled, LifecycleState::Canary, "NewVersion");
+    ctx.log_transition(
+        LifecycleState::Disabled,
+        LifecycleState::Canary,
+        "NewVersion",
+    );
 
     ctx.assert_eq(
         &record.state,
@@ -635,8 +713,16 @@ fn test_health_metrics_calculation() {
     ctx.assert_eq(&record.health.samples, &100, "Should have 100 samples");
     ctx.assert_eq(&record.health.successes, &95, "Should have 95 successes");
     ctx.assert_eq(&record.health.failures, &5, "Should have 5 failures");
-    ctx.assert_eq(&record.health.success_rate, &95u8, "Success rate should be 95%");
-    ctx.assert_eq(&record.health.max_latency_ms, &1000, "Max latency should be 1000ms");
+    ctx.assert_eq(
+        &record.health.success_rate,
+        &95u8,
+        "Success rate should be 95%",
+    );
+    ctx.assert_eq(
+        &record.health.max_latency_ms,
+        &1000,
+        "Max latency should be 1000ms",
+    );
 
     ctx.finalize("pass");
 }
@@ -644,11 +730,7 @@ fn test_health_metrics_calculation() {
 /// Test health reset when entering canary.
 #[test]
 fn test_health_reset() {
-    let mut ctx = TestContext::new(
-        "health_reset",
-        test_connector_id(),
-        test_version(),
-    );
+    let mut ctx = TestContext::new("health_reset", test_connector_id(), test_version());
 
     ctx.log_phase("setup", Some(json!({"scenario": "health_reset"})));
 
@@ -666,7 +748,11 @@ fn test_health_reset() {
     ctx.log_phase("action", Some(json!({"action": "reset_health"})));
 
     ctx.assert_eq(&record.health.samples, &0, "Samples should be reset to 0");
-    ctx.assert_eq(&record.health.successes, &0, "Successes should be reset to 0");
+    ctx.assert_eq(
+        &record.health.successes,
+        &0,
+        "Successes should be reset to 0",
+    );
     ctx.assert_eq(&record.health.failures, &0, "Failures should be reset to 0");
 
     ctx.finalize("pass");
@@ -746,7 +832,11 @@ fn test_auto_promotion_threshold() {
     }
 
     ctx.log_health_update(&record.health);
-    ctx.assert_eq(&record.health.success_rate, &94u8, "Success rate should be 94%");
+    ctx.assert_eq(
+        &record.health.success_rate,
+        &94u8,
+        "Success rate should be 94%",
+    );
     ctx.assert_true(
         !record.should_auto_promote(),
         "Should NOT auto-promote at 94%",
@@ -762,11 +852,12 @@ fn test_auto_promotion_threshold() {
     }
 
     ctx.log_health_update(&record.health);
-    ctx.assert_eq(&record.health.success_rate, &96u8, "Success rate should be 96%");
-    ctx.assert_true(
-        record.should_auto_promote(),
-        "Should auto-promote at 96%",
+    ctx.assert_eq(
+        &record.health.success_rate,
+        &96u8,
+        "Success rate should be 96%",
     );
+    ctx.assert_true(record.should_auto_promote(), "Should auto-promote at 96%");
 
     ctx.finalize("pass");
 }
@@ -790,7 +881,10 @@ fn test_transition_audit_trail() {
 
     // Perform several transitions
     record
-        .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
         .expect("t1");
     record
         .transition(LifecycleState::Canary, TransitionReason::InstallComplete)
@@ -847,18 +941,17 @@ fn test_transition_audit_trail() {
 /// Test transition timestamps are monotonically increasing.
 #[test]
 fn test_transition_timestamps() {
-    let mut ctx = TestContext::new(
-        "transition_timestamps",
-        test_connector_id(),
-        test_version(),
-    );
+    let mut ctx = TestContext::new("transition_timestamps", test_connector_id(), test_version());
 
     ctx.log_phase("setup", Some(json!({"scenario": "timestamp_ordering"})));
 
     let mut record = LifecycleRecord::new(test_connector_id(), test_version());
 
     record
-        .transition(LifecycleState::Installing, TransitionReason::InstallComplete)
+        .transition(
+            LifecycleState::Installing,
+            TransitionReason::InstallComplete,
+        )
         .expect("t1");
 
     // Small delay to ensure different timestamps

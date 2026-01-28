@@ -182,9 +182,12 @@ fn create_untrusted_verifier_attestation() -> PostureAttestation {
 fn posture_valid_attestation_passes() {
     let mut ctx = TestContext::new("posture_valid_attestation_passes");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Create valid attestation and requirements"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Create valid attestation and requirements"
+        })),
+    );
 
     let attestation = create_valid_attestation();
     let requirements = PostureRequirements::builder()
@@ -195,11 +198,14 @@ fn posture_valid_attestation_passes() {
         .max_attestation_age_secs(86400)
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_id": attestation.attestation_id,
-        "verifier_id": attestation.verifier_id,
-        "requirements_count": requirements.requirements.len()
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_id": attestation.attestation_id,
+            "verifier_id": attestation.verifier_id,
+            "requirements_count": requirements.requirements.len()
+        })),
+    );
 
     let result = requirements.is_satisfied_by(&attestation);
 
@@ -224,9 +230,12 @@ fn posture_valid_attestation_passes() {
 fn posture_invalid_signature_fails() {
     let mut ctx = TestContext::new("posture_invalid_signature_fails");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Create attestation from untrusted verifier"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Create attestation from untrusted verifier"
+        })),
+    );
 
     let attestation = create_untrusted_verifier_attestation();
     let requirements = PostureRequirements::builder()
@@ -235,10 +244,13 @@ fn posture_invalid_signature_fails() {
         .allow_verifier("trusted-verifier-2")
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_verifier": attestation.verifier_id,
-        "allowed_verifiers": ["trusted-verifier-1", "trusted-verifier-2"]
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_verifier": attestation.verifier_id,
+            "allowed_verifiers": ["trusted-verifier-1", "trusted-verifier-2"]
+        })),
+    );
 
     let result = requirements.is_satisfied_by(&attestation);
 
@@ -274,10 +286,13 @@ fn posture_missing_for_required_zone_denies() {
         .require_firewall(true)
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "has_attestation": false,
-        "zone_requires_posture": true
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "has_attestation": false,
+            "zone_requires_posture": true
+        })),
+    );
 
     // When attestation is missing, the policy engine returns PostureAttestationMissing
     // This test validates the requirement check on an expired attestation to simulate
@@ -306,26 +321,29 @@ fn posture_missing_for_required_zone_denies() {
 fn posture_expired_attestation_fails() {
     let mut ctx = TestContext::new("posture_expired_attestation_fails");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Create expired attestation"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Create expired attestation"
+        })),
+    );
 
     let attestation = create_expired_attestation();
     let requirements = PostureRequirements::builder()
         .require_disk_encryption(true)
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_expires_at": attestation.expires_at.to_rfc3339(),
-        "is_expired": attestation.is_expired()
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_expires_at": attestation.expires_at.to_rfc3339(),
+            "is_expired": attestation.is_expired()
+        })),
+    );
 
     let result = requirements.is_satisfied_by(&attestation);
 
-    ctx.assert_true(
-        !result.is_satisfied(),
-        "Expired attestation should fail",
-    );
+    ctx.assert_true(!result.is_satisfied(), "Expired attestation should fail");
     ctx.assert_eq(
         &result,
         &PostureCheckResult::AttestationExpired,
@@ -343,16 +361,22 @@ fn posture_expired_attestation_fails() {
 fn posture_invalid_schema_fails_validity() {
     let mut ctx = TestContext::new("posture_invalid_schema_fails_validity");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Create attestation with invalid schema"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Create attestation with invalid schema"
+        })),
+    );
 
     let attestation = create_invalid_schema_attestation();
 
-    ctx.log_phase("execute", Some(json!({
-        "schema": attestation.schema,
-        "expected_schema": PostureAttestation::SCHEMA
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "schema": attestation.schema,
+            "expected_schema": PostureAttestation::SCHEMA
+        })),
+    );
 
     ctx.assert_true(
         !attestation.is_valid(),
@@ -374,13 +398,18 @@ fn posture_invalid_schema_fails_validity() {
 fn posture_requirement_not_met_fails() {
     let mut ctx = TestContext::new("posture_requirement_not_met_fails");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Create attestation missing required attribute"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Create attestation missing required attribute"
+        })),
+    );
 
     // Create attestation without antivirus attribute
     let mut attestation = create_valid_attestation();
-    attestation.attributes.remove(&PostureAttributeKey::TpmPresent);
+    attestation
+        .attributes
+        .remove(&PostureAttributeKey::TpmPresent);
 
     let requirements = PostureRequirements::builder()
         .require_tpm(true)
@@ -421,9 +450,12 @@ fn posture_requirement_not_met_fails() {
 fn posture_attestation_too_old_fails() {
     let mut ctx = TestContext::new("posture_attestation_too_old_fails");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Create attestation older than max age"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Create attestation older than max age"
+        })),
+    );
 
     let mut attestation = create_valid_attestation();
     // Issue attestation 2 hours ago, but still not expired
@@ -436,10 +468,13 @@ fn posture_attestation_too_old_fails() {
         .max_attestation_age_secs(3600) // 1 hour
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_issued_at": attestation.issued_at.to_rfc3339(),
-        "max_age_secs": 3600
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_issued_at": attestation.issued_at.to_rfc3339(),
+            "max_age_secs": 3600
+        })),
+    );
 
     let result = requirements.is_satisfied_by(&attestation);
 
@@ -464,9 +499,12 @@ fn posture_attestation_too_old_fails() {
 fn posture_version_requirement_checks() {
     let mut ctx = TestContext::new("posture_version_requirement_checks");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Test OS version requirement enforcement"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Test OS version requirement enforcement"
+        })),
+    );
 
     let attestation = create_valid_attestation(); // Has OS version 14.2.1
 
@@ -480,11 +518,14 @@ fn posture_version_requirement_checks() {
         .require_os_min_version("15.0")
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_os_version": "14.2.1",
-        "test_min_version_pass": "14.0",
-        "test_min_version_fail": "15.0"
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_os_version": "14.2.1",
+            "test_min_version_pass": "14.0",
+            "test_min_version_fail": "15.0"
+        })),
+    );
 
     let result_pass = req_pass.is_satisfied_by(&attestation);
     let result_fail = req_fail.is_satisfied_by(&attestation);
@@ -509,9 +550,12 @@ fn posture_version_requirement_checks() {
 fn posture_os_type_one_of_requirement() {
     let mut ctx = TestContext::new("posture_os_type_one_of_requirement");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Test OS type one-of requirement"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Test OS type one-of requirement"
+        })),
+    );
 
     let attestation = create_valid_attestation(); // Has OS type "macos"
 
@@ -523,9 +567,12 @@ fn posture_os_type_one_of_requirement() {
         .require_os_type_one_of(vec!["linux".to_string()])
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_os_type": "macos"
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_os_type": "macos"
+        })),
+    );
 
     let result_pass = req_pass.is_satisfied_by(&attestation);
     let result_fail = req_fail.is_satisfied_by(&attestation);
@@ -550,9 +597,12 @@ fn posture_os_type_one_of_requirement() {
 fn posture_numeric_value_requirements() {
     let mut ctx = TestContext::new("posture_numeric_value_requirements");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Test numeric min/max requirements for screen lock timeout"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Test numeric min/max requirements for screen lock timeout"
+        })),
+    );
 
     let attestation = create_valid_attestation(); // Has screen_lock_timeout: 300
 
@@ -588,9 +638,12 @@ fn posture_numeric_value_requirements() {
         })
         .build();
 
-    ctx.log_phase("execute", Some(json!({
-        "attestation_screen_lock_timeout": 300
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "attestation_screen_lock_timeout": 300
+        })),
+    );
 
     ctx.assert_true(
         req_min_pass.is_satisfied_by(&attestation).is_satisfied(),
@@ -620,17 +673,23 @@ fn posture_numeric_value_requirements() {
 fn posture_empty_requirements_pass() {
     let mut ctx = TestContext::new("posture_empty_requirements_pass");
 
-    ctx.log_phase("setup", Some(json!({
-        "description": "Empty requirements should pass for any valid attestation"
-    })));
+    ctx.log_phase(
+        "setup",
+        Some(json!({
+            "description": "Empty requirements should pass for any valid attestation"
+        })),
+    );
 
     let attestation = create_valid_attestation();
     let requirements = PostureRequirements::builder().build();
 
-    ctx.log_phase("execute", Some(json!({
-        "requirements_count": requirements.requirements.len(),
-        "requirements_is_empty": requirements.is_empty()
-    })));
+    ctx.log_phase(
+        "execute",
+        Some(json!({
+            "requirements_count": requirements.requirements.len(),
+            "requirements_is_empty": requirements.is_empty()
+        })),
+    );
 
     let result = requirements.is_satisfied_by(&attestation);
 

@@ -793,6 +793,379 @@ impl Default for HealthTracker {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PollingSupervisor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result from a single poll operation.
+#[derive(Debug)]
+pub enum PollResult<T> {
+    /// Poll succeeded with optional data (empty if no updates).
+    Success(Vec<T>),
+    /// Poll failed with a recoverable error (will retry with backoff).
+    RecoverableError {
+        /// Error message.
+        message: String,
+        /// Optional retry-after hint from rate limiting (milliseconds).
+        retry_after_ms: Option<u64>,
+    },
+    /// Poll failed with an unrecoverable error (will stop supervisor).
+    FatalError {
+        /// Error message.
+        message: String,
+    },
+}
+
+impl<T> PollResult<T> {
+    /// Create a success result with items.
+    #[must_use]
+    pub const fn success(items: Vec<T>) -> Self {
+        Self::Success(items)
+    }
+
+    /// Create an empty success result.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self::Success(Vec::new())
+    }
+
+    /// Create a recoverable error.
+    pub fn recoverable(message: impl Into<String>) -> Self {
+        Self::RecoverableError {
+            message: message.into(),
+            retry_after_ms: None,
+        }
+    }
+
+    /// Create a recoverable error with retry-after hint.
+    pub fn rate_limited(message: impl Into<String>, retry_after_ms: u64) -> Self {
+        Self::RecoverableError {
+            message: message.into(),
+            retry_after_ms: Some(retry_after_ms),
+        }
+    }
+
+    /// Create a fatal error.
+    pub fn fatal(message: impl Into<String>) -> Self {
+        Self::FatalError {
+            message: message.into(),
+        }
+    }
+}
+
+/// Outcome from running the polling supervisor.
+#[derive(Debug, Clone)]
+pub enum SupervisorOutcome {
+    /// Supervisor stopped gracefully via shutdown signal.
+    Shutdown,
+    /// Supervisor stopped due to fatal error.
+    FatalError {
+        /// Error message.
+        message: String,
+    },
+    /// Supervisor stopped due to too many consecutive failures.
+    MaxFailuresReached {
+        /// Number of consecutive failures.
+        failures: u32,
+    },
+}
+
+/// Statistics from a polling supervisor run.
+#[derive(Debug, Clone, Default)]
+pub struct PollingSupervisorStats {
+    /// Total number of poll attempts.
+    pub total_polls: u64,
+    /// Number of successful polls.
+    pub successful_polls: u64,
+    /// Number of failed polls (recoverable).
+    pub failed_polls: u64,
+    /// Total items processed.
+    pub items_processed: u64,
+    /// Total time spent in backoff (milliseconds).
+    pub backoff_time_ms: u64,
+}
+
+/// Supervised polling loop with backoff, health tracking, and cursor management.
+///
+/// The supervisor provides:
+/// - Configurable poll interval with long-poll support
+/// - Exponential backoff on recoverable errors
+/// - Rate-limit aware backoff (respects Retry-After hints)
+/// - Health state transitions based on success/failure patterns
+/// - Cursor persistence hooks for exactly-once semantics
+///
+/// # Example
+///
+/// ```ignore
+/// use fcp_sdk::runtime::{PollingSupervisor, PollResult, SupervisorConfig, InMemoryPollingCursor};
+/// use tokio::sync::watch;
+///
+/// let config = SupervisorConfig::default();
+/// let cursor = InMemoryPollingCursor::new();
+/// let (shutdown_tx, shutdown_rx) = watch::channel(false);
+///
+/// let supervisor = PollingSupervisor::new(config, cursor);
+/// let outcome = supervisor.run(
+///     shutdown_rx,
+///     1000, // poll interval ms
+///     |offset| async move {
+///         // Your poll logic here
+///         PollResult::success(vec![item1, item2])
+///     },
+///     |items, cursor| {
+///         // Process items, update cursor
+///         for item in items {
+///             cursor.advance_if_newer(item.id);
+///         }
+///         Ok(())
+///     },
+/// ).await;
+/// ```
+#[derive(Debug)]
+pub struct PollingSupervisor<C: PollingCursor> {
+    config: SupervisorConfig,
+    cursor: C,
+    health: HealthTracker,
+    stats: PollingSupervisorStats,
+}
+
+impl<C: PollingCursor> PollingSupervisor<C> {
+    /// Create a new polling supervisor.
+    pub fn new(config: SupervisorConfig, cursor: C) -> Self {
+        Self {
+            config,
+            cursor,
+            health: HealthTracker::new(),
+            stats: PollingSupervisorStats::default(),
+        }
+    }
+
+    /// Get the current cursor.
+    pub const fn cursor(&self) -> &C {
+        &self.cursor
+    }
+
+    /// Get mutable access to the cursor.
+    pub const fn cursor_mut(&mut self) -> &mut C {
+        &mut self.cursor
+    }
+
+    /// Get the current health tracker.
+    pub const fn health(&self) -> &HealthTracker {
+        &self.health
+    }
+
+    /// Get the current statistics.
+    pub const fn stats(&self) -> &PollingSupervisorStats {
+        &self.stats
+    }
+
+    /// Get the supervisor configuration.
+    pub const fn config(&self) -> &SupervisorConfig {
+        &self.config
+    }
+
+    /// Compute the next backoff delay, respecting rate-limit hints.
+    ///
+    /// If `retry_after_ms` is provided and greater than the computed backoff,
+    /// it takes precedence.
+    fn compute_delay(&self, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
+        // Generate a simple jitter factor based on attempt count
+        // In production, you'd want to use a proper RNG
+        let jitter = (f64::from(attempt) * 0.1).fract();
+        let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
+
+        // Respect rate-limit Retry-After if present and larger
+        let delay_ms = match retry_after_ms {
+            Some(retry_after) if retry_after > backoff => retry_after,
+            _ => backoff,
+        };
+
+        Duration::from_millis(delay_ms)
+    }
+
+    /// Run the polling supervisor loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `shutdown` - Watch channel receiver that signals shutdown when `true`
+    /// * `poll_interval_ms` - Interval between polls when no backoff is active
+    /// * `poll_fn` - Async function that performs the actual poll
+    /// * `process_fn` - Function that processes poll results and updates cursor
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - Type of items returned by the poll
+    /// * `F` - Poll function type
+    /// * `Fut` - Future type returned by poll function
+    /// * `P` - Process function type
+    ///
+    /// # Returns
+    ///
+    /// Returns the outcome of the supervisor run.
+    #[allow(clippy::too_many_lines)]
+    pub async fn run<T, F, Fut, P>(
+        &mut self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        poll_interval_ms: u64,
+        poll_fn: F,
+        mut process_fn: P,
+    ) -> SupervisorOutcome
+    where
+        F: Fn(Option<i64>) -> Fut,
+        Fut: std::future::Future<Output = PollResult<T>>,
+        P: FnMut(Vec<T>, &mut C) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let poll_interval = Duration::from_millis(poll_interval_ms);
+        let mut consecutive_failures: u32 = 0;
+
+        // Restore cursor state if available
+        if let Err(e) = self.cursor.restore() {
+            tracing::warn!(error = %e, "Failed to restore cursor state, starting fresh");
+        }
+
+        // Transition to healthy on start
+        self.health.record_success();
+        self.health.evaluate(&self.config);
+
+        loop {
+            // Check for shutdown signal
+            if *shutdown.borrow() {
+                tracing::info!("Polling supervisor received shutdown signal");
+                // Persist cursor before shutdown
+                if let Err(e) = self.cursor.persist() {
+                    tracing::error!(error = %e, "Failed to persist cursor on shutdown");
+                }
+                return SupervisorOutcome::Shutdown;
+            }
+
+            // Execute poll
+            self.stats.total_polls += 1;
+            let offset = self.cursor.offset();
+            let poll_start = Instant::now();
+
+            tracing::debug!(offset = ?offset, "Starting poll");
+
+            let result = poll_fn(offset).await;
+            self.cursor.record_poll(Instant::now(), 0);
+
+            match result {
+                PollResult::Success(items) => {
+                    let item_count = items.len();
+                    self.stats.successful_polls += 1;
+                    self.stats.items_processed += item_count as u64;
+                    consecutive_failures = 0;
+
+                    // Record success for health tracking
+                    self.health.record_success();
+                    self.health.evaluate(&self.config);
+
+                    // Process items
+                    if !items.is_empty() {
+                        if let Err(e) = process_fn(items, &mut self.cursor) {
+                            tracing::error!(error = %e, "Failed to process poll results");
+                            // Don't fail the supervisor for processing errors
+                        }
+
+                        // Persist cursor after successful processing
+                        if let Err(e) = self.cursor.persist() {
+                            tracing::warn!(error = %e, "Failed to persist cursor");
+                        }
+                    }
+
+                    tracing::debug!(
+                        items = item_count,
+                        elapsed_ms = poll_start.elapsed().as_millis(),
+                        "Poll completed successfully"
+                    );
+
+                    // Wait for poll interval, checking for shutdown
+                    tokio::select! {
+                        () = tokio::time::sleep(poll_interval) => {}
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                if let Err(e) = self.cursor.persist() {
+                                    tracing::error!(error = %e, "Failed to persist cursor on shutdown");
+                                }
+                                return SupervisorOutcome::Shutdown;
+                            }
+                        }
+                    }
+                }
+
+                PollResult::RecoverableError {
+                    message,
+                    retry_after_ms,
+                } => {
+                    self.stats.failed_polls += 1;
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+
+                    // Record failure for health tracking
+                    self.health.record_failure(&message);
+                    self.health.evaluate(&self.config);
+
+                    tracing::warn!(
+                        error = %message,
+                        consecutive_failures,
+                        retry_after_ms = ?retry_after_ms,
+                        "Poll failed with recoverable error"
+                    );
+
+                    // Check if we've exceeded max failures
+                    if consecutive_failures >= self.config.max_consecutive_failures {
+                        tracing::error!(
+                            failures = consecutive_failures,
+                            max = self.config.max_consecutive_failures,
+                            "Maximum consecutive failures reached"
+                        );
+                        if let Err(e) = self.cursor.persist() {
+                            tracing::error!(error = %e, "Failed to persist cursor");
+                        }
+                        return SupervisorOutcome::MaxFailuresReached {
+                            failures: consecutive_failures,
+                        };
+                    }
+
+                    // Compute backoff delay
+                    let delay = self.compute_delay(consecutive_failures - 1, retry_after_ms);
+                    self.stats.backoff_time_ms +=
+                        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+
+                    tracing::info!(
+                        delay_ms = delay.as_millis(),
+                        attempt = consecutive_failures,
+                        "Backing off before retry"
+                    );
+
+                    // Wait for backoff, checking for shutdown
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                if let Err(e) = self.cursor.persist() {
+                                    tracing::error!(error = %e, "Failed to persist cursor on shutdown");
+                                }
+                                return SupervisorOutcome::Shutdown;
+                            }
+                        }
+                    }
+                }
+
+                PollResult::FatalError { message } => {
+                    tracing::error!(error = %message, "Poll failed with fatal error");
+                    self.health.transition(HealthTransition::ToUnhealthy {
+                        reason: message.clone(),
+                    });
+                    if let Err(e) = self.cursor.persist() {
+                        tracing::error!(error = %e, "Failed to persist cursor");
+                    }
+                    return SupervisorOutcome::FatalError { message };
+                }
+            }
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -955,5 +1328,152 @@ mod tests {
         // Ready -> Starting is always valid (reset)
         assert!(tracker.transition(HealthTransition::ToStarting));
         assert!(matches!(tracker.state(), HealthState::Starting));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PollingSupervisor tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn poll_result_constructors() {
+        let success: PollResult<i32> = PollResult::success(vec![1, 2, 3]);
+        assert!(matches!(success, PollResult::Success(items) if items.len() == 3));
+
+        let empty: PollResult<i32> = PollResult::empty();
+        assert!(matches!(empty, PollResult::Success(items) if items.is_empty()));
+
+        let recoverable: PollResult<i32> = PollResult::recoverable("timeout");
+        assert!(matches!(
+            recoverable,
+            PollResult::RecoverableError {
+                retry_after_ms: None,
+                ..
+            }
+        ));
+
+        let rate_limited: PollResult<i32> = PollResult::rate_limited("too fast", 5000);
+        assert!(matches!(
+            rate_limited,
+            PollResult::RecoverableError {
+                retry_after_ms: Some(5000),
+                ..
+            }
+        ));
+
+        let fatal: PollResult<i32> = PollResult::fatal("auth failed");
+        assert!(matches!(fatal, PollResult::FatalError { .. }));
+    }
+
+    #[test]
+    fn polling_supervisor_creation() {
+        let config = SupervisorConfig::default();
+        let cursor = InMemoryPollingCursor::new();
+        let supervisor = PollingSupervisor::new(config.clone(), cursor);
+
+        assert!(supervisor.cursor().offset().is_none());
+        assert!(matches!(supervisor.health().state(), HealthState::Starting));
+        assert_eq!(supervisor.stats().total_polls, 0);
+        assert_eq!(supervisor.config().base_backoff_ms, config.base_backoff_ms);
+    }
+
+    #[test]
+    fn polling_supervisor_compute_delay_respects_retry_after() {
+        let config = SupervisorConfig::default().with_jitter(false);
+        let cursor = InMemoryPollingCursor::new();
+        let supervisor = PollingSupervisor::new(config, cursor);
+
+        // Without retry-after, uses exponential backoff
+        let delay = supervisor.compute_delay(0, None);
+        assert_eq!(delay.as_millis(), 1000);
+
+        // With smaller retry-after, uses backoff
+        let delay = supervisor.compute_delay(0, Some(500));
+        assert_eq!(delay.as_millis(), 1000);
+
+        // With larger retry-after, uses retry-after
+        let delay = supervisor.compute_delay(0, Some(10_000));
+        assert_eq!(delay.as_millis(), 10_000);
+    }
+
+    #[test]
+    fn polling_supervisor_stats_default() {
+        let stats = PollingSupervisorStats::default();
+        assert_eq!(stats.total_polls, 0);
+        assert_eq!(stats.successful_polls, 0);
+        assert_eq!(stats.failed_polls, 0);
+        assert_eq!(stats.items_processed, 0);
+        assert_eq!(stats.backoff_time_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn polling_supervisor_shutdown_signal() {
+        let config = SupervisorConfig::default();
+        let cursor = InMemoryPollingCursor::new();
+        let mut supervisor = PollingSupervisor::new(config, cursor);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true); // Start with shutdown
+        let _ = shutdown_tx; // Keep sender alive
+
+        let outcome = supervisor
+            .run(
+                shutdown_rx,
+                1000,
+                |_offset| async { PollResult::<i32>::empty() },
+                |_items, _cursor| Ok(()),
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn polling_supervisor_fatal_error_stops() {
+        let config = SupervisorConfig::default();
+        let cursor = InMemoryPollingCursor::new();
+        let mut supervisor = PollingSupervisor::new(config, cursor);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run(
+                shutdown_rx,
+                1000,
+                |_offset| async { PollResult::<i32>::fatal("auth failed") },
+                |_items, _cursor| Ok(()),
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::FatalError { message } if message == "auth failed"
+        ));
+        assert_eq!(supervisor.stats().total_polls, 1);
+        assert_eq!(supervisor.stats().failed_polls, 0); // Fatal errors don't increment failed_polls
+    }
+
+    #[tokio::test]
+    async fn polling_supervisor_max_failures() {
+        let config = SupervisorConfig::default()
+            .with_max_consecutive_failures(2)
+            .with_base_backoff_ms(1); // Fast backoff for testing
+        let cursor = InMemoryPollingCursor::new();
+        let mut supervisor = PollingSupervisor::new(config, cursor);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run(
+                shutdown_rx,
+                1,
+                |_offset| async { PollResult::<i32>::recoverable("timeout") },
+                |_items, _cursor| Ok(()),
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 2 }
+        ));
+        assert_eq!(supervisor.stats().failed_polls, 2);
     }
 }

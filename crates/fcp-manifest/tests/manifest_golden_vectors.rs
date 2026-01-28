@@ -1510,3 +1510,370 @@ idempotency = "none""#
         );
     }
 }
+
+// =============================================================================
+// Rate Limit Declarations Tests (bd-zxfr)
+// =============================================================================
+
+#[test]
+fn accepts_valid_rate_limits_section() {
+    let _log = TestLog::new(
+        "accepts_valid_rate_limits_section",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "api_global"
+description = "Global API rate limit"
+requests = 100
+window_ms = 60000
+burst = 10
+unit = "requests"
+enforcement = "hard"
+scope = "credential"
+
+[[rate_limits.pools]]
+id = "token_budget"
+description = "Token usage limit"
+requests = 10000
+window_ms = 3600000
+unit = "tokens"
+enforcement = "soft"
+scope = "instance"
+
+[rate_limits.operation_pools]
+test_op = ["api_global", "token_budget"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let manifest = ConnectorManifest::parse_str(&toml).expect("should parse valid rate_limits");
+    let rate_limits = manifest.rate_limits.expect("rate_limits should be present");
+    assert_eq!(rate_limits.pools.len(), 2);
+    assert_eq!(rate_limits.pools[0].id, "api_global");
+    assert_eq!(rate_limits.pools[1].id, "token_budget");
+    assert_eq!(rate_limits.operation_pools.get("test_op").unwrap().len(), 2);
+}
+
+#[test]
+fn accepts_minimal_rate_limits_section() {
+    let _log = TestLog::new(
+        "accepts_minimal_rate_limits_section",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "api"
+requests = 60
+window_ms = 60000
+
+[rate_limits.operation_pools]
+test_op = ["api"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let manifest = ConnectorManifest::parse_str(&toml).expect("should parse minimal rate_limits");
+    let rate_limits = manifest.rate_limits.expect("rate_limits should be present");
+    assert_eq!(rate_limits.pools.len(), 1);
+    assert_eq!(rate_limits.pools[0].requests, 60);
+    assert!(rate_limits.pools[0].burst.is_none());
+}
+
+#[test]
+fn rejects_rate_limits_zero_requests() {
+    let _log = TestLog::new(
+        "rejects_rate_limits_zero_requests",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "bad_pool"
+requests = 0
+window_ms = 60000
+
+[rate_limits.operation_pools]
+test_op = ["bad_pool"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::RateLimitDeclaration(_)),
+        "should reject zero requests: got {err}"
+    );
+}
+
+#[test]
+fn rejects_rate_limits_zero_window() {
+    let _log = TestLog::new(
+        "rejects_rate_limits_zero_window",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "bad_pool"
+requests = 100
+window_ms = 0
+
+[rate_limits.operation_pools]
+test_op = ["bad_pool"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::RateLimitDeclaration(_)),
+        "should reject zero window: got {err}"
+    );
+}
+
+#[test]
+fn rejects_rate_limits_empty_pool_id() {
+    let _log = TestLog::new(
+        "rejects_rate_limits_empty_pool_id",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = ""
+requests = 100
+window_ms = 60000
+
+[rate_limits.operation_pools]
+test_op = [""]
+"#;
+    let toml = with_computed_hash(&toml);
+    let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::RateLimitDeclaration(_)),
+        "should reject empty pool id: got {err}"
+    );
+}
+
+#[test]
+fn rejects_rate_limits_duplicate_pool_ids() {
+    let _log = TestLog::new(
+        "rejects_rate_limits_duplicate_pool_ids",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "duplicate"
+requests = 100
+window_ms = 60000
+
+[[rate_limits.pools]]
+id = "duplicate"
+requests = 200
+window_ms = 60000
+
+[rate_limits.operation_pools]
+test_op = ["duplicate"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::RateLimitDeclaration(_)),
+        "should reject duplicate pool ids: got {err}"
+    );
+}
+
+#[test]
+fn rejects_rate_limits_unknown_pool_reference() {
+    let _log = TestLog::new(
+        "rejects_rate_limits_unknown_pool_reference",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "existing_pool"
+requests = 100
+window_ms = 60000
+
+[rate_limits.operation_pools]
+test_op = ["nonexistent_pool"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+    assert!(
+        matches!(err, ManifestError::RateLimitDeclaration(_)),
+        "should reject unknown pool reference: got {err}"
+    );
+}
+
+#[test]
+fn accepts_rate_limits_all_enforcement_levels() {
+    let _log = TestLog::new(
+        "accepts_rate_limits_all_enforcement_levels",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    for enforcement in ["hard", "soft", "advisory"] {
+        let toml = base_manifest_toml(PLACEHOLDER_HASH)
+            + &format!(
+                r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "pool"
+requests = 100
+window_ms = 60000
+enforcement = "{enforcement}"
+
+[rate_limits.operation_pools]
+test_op = ["pool"]
+"#
+            );
+        let toml = with_computed_hash(&toml);
+        let manifest = ConnectorManifest::parse_str(&toml)
+            .unwrap_or_else(|e| panic!("enforcement={enforcement} should parse: {e}"));
+        let rate_limits = manifest.rate_limits.expect("rate_limits should be present");
+        assert_eq!(
+            rate_limits.pools[0].enforcement.as_deref(),
+            Some(enforcement)
+        );
+    }
+}
+
+#[test]
+fn accepts_rate_limits_all_scopes() {
+    let _log = TestLog::new(
+        "accepts_rate_limits_all_scopes",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    for scope in ["instance", "credential", "global"] {
+        let toml = base_manifest_toml(PLACEHOLDER_HASH)
+            + &format!(
+                r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "pool"
+requests = 100
+window_ms = 60000
+scope = "{scope}"
+
+[rate_limits.operation_pools]
+test_op = ["pool"]
+"#
+            );
+        let toml = with_computed_hash(&toml);
+        let manifest = ConnectorManifest::parse_str(&toml)
+            .unwrap_or_else(|e| panic!("scope={scope} should parse: {e}"));
+        let rate_limits = manifest.rate_limits.expect("rate_limits should be present");
+        assert_eq!(rate_limits.pools[0].scope.as_deref(), Some(scope));
+    }
+}
+
+#[test]
+fn accepts_rate_limits_all_units() {
+    let _log = TestLog::new(
+        "accepts_rate_limits_all_units",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    for unit in ["requests", "tokens", "bytes", "custom"] {
+        let toml = base_manifest_toml(PLACEHOLDER_HASH)
+            + &format!(
+                r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "pool"
+requests = 100
+window_ms = 60000
+unit = "{unit}"
+
+[rate_limits.operation_pools]
+test_op = ["pool"]
+"#
+            );
+        let toml = with_computed_hash(&toml);
+        let manifest = ConnectorManifest::parse_str(&toml)
+            .unwrap_or_else(|e| panic!("unit={unit} should parse: {e}"));
+        let rate_limits = manifest.rate_limits.expect("rate_limits should be present");
+        assert_eq!(rate_limits.pools[0].unit.as_deref(), Some(unit));
+    }
+}
+
+#[test]
+fn rate_limits_to_declarations_conversion() {
+    let _log = TestLog::new(
+        "rate_limits_to_declarations_conversion",
+        "fcp-manifest",
+        Some("fcp.test"),
+        Some("1.0.0"),
+        Some(1),
+    );
+    let toml = base_manifest_toml(PLACEHOLDER_HASH)
+        + r#"
+[rate_limits]
+[[rate_limits.pools]]
+id = "api"
+description = "API limit"
+requests = 100
+window_ms = 60000
+burst = 20
+unit = "requests"
+enforcement = "hard"
+scope = "credential"
+
+[rate_limits.operation_pools]
+test_op = ["api"]
+"#;
+    let toml = with_computed_hash(&toml);
+    let manifest = ConnectorManifest::parse_str(&toml).expect("should parse");
+    let rate_limits = manifest.rate_limits.expect("rate_limits present");
+    let decls = rate_limits.to_declarations();
+
+    assert_eq!(decls.limits.len(), 1);
+    let pool = &decls.limits[0];
+    assert_eq!(pool.id, "api");
+    assert_eq!(pool.description, "API limit");
+    assert_eq!(pool.config.requests, 100);
+    assert_eq!(pool.config.window.as_millis(), 60000);
+    assert_eq!(pool.config.burst, Some(20));
+    assert_eq!(pool.config.unit, fcp_core::RateLimitUnit::Requests);
+    assert_eq!(pool.enforcement, fcp_core::RateLimitEnforcement::Hard);
+    assert_eq!(pool.scope, fcp_core::RateLimitScope::Credential);
+
+    assert!(decls.tool_pool_map.contains_key("test_op"));
+    assert_eq!(
+        decls.tool_pool_map.get("test_op").unwrap(),
+        &vec!["api".to_string()]
+    );
+}

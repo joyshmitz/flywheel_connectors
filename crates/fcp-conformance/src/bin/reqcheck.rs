@@ -40,11 +40,7 @@ use serde_json::json;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the requirements index markdown file.
-    #[arg(
-        short,
-        long,
-        default_value = "docs/STANDARD_Requirements_Index.md"
-    )]
+    #[arg(short, long, default_value = "docs/STANDARD_Requirements_Index.md")]
     index: PathBuf,
 
     /// Path to beads JSONL export file (alternative to br list).
@@ -74,25 +70,21 @@ fn main() -> ExitCode {
 
     // Load known beads
     let known_beads: HashSet<String> = match &args.beads {
-        Some(path) => {
-            match load_beads_from_jsonl(path) {
-                Ok(beads) => beads,
-                Err(e) => {
-                    eprintln!("Error loading beads from {}: {e}", path.display());
-                    return ExitCode::from(2);
-                }
+        Some(path) => match load_beads_from_jsonl(path) {
+            Ok(beads) => beads,
+            Err(e) => {
+                eprintln!("Error loading beads from {}: {e}", path.display());
+                return ExitCode::from(2);
             }
-        }
-        None => {
-            match load_beads_from_br_list() {
-                Ok(beads) => beads,
-                Err(e) => {
-                    eprintln!("Error running br list: {e}");
-                    eprintln!("Hint: Use --beads <path> to specify a JSONL export file");
-                    return ExitCode::from(2);
-                }
+        },
+        None => match load_beads_from_br_list() {
+            Ok(beads) => beads,
+            Err(e) => {
+                eprintln!("Error running br list: {e}");
+                eprintln!("Hint: Use --beads <path> to specify a JSONL export file");
+                return ExitCode::from(2);
             }
-        }
+        },
     };
 
     if !args.json {
@@ -153,7 +145,8 @@ fn main() -> ExitCode {
                 println!(
                     "  [{}:{}] {}: {}",
                     err.section,
-                    err.line_number.map_or_else(|| "?".to_string(), |n| n.to_string()),
+                    err.line_number
+                        .map_or_else(|| "?".to_string(), |n| n.to_string()),
                     err.error_type,
                     err.message
                 );
@@ -166,7 +159,8 @@ fn main() -> ExitCode {
                 println!(
                     "  [{}:{}] {}: {}",
                     warn.section,
-                    warn.line_number.map_or_else(|| "?".to_string(), |n| n.to_string()),
+                    warn.line_number
+                        .map_or_else(|| "?".to_string(), |n| n.to_string()),
                     warn.warning_type,
                     warn.message
                 );

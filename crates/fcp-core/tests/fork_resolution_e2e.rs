@@ -153,7 +153,9 @@ impl E2ETestContext {
             }
         });
         self.capture.push_value(&entry).expect("final log entry");
-        self.capture.validate_jsonl().expect("JSONL schema validation");
+        self.capture
+            .validate_jsonl()
+            .expect("JSONL schema validation");
     }
 }
 
@@ -290,14 +292,26 @@ fn e2e_two_writers_fork_resolved_by_lease() {
     );
 
     // Writer A writes with higher lease_seq (should win)
-    let state_a =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 200, b"writer-a-data");
+    let state_a = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        200,
+        b"writer-a-data",
+    );
     let state_a_id = test_object_id("writer-a-data");
     connector.write_state(state_a);
 
     // Writer B writes with lower lease_seq (conflicting)
-    let state_b =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 150, b"writer-b-data");
+    let state_b = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        150,
+        b"writer-b-data",
+    );
     let _state_b_id = test_object_id("writer-b-data");
     connector.write_state(state_b);
 
@@ -309,7 +323,12 @@ fn e2e_two_writers_fork_resolved_by_lease() {
     let fork = result.fork_event().expect("Fork event should exist");
 
     // Log the fork event
-    ctx.log_fork_event(&connector_id, &fork.common_prev, &fork.branch_a, &fork.branch_b);
+    ctx.log_fork_event(
+        &connector_id,
+        &fork.common_prev,
+        &fork.branch_a,
+        &fork.branch_b,
+    );
 
     // Pause connector on fork
     connector.pause();
@@ -325,12 +344,10 @@ fn e2e_two_writers_fork_resolved_by_lease() {
         Some(json!({"phase": "resolving fork via ChooseByLease"})),
     );
 
-    let outcome = connector.fork_detector.resolve(
-        fork,
-        ForkResolution::ChooseByLease,
-        &model,
-        1_700_000_101,
-    );
+    let outcome =
+        connector
+            .fork_detector
+            .resolve(fork, ForkResolution::ChooseByLease, &model, 1_700_000_101);
 
     ctx.assert_true(outcome.resolved, "Fork should be resolved");
     ctx.assert_eq(
@@ -378,13 +395,25 @@ fn e2e_fork_requires_manual_resolution() {
     connector.write_state(genesis);
 
     // Two writers with same lease_seq (tie)
-    let state_a =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 100, b"writer-a-tie");
+    let state_a = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        100,
+        b"writer-a-tie",
+    );
     let _state_a_id = test_object_id("writer-a-tie");
     connector.write_state(state_a);
 
-    let state_b =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 100, b"writer-b-tie");
+    let state_b = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        100,
+        b"writer-b-tie",
+    );
     let state_b_id = test_object_id("writer-b-tie");
     connector.write_state(state_b);
 
@@ -393,17 +422,20 @@ fn e2e_fork_requires_manual_resolution() {
     ctx.assert_true(result.is_fork(), "Fork should be detected");
 
     let fork = result.fork_event().expect("Fork event");
-    ctx.log_fork_event(&connector_id, &fork.common_prev, &fork.branch_a, &fork.branch_b);
+    ctx.log_fork_event(
+        &connector_id,
+        &fork.common_prev,
+        &fork.branch_a,
+        &fork.branch_b,
+    );
 
     connector.pause();
 
     // Try ChooseByLease - should fail due to tie
-    let outcome = connector.fork_detector.resolve(
-        fork,
-        ForkResolution::ChooseByLease,
-        &model,
-        1_700_000_101,
-    );
+    let outcome =
+        connector
+            .fork_detector
+            .resolve(fork, ForkResolution::ChooseByLease, &model, 1_700_000_101);
 
     ctx.assert_true(
         !outcome.resolved,
@@ -427,15 +459,14 @@ fn e2e_fork_requires_manual_resolution() {
     );
 
     // Manual resolution - operator selects writer B
-    let fork2 = result.fork_event().expect("Fork event for manual resolution");
+    let fork2 = result
+        .fork_event()
+        .expect("Fork event for manual resolution");
     let manual_outcome = connector
         .fork_detector
         .resolve_manual(fork2, state_b_id, 1_700_000_102);
 
-    ctx.assert_true(
-        manual_outcome.resolved,
-        "Manual resolution should succeed",
-    );
+    ctx.assert_true(manual_outcome.resolved, "Manual resolution should succeed");
     ctx.assert_eq(
         &manual_outcome.winning_head,
         &Some(state_b_id),
@@ -469,16 +500,34 @@ fn e2e_three_way_fork_detection() {
     connector.write_state(genesis);
 
     // Three concurrent writers
-    let state_a =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 300, b"branch-a");
+    let state_a = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        300,
+        b"branch-a",
+    );
     connector.write_state(state_a);
 
-    let state_b =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 200, b"branch-b");
+    let state_b = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        200,
+        b"branch-b",
+    );
     connector.write_state(state_b);
 
-    let state_c =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 100, b"branch-c");
+    let state_c = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        100,
+        b"branch-c",
+    );
     connector.write_state(state_c);
 
     // Detect fork - should find at least two branches
@@ -487,7 +536,12 @@ fn e2e_three_way_fork_detection() {
     ctx.assert_true(result.is_fork(), "Multi-way fork should be detected");
 
     let fork = result.fork_event().expect("Fork event");
-    ctx.log_fork_event(&connector_id, &fork.common_prev, &fork.branch_a, &fork.branch_b);
+    ctx.log_fork_event(
+        &connector_id,
+        &fork.common_prev,
+        &fork.branch_a,
+        &fork.branch_b,
+    );
 
     connector.pause();
 
@@ -522,8 +576,14 @@ fn e2e_linear_chain_no_fork() {
     connector.write_state(genesis);
 
     // Linear chain: genesis -> state1 -> state2
-    let state1 =
-        create_state_object(&connector_id, &zone_id, Some(genesis_id), 1, 101, b"state-1");
+    let state1 = create_state_object(
+        &connector_id,
+        &zone_id,
+        Some(genesis_id),
+        1,
+        101,
+        b"state-1",
+    );
     let state1_id = test_object_id("state-1");
     connector.write_state(state1);
 
