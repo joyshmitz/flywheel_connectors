@@ -2180,6 +2180,7 @@ dependencies = [
  "chrono",
  "fcp-core",
  "fcp-crypto",
+ "fcp-sdk",
  "futures-util",
  "reqwest",
  "serde",
