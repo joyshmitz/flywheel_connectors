@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fcp_core::*;
+use fcp_sdk::{Limits, validate_input_with_limits, validate_output_with_limits};
 use serde_json::json;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{error, info, warn};
@@ -215,6 +216,100 @@ impl TelegramConnector {
         }
     }
 
+    fn send_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "chat_id": { "type": "string", "description": "Chat ID or @username" },
+                "text": { "type": "string", "description": "Message text" },
+                "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
+                "reply_to_message_id": { "type": "integer" }
+            },
+            "required": ["chat_id", "text"]
+        })
+    }
+
+    fn send_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message_id": { "type": "integer" },
+                "chat_id": { "type": "integer" }
+            }
+        })
+    }
+
+    fn get_file_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "file_id": { "type": "string", "description": "File ID from a message" }
+            },
+            "required": ["file_id"]
+        })
+    }
+
+    fn get_file_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "file_id": { "type": "string" },
+                "file_path": { "type": "string" },
+                "file_size": { "type": "integer" }
+            }
+        })
+    }
+
+    fn answer_callback_query_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "callback_query_id": { "type": "string", "description": "Unique identifier for the query to be answered" },
+                "text": { "type": "string", "description": "Text of the notification. If not specified, nothing will be shown to the user" }
+            },
+            "required": ["callback_query_id"]
+        })
+    }
+
+    fn answer_callback_query_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn message_event_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "message_id": { "type": "integer" },
+                "from": { "type": "object" },
+                "chat": { "type": "object" },
+                "text": { "type": "string" }
+            }
+        })
+    }
+
+    fn input_schema_for(operation: &str) -> Option<serde_json::Value> {
+        match operation {
+            "telegram.send_message" => Some(Self::send_message_input_schema()),
+            "telegram.get_file" => Some(Self::get_file_input_schema()),
+            "telegram.answer_callback_query" => Some(Self::answer_callback_query_input_schema()),
+            _ => None,
+        }
+    }
+
+    fn output_schema_for(operation: &str) -> Option<serde_json::Value> {
+        match operation {
+            "telegram.send_message" => Some(Self::send_message_output_schema()),
+            "telegram.get_file" => Some(Self::get_file_output_schema()),
+            "telegram.answer_callback_query" => Some(Self::answer_callback_query_output_schema()),
+            _ => None,
+        }
+    }
+
     /// Handle introspection.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
@@ -223,23 +318,8 @@ impl TelegramConnector {
                     id: OperationId::from_static("telegram.send_message"),
                     summary: "Send a text message to a Telegram chat".into(),
                     description: Some("Sends a text message to a specified Telegram chat, user, or group.".into()),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "chat_id": { "type": "string", "description": "Chat ID or @username" },
-                            "text": { "type": "string", "description": "Message text" },
-                            "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
-                            "reply_to_message_id": { "type": "integer" }
-                        },
-                        "required": ["chat_id", "text"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "message_id": { "type": "integer" },
-                            "chat_id": { "type": "integer" }
-                        }
-                    }),
+                    input_schema: Self::send_message_input_schema(),
+                    output_schema: Self::send_message_output_schema(),
                     capability: CapabilityId::from_static("telegram.send"),
                     risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Risky,
@@ -263,21 +343,8 @@ impl TelegramConnector {
                     id: OperationId::from_static("telegram.get_file"),
                     summary: "Get file information for downloading".into(),
                     description: Some("Retrieves file information including download path for files attached to messages.".into()),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "file_id": { "type": "string", "description": "File ID from a message" }
-                        },
-                        "required": ["file_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "file_id": { "type": "string" },
-                            "file_path": { "type": "string" },
-                            "file_size": { "type": "integer" }
-                        }
-                    }),
+                    input_schema: Self::get_file_input_schema(),
+                    output_schema: Self::get_file_output_schema(),
                     capability: CapabilityId::from_static("telegram.read"),
                     risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
@@ -295,20 +362,8 @@ impl TelegramConnector {
                     id: OperationId::from_static("telegram.answer_callback_query"),
                     summary: "Answer a callback query (button press)".into(),
                     description: Some("Notify Telegram that a callback query has been received. Stops the loading animation.".into()),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "callback_query_id": { "type": "string", "description": "Unique identifier for the query to be answered" },
-                            "text": { "type": "string", "description": "Text of the notification. If not specified, nothing will be shown to the user" }
-                        },
-                        "required": ["callback_query_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "success": { "type": "boolean" }
-                        }
-                    }),
+                    input_schema: Self::answer_callback_query_input_schema(),
+                    output_schema: Self::answer_callback_query_output_schema(),
                     capability: CapabilityId::from_static("telegram.send"),
                     risk_level: RiskLevel::Low,
                     safety_tier: SafetyTier::Safe,
@@ -329,15 +384,7 @@ impl TelegramConnector {
             ],
             events: vec![EventInfo {
                 topic: "telegram.message".into(),
-                schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "message_id": { "type": "integer" },
-                        "from": { "type": "object" },
-                        "chat": { "type": "object" },
-                        "text": { "type": "string" }
-                    }
-                }),
+                schema: Self::message_event_schema(),
                 requires_ack: false,
             }],
             resource_types: vec![],
@@ -379,6 +426,10 @@ impl TelegramConnector {
     /// Validate input structure and limits before capability token verification.
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
         const MAX_TEXT_LENGTH: usize = 4096;
+
+        if let Some(schema) = Self::input_schema_for(operation) {
+            validate_input_with_limits(&schema, input, &Limits::default())?;
+        }
 
         match operation {
             "telegram.send_message" => {
@@ -518,10 +569,16 @@ impl TelegramConnector {
                     retry_after: None,
                 })?;
 
-        Ok(json!({
+        let response = json!({
             "message_id": message.message_id,
             "chat_id": message.chat.id
-        }))
+        });
+
+        if let Some(schema) = Self::output_schema_for("telegram.send_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_get_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -553,13 +610,19 @@ impl TelegramConnector {
 
         let download_url = file.file_path.as_ref().map(|p| client.file_download_url(p));
 
-        Ok(json!({
+        let response = json!({
             "file_id": file.file_id,
             "file_unique_id": file.file_unique_id,
             "file_size": file.file_size,
             "file_path": file.file_path,
             "download_url": download_url
-        }))
+        });
+
+        if let Some(schema) = Self::output_schema_for("telegram.get_file") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_answer_callback_query(
@@ -592,7 +655,13 @@ impl TelegramConnector {
                 retry_after: None,
             })?;
 
-        Ok(json!({ "success": success }))
+        let response = json!({ "success": success });
+
+        if let Some(schema) = Self::output_schema_for("telegram.answer_callback_query") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     /// Handle subscribe method.
