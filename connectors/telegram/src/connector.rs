@@ -220,7 +220,7 @@ impl TelegramConnector {
         json!({
             "type": "object",
             "properties": {
-                "chat_id": { "type": "string", "description": "Chat ID or @username" },
+                "chat_id": { "type": ["string", "integer"], "description": "Chat ID or @username" },
                 "text": { "type": "string", "description": "Message text" },
                 "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
                 "reply_to_message_id": { "type": "integer" }
@@ -526,14 +526,28 @@ impl TelegramConnector {
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Input validation is now done in validate_input_early, but we still need to extract fields
-        let chat_id =
-            input
-                .get("chat_id")
-                .and_then(|v| v.as_str())
+        let chat_id = match input.get("chat_id") {
+            Some(serde_json::Value::String(value)) => value.clone(),
+            Some(serde_json::Value::Number(value)) => value
+                .as_i64()
+                .map(|value| value.to_string())
                 .ok_or(FcpError::InvalidRequest {
                     code: 1003,
+                    message: "chat_id must be an integer or string".into(),
+                })?,
+            Some(_) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_id must be an integer or string".into(),
+                });
+            }
+            None => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
                     message: "Missing chat_id".into(),
-                })?;
+                });
+            }
+        };
 
         let text = input
             .get("text")
