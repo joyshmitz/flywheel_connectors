@@ -511,7 +511,13 @@ impl EgressGuard {
             host.to_string()
         } else {
             let canonical = canonicalize_hostname(host)?;
-            if constraints.require_host_canonicalization && canonical != host {
+            if canonical != host {
+                if constraints.require_host_canonicalization {
+                    return Err(EgressError::Denied {
+                        reason: format!("hostname not canonical: {host}"),
+                        code: DenyReason::HostnameNotCanonical,
+                    });
+                }
                 debug!(original = %host, canonical = %canonical, "hostname canonicalized");
             }
             canonical
