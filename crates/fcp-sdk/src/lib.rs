@@ -432,7 +432,7 @@ fn format_path(segments: &[PathSegment]) -> String {
         match segment {
             PathSegment::Key(key) => {
                 path.push('/');
-                path.push_str(key);
+                path.push_str(&escape_json_pointer(key));
             }
             PathSegment::Index(index) => {
                 path.push('/');
@@ -441,6 +441,10 @@ fn format_path(segments: &[PathSegment]) -> String {
         }
     }
     path
+}
+
+fn escape_json_pointer(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 fn check_limits(
