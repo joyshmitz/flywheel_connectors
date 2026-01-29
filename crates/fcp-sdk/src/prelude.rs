@@ -75,7 +75,7 @@ pub use crate::runtime::{
 // Schema validation helpers
 pub use crate::{
     Limits, SchemaValidationError, SchemaValidator, enforce_limits, validate_input,
-    validate_json_schema, validate_output,
+    validate_input_with_limits, validate_json_schema, validate_output, validate_output_with_limits,
 };
 
 // External crates commonly needed

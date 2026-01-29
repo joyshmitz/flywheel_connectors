@@ -612,6 +612,50 @@ mod schema_validation_helper_tests {
             other => panic!("unexpected error: {other:?}"),
         }
     }
+
+    #[test]
+    fn validate_input_with_limits_rejects_large_payload() {
+        let schema = json!({ "type": "object" });
+        let value = json!({ "payload": "this is long" });
+        let limits = Limits {
+            max_bytes: Some(8),
+            max_array_len: None,
+            max_depth: None,
+        };
+
+        let err = validate_input_with_limits(&schema, &value, &limits)
+            .expect_err("limits should reject input");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("payload size"));
+                assert!(message.contains("exceeds limit"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_with_limits_maps_to_internal() {
+        let schema = json!({ "type": "object" });
+        let value = json!({ "payload": "this is long" });
+        let limits = Limits {
+            max_bytes: Some(8),
+            max_array_len: None,
+            max_depth: None,
+        };
+
+        let err = validate_output_with_limits(&schema, &value, &limits)
+            .expect_err("limits should reject output");
+
+        match err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("output payload exceeds limits"));
+                assert!(message.contains("payload size"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

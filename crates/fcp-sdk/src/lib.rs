@@ -285,6 +285,46 @@ pub fn validate_input(
     schema: &serde_json::Value,
     value: &serde_json::Value,
 ) -> Result<(), FcpError> {
+    validate_input_with_limits(schema, value, &Limits::default())
+}
+
+/// Validate output payloads against a JSON Schema and map failures to `FcpError::Internal`.
+///
+/// # Errors
+/// Returns `FcpError::Internal` when the output value does not match the schema or the schema is
+/// invalid.
+pub fn validate_output(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+) -> Result<(), FcpError> {
+    validate_output_with_limits(schema, value, &Limits::default())
+}
+
+/// Validate input payloads against limits and a JSON Schema.
+///
+/// # Errors
+/// Returns `FcpError::InvalidRequest` when the input value does not match the schema or violates
+/// limits, or `FcpError::Internal` if the schema itself is invalid.
+pub fn validate_input_with_limits(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    limits: &Limits,
+) -> Result<(), FcpError> {
+    match validate_limits(value, limits) {
+        Ok(()) => {}
+        Err(LimitCheckError::Serialization(message)) => {
+            return Err(FcpError::Internal {
+                message: format!("failed to measure payload size: {message}"),
+            });
+        }
+        Err(LimitCheckError::Violation(violation)) => {
+            return Err(FcpError::InvalidRequest {
+                code: INVALID_REQUEST_LIMITS_CODE,
+                message: violation.message(),
+            });
+        }
+    }
+
     match validate_json_schema(schema, value) {
         Ok(()) => Ok(()),
         Err(SchemaValidationError::InvalidSchema { message }) => Err(FcpError::Internal {
@@ -302,15 +342,30 @@ pub fn validate_input(
     }
 }
 
-/// Validate output payloads against a JSON Schema and map failures to `FcpError::Internal`.
+/// Validate output payloads against limits and a JSON Schema.
 ///
 /// # Errors
-/// Returns `FcpError::Internal` when the output value does not match the schema or the schema is
-/// invalid.
-pub fn validate_output(
+/// Returns `FcpError::Internal` when the output value violates limits, does not match the schema,
+/// or the schema is invalid.
+pub fn validate_output_with_limits(
     schema: &serde_json::Value,
     value: &serde_json::Value,
+    limits: &Limits,
 ) -> Result<(), FcpError> {
+    match validate_limits(value, limits) {
+        Ok(()) => {}
+        Err(LimitCheckError::Serialization(message)) => {
+            return Err(FcpError::Internal {
+                message: format!("failed to measure payload size: {message}"),
+            });
+        }
+        Err(LimitCheckError::Violation(violation)) => {
+            return Err(FcpError::Internal {
+                message: format!("output payload exceeds limits: {}", violation.message()),
+            });
+        }
+    }
+
     match validate_json_schema(schema, value) {
         Ok(()) => Ok(()),
         Err(SchemaValidationError::InvalidSchema { message }) => Err(FcpError::Internal {
@@ -398,6 +453,12 @@ enum LimitViolation {
         depth: usize,
         max: usize,
     },
+}
+
+#[derive(Debug, Clone)]
+enum LimitCheckError {
+    Violation(LimitViolation),
+    Serialization(String),
 }
 
 impl LimitViolation {
@@ -493,38 +554,43 @@ fn check_limits(
     Ok(())
 }
 
-/// Enforce payload size, array length, and depth limits.
-///
-/// # Errors
-/// Returns `FcpError::InvalidRequest` when limits are exceeded.
-pub fn enforce_limits(value: &serde_json::Value, limits: &Limits) -> Result<(), FcpError> {
+fn validate_limits(value: &serde_json::Value, limits: &Limits) -> Result<(), LimitCheckError> {
     if let Some(max_bytes) = limits.max_bytes {
-        let size = serde_json::to_vec(value).map_err(|e| FcpError::Internal {
-            message: format!("failed to measure payload size: {e}"),
-        })?;
+        let size = serde_json::to_vec(value)
+            .map_err(|err| LimitCheckError::Serialization(err.to_string()))?;
         if size.len() > max_bytes {
-            return Err(FcpError::InvalidRequest {
-                code: INVALID_REQUEST_LIMITS_CODE,
-                message: LimitViolation::PayloadTooLarge {
+            return Err(LimitCheckError::Violation(
+                LimitViolation::PayloadTooLarge {
                     actual: size.len(),
                     max: max_bytes,
-                }
-                .message(),
-            });
+                },
+            ));
         }
     }
 
     if limits.max_array_len.is_some() || limits.max_depth.is_some() {
         let mut path = Vec::new();
-        if let Err(violation) = check_limits(value, limits, 1, &mut path) {
-            return Err(FcpError::InvalidRequest {
-                code: INVALID_REQUEST_LIMITS_CODE,
-                message: violation.message(),
-            });
-        }
+        check_limits(value, limits, 1, &mut path).map_err(LimitCheckError::Violation)?;
     }
 
     Ok(())
+}
+
+/// Enforce payload size, array length, and depth limits.
+///
+/// # Errors
+/// Returns `FcpError::InvalidRequest` when limits are exceeded.
+pub fn enforce_limits(value: &serde_json::Value, limits: &Limits) -> Result<(), FcpError> {
+    match validate_limits(value, limits) {
+        Ok(()) => Ok(()),
+        Err(LimitCheckError::Serialization(message)) => Err(FcpError::Internal {
+            message: format!("failed to measure payload size: {message}"),
+        }),
+        Err(LimitCheckError::Violation(violation)) => Err(FcpError::InvalidRequest {
+            code: INVALID_REQUEST_LIMITS_CODE,
+            message: violation.message(),
+        }),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
