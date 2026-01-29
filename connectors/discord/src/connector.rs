@@ -12,6 +12,7 @@ use fcp_core::{
     Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse, TrustLevel,
     ZoneId,
 };
+use fcp_sdk::{Limits, validate_input_with_limits, validate_output_with_limits};
 use serde_json::json;
 use tokio::sync::broadcast;
 use tracing::info;
@@ -209,6 +210,171 @@ impl DiscordConnector {
         }
     }
 
+    fn send_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string", "description": "Channel ID" },
+                "content": { "type": "string", "description": "Message content" },
+                "embeds": { "type": "array", "items": { "type": "object" } },
+                "reply_to": { "type": "string", "description": "Message ID to reply to" }
+            },
+            "required": ["channel_id"]
+        })
+    }
+
+    fn send_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "channel_id": { "type": "string" },
+                "content": { "type": "string" }
+            }
+        })
+    }
+
+    fn edit_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string" },
+                "message_id": { "type": "string" },
+                "content": { "type": "string" },
+                "embeds": { "type": "array" }
+            },
+            "required": ["channel_id", "message_id"]
+        })
+    }
+
+    fn edit_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "content": { "type": "string" }
+            }
+        })
+    }
+
+    fn delete_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string" },
+                "message_id": { "type": "string" }
+            },
+            "required": ["channel_id", "message_id"]
+        })
+    }
+
+    fn delete_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "deleted": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn get_channel_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string" }
+            },
+            "required": ["channel_id"]
+        })
+    }
+
+    fn get_channel_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "type": { "type": "integer" }
+            }
+        })
+    }
+
+    fn get_guild_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "guild_id": { "type": "string", "description": "Guild/server ID" }
+            },
+            "required": ["guild_id"]
+        })
+    }
+
+    fn get_guild_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "icon": { "type": "string" },
+                "owner_id": { "type": "string" }
+            }
+        })
+    }
+
+    fn trigger_typing_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string", "description": "Channel ID" }
+            },
+            "required": ["channel_id"]
+        })
+    }
+
+    fn trigger_typing_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "triggered": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn message_event_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "channel_id": { "type": "string" },
+                "content": { "type": "string" },
+                "author": { "type": "object" }
+            }
+        })
+    }
+
+    fn input_schema_for(operation: &str) -> Option<serde_json::Value> {
+        match operation {
+            "discord.send_message" => Some(Self::send_message_input_schema()),
+            "discord.edit_message" => Some(Self::edit_message_input_schema()),
+            "discord.delete_message" => Some(Self::delete_message_input_schema()),
+            "discord.get_channel" => Some(Self::get_channel_input_schema()),
+            "discord.get_guild" => Some(Self::get_guild_input_schema()),
+            "discord.trigger_typing" => Some(Self::trigger_typing_input_schema()),
+            _ => None,
+        }
+    }
+
+    fn output_schema_for(operation: &str) -> Option<serde_json::Value> {
+        match operation {
+            "discord.send_message" => Some(Self::send_message_output_schema()),
+            "discord.edit_message" => Some(Self::edit_message_output_schema()),
+            "discord.delete_message" => Some(Self::delete_message_output_schema()),
+            "discord.get_channel" => Some(Self::get_channel_output_schema()),
+            "discord.get_guild" => Some(Self::get_guild_output_schema()),
+            "discord.trigger_typing" => Some(Self::trigger_typing_output_schema()),
+            _ => None,
+        }
+    }
+
     /// Handle introspection.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
@@ -216,24 +382,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.send_message"),
                     summary: "Send a message to a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string", "description": "Channel ID" },
-                            "content": { "type": "string", "description": "Message content" },
-                            "embeds": { "type": "array", "items": { "type": "object" } },
-                            "reply_to": { "type": "string", "description": "Message ID to reply to" }
-                        },
-                        "required": ["channel_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "channel_id": { "type": "string" },
-                            "content": { "type": "string" }
-                        }
-                    }),
+                    input_schema: Self::send_message_input_schema(),
+                    output_schema: Self::send_message_output_schema(),
                     capability: CapabilityId::from_static("discord.send"),
                     risk_level: RiskLevel::Medium,
                     description: None,
@@ -256,23 +406,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.edit_message"),
                     summary: "Edit a message in a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string" },
-                            "message_id": { "type": "string" },
-                            "content": { "type": "string" },
-                            "embeds": { "type": "array" }
-                        },
-                        "required": ["channel_id", "message_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "content": { "type": "string" }
-                        }
-                    }),
+                    input_schema: Self::edit_message_input_schema(),
+                    output_schema: Self::edit_message_output_schema(),
                     capability: CapabilityId::from_static("discord.edit"),
                     risk_level: RiskLevel::Medium,
                     description: None,
@@ -290,20 +425,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.delete_message"),
                     summary: "Delete a message from a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string" },
-                            "message_id": { "type": "string" }
-                        },
-                        "required": ["channel_id", "message_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "deleted": { "type": "boolean" }
-                        }
-                    }),
+                    input_schema: Self::delete_message_input_schema(),
+                    output_schema: Self::delete_message_output_schema(),
                     capability: CapabilityId::from_static("discord.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
@@ -321,21 +444,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.get_channel"),
                     summary: "Get information about a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string" }
-                        },
-                        "required": ["channel_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "type": { "type": "integer" }
-                        }
-                    }),
+                    input_schema: Self::get_channel_input_schema(),
+                    output_schema: Self::get_channel_output_schema(),
                     capability: CapabilityId::from_static("discord.read"),
                     risk_level: RiskLevel::Low,
                     description: None,
@@ -353,22 +463,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.get_guild"),
                     summary: "Get information about a Discord server (guild)".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "guild_id": { "type": "string", "description": "Guild/server ID" }
-                        },
-                        "required": ["guild_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "icon": { "type": "string" },
-                            "owner_id": { "type": "string" }
-                        }
-                    }),
+                    input_schema: Self::get_guild_input_schema(),
+                    output_schema: Self::get_guild_output_schema(),
                     capability: CapabilityId::from_static("discord.read"),
                     risk_level: RiskLevel::Low,
                     description: None,
@@ -386,19 +482,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.trigger_typing"),
                     summary: "Show typing indicator in a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string", "description": "Channel ID" }
-                        },
-                        "required": ["channel_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "triggered": { "type": "boolean" }
-                        }
-                    }),
+                    input_schema: Self::trigger_typing_input_schema(),
+                    output_schema: Self::trigger_typing_output_schema(),
                     capability: CapabilityId::from_static("discord.send"),
                     risk_level: RiskLevel::Low,
                     description: None,
@@ -418,15 +503,7 @@ impl DiscordConnector {
             ],
             events: vec![EventInfo {
                 topic: "discord.message".into(),
-                schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "channel_id": { "type": "string" },
-                        "content": { "type": "string" },
-                        "author": { "type": "object" }
-                    }
-                }),
+                schema: Self::message_event_schema(),
                 requires_ack: false,
             }],
             resource_types: vec![],
@@ -465,6 +542,10 @@ impl DiscordConnector {
         const MAX_CONTENT_LENGTH: usize = 2000;
         const MAX_EMBEDS: usize = 10;
         const MAX_EMBED_TOTAL_CHARS: usize = 6000;
+
+        if let Some(schema) = Self::input_schema_for(operation) {
+            validate_input_with_limits(&schema, input, &Limits::default())?;
+        }
 
         match operation {
             "discord.send_message" | "discord.edit_message" => {
@@ -765,9 +846,15 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(message).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.send_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -881,9 +968,15 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(message).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.edit_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_delete_message(
@@ -915,7 +1008,11 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        Ok(json!({ "deleted": true }))
+        let response = json!({ "deleted": true });
+        if let Some(schema) = Self::output_schema_for("discord.delete_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
     }
 
     async fn invoke_get_channel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -936,9 +1033,15 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(channel).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(channel).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize channel: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.get_channel") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_get_guild(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -959,9 +1062,15 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(guild).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(guild).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize guild: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.get_guild") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_trigger_typing(
@@ -984,7 +1093,11 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        Ok(json!({ "triggered": true }))
+        let response = json!({ "triggered": true });
+        if let Some(schema) = Self::output_schema_for("discord.trigger_typing") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
     }
 
     /// Handle subscribe method.
