@@ -1,7 +1,7 @@
 # PLAN: Odoo v19 + Flywheel Connectors Integration
 
-**Версія:** 2.1.0
-**Дата оновлення:** 2026-01-28
+**Версія:** 2.2.0
+**Дата оновлення:** 2026-02-05
 **Статус:** Planning Phase
 
 ---
@@ -18,6 +18,11 @@
 - **FCP PostureAttestation** → Enterprise Posture через `Custom()` extension (NEW v2.1)
 - **Shamir's Secret Sharing** → Quorum Gates через `fcp-crypto` (NEW v2.1)
 - **Policy Simulation** → `fcp policy simulate` для тестування (NEW v2.1)
+- **manifest.toml** → обов'язкова декларація операцій з JSON Schema (NEW v2.2)
+- **PolicyBundle** → підписані пакети політик для Policy Profiles (NEW v2.2)
+- **ProvisioningInterface** → стандартизований setup конектора (NEW v2.2)
+- **CapabilityUsageEvent** → телеметрія для compliance (NEW v2.2)
+- **TraceCapture** → audit trail з redaction для gate decisions (NEW v2.2)
 
 **Мета:** Забезпечити безпечну, policy-aware взаємодію AI-асистентів з Odoo v19.
 
@@ -27,6 +32,11 @@
 |--------|------|-----------|
 | posture.rs | `crates/fcp-core/src/posture.rs` | `PostureAttributeKey::Custom()` for Enterprise Type |
 | shamir.rs | `crates/fcp-crypto/src/shamir.rs` | k-of-n threshold for Quorum Gates |
+| policy.rs:328 | `crates/fcp-core/src/policy.rs` | PolicyBundle — signed policy delivery (NEW v2.2) |
+| provisioning.rs:457 | `crates/fcp-core/src/provisioning.rs` | ProvisioningInterface trait (NEW v2.2) |
+| telemetry.rs:62 | `crates/fcp-core/src/telemetry.rs` | CapabilityUsageEvent (NEW v2.2) |
+| release.rs:46 | `crates/fcp-core/src/release.rs` | ReleaseManifest + RolloutPolicy (NEW v2.2) |
+| trace_capture.rs:174 | `crates/fcp-telemetry/src/trace_capture.rs` | TraceEvent enum for audit (NEW v2.2) |
 | policy/mod.rs | `crates/fcp-cli/src/policy/mod.rs` | `fcp policy simulate` command |
 
 ---
@@ -65,6 +75,8 @@
 | Налаштувати Cargo.toml | High | 0.5 дня |
 | Імплементувати базовий Connector trait | High | 2 дні |
 | Створити config types з enterprise type | High | 1 день |
+| Створити `manifest.toml` з операціями та JSON Schema (NEW v2.2) | High | 1.5 дня |
+| Імплементувати `ProvisioningInterface` (API key, URL, DB) (NEW v2.2) | High | 1 день |
 
 #### 1.2 Policy Profiles System (NEW)
 
@@ -343,8 +355,14 @@ let shares = split_secret(&gate_token, 3, 5)?;
 | Enterprise type encoding | PostureAttestation::Custom() | Native FCP extension point (v2.1) |
 | Quorum implementation | Shamir k-of-n | Existing fcp-crypto module (v2.1) |
 | Policy testing | `fcp policy simulate` | No execution side effects (v2.1) |
+| **Manifest format** | manifest.toml | Стандарт для всіх конекторів, 5 вже мають (v2.2) |
+| **Policy delivery** | PolicyBundle (signed) | Криптографічна цілісність, монотонна seq (v2.2) |
+| **Connector setup** | ProvisioningInterface | Стандартизований async workflow (v2.2) |
+| **Compliance telemetry** | CapabilityUsageEvent | Агрегація по (zone, connector, capability) (v2.2) |
+| **Audit trail** | TraceCapture + PolicyDecision | Gate decisions з redaction (v2.2) |
+| **Additional reference** | connectors/vectordb/ | Найновіший, повний manifest.toml (v2.2) |
 
-### 3.2 Closed Questions (v2.1)
+### 3.2 Closed Questions (v2.2)
 
 | Question | Decision | Rationale |
 |----------|----------|-----------|
@@ -354,6 +372,11 @@ let shares = split_secret(&gate_token, 3, 5)?;
 | How to encode enterprise type? | `PostureAttributeKey::Custom()` | posture.rs |
 | How to implement quorum gates? | Shamir k-of-n from fcp-crypto | shamir.rs |
 | How to test policies safely? | `fcp policy simulate` command | policy/mod.rs |
+| How to declare operations formally? | manifest.toml | 5 connectors have it (v2.2) |
+| How to deliver Policy Profiles? | PolicyBundle with Ed25519 | policy.rs:328 (v2.2) |
+| How to standardize connector setup? | ProvisioningInterface trait | provisioning.rs:457 (v2.2) |
+| How to track compliance? | CapabilityUsageEvent | telemetry.rs:62 (v2.2) |
+| How to audit gate decisions? | TraceEvent::Policy with redaction | trace_capture.rs:174 (v2.2) |
 
 ### 3.3 Open Questions
 
@@ -499,21 +522,24 @@ Phase 6: Advanced     [                    ]   0%
 | 2026-01-27 | 1.0.0 | Initial plan |
 | 2026-01-27 | 2.0.0 | Added Process Decomposition, Policy Profiles, Enterprise Types |
 | 2026-01-28 | 2.1.0 | JSON-2 API, upstream modules, FCP module mappings (PostureAttestation, Shamir, Policy Simulate) |
+| 2026-02-05 | 2.2.0 | manifest.toml, PolicyBundle, ProvisioningInterface, CapabilityUsageEvent, TraceCapture, VectorDB референс |
 
 ---
 
 ## 9. Next Actions
 
 ### Immediate (цей тиждень):
-1. [ ] Review updated plan
+1. [ ] Review updated plan (v2.2 changes)
 2. [ ] Decide on hybrid enterprise handling
-3. [ ] Create `connectors/odoo/` scaffold (референс: `connectors/anthropic/`)
+3. [ ] Create `connectors/odoo/` scaffold (референс: `connectors/anthropic/` + `connectors/vectordb/`)
+4. [ ] Створити `manifest.toml` з першими операціями (NEW v2.2)
 
 ### Short-term (наступні 2 тижні):
 1. [ ] Implement OdooClient з JSON-2 API
-2. [ ] Integrate `fcp-sdk/ratelimit`
-3. [ ] Implement Policy Profile system
-4. [ ] First working operation with profile-aware behavior
+2. [ ] Implement ProvisioningInterface (API key, URL, DB) (NEW v2.2)
+3. [ ] Integrate `fcp-sdk/ratelimit`
+4. [ ] Implement Policy Profile system via PolicyBundle (NEW v2.2)
+5. [ ] First working operation with profile-aware behavior
 
 ---
 
@@ -523,8 +549,9 @@ Phase 6: Advanced     [                    ]   0%
 
 | Crate | Використання для Odoo |
 |-------|----------------------|
-| **fcp-core** | FcpConnector trait, BaseConnector, lifecycle, connector_state |
+| **fcp-core** | FcpConnector trait, BaseConnector, lifecycle, connector_state, provisioning, PolicyBundle, telemetry, release |
 | **fcp-sdk** | ratelimit, runtime supervision, prelude |
+| **fcp-telemetry** | TraceCapture, CapabilityUsageStore, recommendations |
 | **fcp-manifest** | Manifest parsing, validation |
 | **fcp-crypto** | Capability verification |
 | **fcp-cbor** | CBOR encoding |
@@ -535,11 +562,12 @@ Phase 6: Advanced     [                    ]   0%
 | Connector | Корисність |
 |-----------|-----------|
 | **anthropic** | Головний референс: повна реалізація, JSON-RPC loop, client pattern |
-| discord | Bidirectional events |
+| **vectordb** | Додатковий референс: найновіший, повний manifest.toml, secretless credentials (NEW v2.2) |
+| discord | Bidirectional events (має manifest.toml) |
 | telegram | Operational |
 
 ---
 
-*Plan updated: 2026-01-28*
-*Version: 2.1.0*
-*Key changes: JSON-2 API, upstream modules, FCP module mappings, flywheel ecosystem overview*
+*Plan updated: 2026-02-05*
+*Version: 2.2.0*
+*Key changes v2.2: manifest.toml, PolicyBundle, ProvisioningInterface, CapabilityUsageEvent, TraceCapture — все підтверджено кодом*

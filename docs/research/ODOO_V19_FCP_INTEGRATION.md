@@ -1,7 +1,7 @@
 # Дослідження інтеграції Odoo v19 + FCP (Flywheel Connector Protocol)
 
-**Версія:** 2.1.0
-**Дата:** 2026-01-28
+**Версія:** 2.2.0
+**Дата:** 2026-02-05
 **Статус:** Дослідження (Research Phase)
 
 ---
@@ -36,12 +36,16 @@ z:community = 40   (командна робота)
 z:public    = 20   (публічні API)
 ```
 
-**Релевантні модулі FCP (станом на 2026-01-28):**
+**Релевантні модулі FCP (станом на 2026-02-05):**
 
 | Модуль | Призначення | Релевантність для Odoo |
 |--------|-------------|------------------------|
 | `fcp-core/posture.rs` | Device Posture Attestation | Розширюється на Enterprise Posture |
-| `fcp-core/policy.rs` | Policy Simulation | Тестування Profile gates |
+| `fcp-core/policy.rs` | PolicyBundle (підписані пакети політик) | Policy Profiles як криптографічно підписані бандли |
+| `fcp-core/provisioning.rs` | ProvisioningInterface trait | Стандартизований setup конектора (API key, URL, DB) |
+| `fcp-core/telemetry.rs` | CapabilityUsageEvent | Телеметрія використання capabilities для compliance |
+| `fcp-core/release.rs` | ReleaseManifest + RolloutPolicy | Canary deployment з Ed25519 підписами |
+| `fcp-telemetry/trace_capture.rs` | TraceEvent (Policy, Routing, Admission) | Audit trail для gate decisions з redaction |
 | `fcp-crypto/shamir.rs` | Shamir's Secret Sharing k-of-n | Quorum для ПАТ approval gates |
 | `fcp-cli policy simulate` | CLI для симуляції policy decisions | Валідація без виконання |
 
@@ -405,7 +409,9 @@ automation_by_enterprise:
 
 ### 5.1 Структура модуля (на основі існуючих connectors)
 
-**Референс:** `connectors/anthropic/` — найповніший приклад bidirectional connector.
+**Референси:**
+- `connectors/anthropic/` — bidirectional connector, повна реалізація protocol loop
+- `connectors/vectordb/` — найновіший конектор (Pinecone/Qdrant), повний manifest.toml, secretless credentials
 
 ```
 flywheel_connectors/
@@ -434,7 +440,9 @@ flywheel_connectors/
         │   │   ├── mod.rs
         │   │   ├── patterns.rs       # Reusable patterns
         │   │   └── gates.rs          # Gate definitions
-        │   └── ratelimit.rs          # Rate limit pool definitions
+        │   ├── ratelimit.rs          # Rate limit pool definitions
+        │   └── provisioning.rs      # ProvisioningInterface impl
+        ├── manifest.toml            # ОБОВ'ЯЗКОВИЙ: декларація операцій, schemas, network constraints
         └── tests/
 ```
 
@@ -739,6 +747,126 @@ let state_model = ConnectorStateModel::Crdt {
 // Higher lease_seq wins deterministically
 ```
 
+### 5.5 manifest.toml — обов'язкова декларація конектора (NEW v2.2)
+
+**Факт:** Всі нові конектори (vectordb, airtable, discord, openai, twitter) мають `manifest.toml`. Файли знаходяться в `connectors/*/manifest.toml`.
+
+**Путь:** `crates/fcp-manifest/src/lib.rs`
+
+**Структура для Odoo конектора:**
+
+```toml
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+
+[connector]
+id = "fcp.odoo"
+name = "Odoo v19 Connector"
+version = "0.1.0"
+archetypes = ["operational"]
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["storage.state"]
+forbidden = ["system.exec", "network.listen"]
+
+# Приклад операції
+[provides.operations."odoo.quality.qcp.list"]
+description = "List Quality Control Points"
+capability = "odoo.quality.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."odoo.quality.qcp.list".network_constraints]
+host_allow = []  # Визначається при provisioning (URL сервера Odoo)
+port_allow = [443]
+deny_localhost = true
+require_sni = true
+
+[provides.operations."odoo.capa.approve"]
+description = "Approve CAPA action"
+capability = "odoo.capa.approve"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"  # Gate визначається Policy Profile
+idempotency = "strict"
+
+[[rate_limits.pools]]
+id = "odoo.quality.read"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "odoo.quality.write"
+requests = 30
+window_ms = 60000
+burst = 5
+scope = "instance"
+```
+
+**Ключове:** Кожна операція з Operations Map (секція 5.4) отримує формальну специфікацію з input/output JSON Schema, network constraints, та safety tier.
+
+### 5.6 Provisioning — стандартизований setup конектора (NEW v2.2)
+
+**Факт:** `fcp-core/src/provisioning.rs` (рядок 457) визначає trait `ProvisioningInterface: Send + Sync`. Рядок 91 — `ProvisioningRecipe`. Рядок 169 — `ProvisioningStepType` з варіантами: `PromptUser`, `PromptSecret`, `OpenUrl`, `StoreSecret`, `Oauth`, `Webhook`.
+
+**Provisioning flow для Odoo:**
+
+```
+Step 1: PromptUser   → URL сервера Odoo (https://odoo.example.com)
+Step 2: PromptUser   → Назва бази даних
+Step 3: PromptSecret → API Key (bearer token)
+Step 4: StoreSecret  → Збереження credentials
+Step 5: validate()   → Перевірка підключення (GET /json/2/res.users/read)
+```
+
+**Стани provisioning:** `NotStarted → InProgress → AwaitingUser → Completed | Failed | Aborted`
+
+### 5.7 PolicyBundle — підписані пакети політик (NEW v2.2)
+
+**Факт:** `fcp-core/src/policy.rs` (рядок 328) визначає `PolicyBundle` з полями: `format` ("fcp-policy-bundle"), `schema_version` ("1.0"), `zone_id`, `policy_seq` (u64, монотонна), `hash_algo` ("blake3-256"), `bundle_hash`, `policies: Vec<PolicyBundlePolicyRef>`, `signature: PolicyBundleSignature` (Ed25519).
+
+**Застосування для Policy Profiles:**
+
+Policy Profiles (ФОП/ТОВ/ПАТ) із секції 3 реалізуються як PolicyBundle:
+- Кожен enterprise type = окремий PolicyBundle з відповідними capability grants
+- Монотонна `policy_seq` гарантує що старіший бандл не замінить новіший
+- Ed25519 підпис гарантує цілісність (критично для ПАТ — аудитор може верифікувати)
+- `previous_bundle` забезпечує ланцюжок версій при зміні профілю
+
+### 5.8 Телеметрія та Audit Trail (NEW v2.2)
+
+#### 5.8.1 CapabilityUsageEvent
+
+**Факт:** `fcp-core/src/telemetry.rs` (рядок 62) визначає `CapabilityUsageEvent` з полями: `zone_id`, `connector_id`, `capability_id`, `principal_id`, `risk_tier: SafetyTier`, `operation`, `outcome: CapabilityUsageOutcome` (Allow/Deny/Error), `occurred_at` (Unix timestamp).
+
+**Застосування для Odoo:**
+- Кожна операція записує event з outcome та risk tier
+- Агрегація по (zone, connector, capability) для compliance звітності
+- Для ПАТ: готова основа для аудиторських звітів
+- Automation Ratio (секція 2.3) обчислюється з реальних даних
+
+#### 5.8.2 TraceCapture
+
+**Факт:** `fcp-telemetry/src/trace_capture.rs` (рядок 174) визначає `TraceEvent` з варіантами: `Routing`, `Admission`, `Gossip`, `Lease`, `Session`, `Policy`.
+
+**Застосування для Odoo:**
+- `TraceEvent::Policy(PolicyDecision)` записує gate decisions з reason codes
+- Автоматична редакція sensitive даних (паролі, токени, api_key)
+- W3C trace ID для кореляції подій
+- Експорт у JSON для incident analysis
+
 ---
 
 ## 6. Сценарії використання
@@ -933,7 +1061,7 @@ Phase Gates автоматично створюють immutable checkpoints з q
 - Rust stable toolchain (2024 edition)
 - Policy Profile configuration
 
-**Нові модулі з upstream (v2.1):**
+**Нові модулі з upstream (v2.1 + v2.2):**
 
 | Модуль | Призначення | Застосування для Odoo |
 |--------|-------------|----------------------|
@@ -941,6 +1069,12 @@ Phase Gates автоматично створюють immutable checkpoints з q
 | `fcp-sdk/runtime` | Supervisor, health tracking | Управління станом connector |
 | `fcp-core/lifecycle` | State machine (Canary→Production) | Безпечний rollout |
 | `fcp-core/connector_state` | Fork detection, CRDT | Multi-site Odoo sync |
+| `fcp-core/provisioning` | ProvisioningInterface trait | Стандартизований setup (NEW v2.2) |
+| `fcp-core/policy` | PolicyBundle (signed) | Policy Profiles як криптографічні бандли (NEW v2.2) |
+| `fcp-core/telemetry` | CapabilityUsageEvent | Compliance телеметрія (NEW v2.2) |
+| `fcp-core/release` | ReleaseManifest + RolloutPolicy | Підписані релізи з canary (NEW v2.2) |
+| `fcp-telemetry/trace_capture` | TraceEvent enum | Audit trail з redaction (NEW v2.2) |
+| `manifest.toml` (формат) | Декларація конектора | Обов'язкова специфікація операцій (NEW v2.2) |
 
 ### 8.3 Enterprise-specific
 
@@ -1035,16 +1169,23 @@ Phase Gates автоматично створюють immutable checkpoints з q
 - `crates/fcp-core/src/connector.rs` — FcpConnector trait definition
 - `crates/fcp-core/src/lifecycle.rs` — Lifecycle state machine
 - `crates/fcp-core/src/connector_state.rs` — State management, fork detection
+- `crates/fcp-core/src/provisioning.rs` — ProvisioningInterface trait (NEW v2.2)
+- `crates/fcp-core/src/policy.rs:328` — PolicyBundle struct (NEW v2.2)
+- `crates/fcp-core/src/telemetry.rs:62` — CapabilityUsageEvent struct (NEW v2.2)
+- `crates/fcp-core/src/release.rs:46` — ReleaseManifest struct (NEW v2.2)
+- `crates/fcp-telemetry/src/trace_capture.rs:174` — TraceEvent enum (NEW v2.2)
 - `crates/fcp-sdk/src/ratelimit.rs` — Rate limiting
 - `crates/fcp-sdk/src/runtime.rs` — Supervisor, health tracking
-- `crates/fcp-manifest/src/lib.rs` — Manifest structure (99KB)
+- `crates/fcp-manifest/src/lib.rs` — Manifest structure
 
 ### Existing Connectors (референс)
 - `connectors/anthropic/` — **Головний референс** (bidirectional, повна реалізація)
-- `connectors/discord/` — Bidirectional connector
+- `connectors/vectordb/` — **Додатковий референс** (найновіший, повний manifest.toml) (NEW v2.2)
+- `connectors/discord/` — Bidirectional connector (має manifest.toml)
 - `connectors/telegram/` — Operational connector
-- `connectors/twitter/` — Bidirectional connector
-- `connectors/openai/` — API connector
+- `connectors/twitter/` — Bidirectional connector (має manifest.toml)
+- `connectors/openai/` — API connector (має manifest.toml)
+- `connectors/airtable/` — Manifest-only (має manifest.toml)
 
 ### Odoo v19 Official Documentation
 - [External JSON-2 API](https://www.odoo.com/documentation/19.0/developer/reference/external_api.html) — **Рекомендований API**
@@ -1071,6 +1212,11 @@ Phase Gates автоматично створюють immutable checkpoints з q
 | Як персистувати Gate state? | SQLite/Drizzle (не Map) | `gateway/dashboard.service.ts` |
 | Як transfer Gate ownership? | `transferCheckpoint()` | `gateway/checkpoint.ts` |
 | Як перевіряти існування state? | `hasAgentState()` перед init | `gateway/agent-state-machine.ts` |
+| Як доставляти Policy Profiles? | Через підписані PolicyBundle | `fcp-core/policy.rs:328` (NEW v2.2) |
+| Як стандартизувати setup конектора? | ProvisioningInterface trait | `fcp-core/provisioning.rs:457` (NEW v2.2) |
+| Як збирати compliance дані? | CapabilityUsageEvent телеметрія | `fcp-core/telemetry.rs:62` (NEW v2.2) |
+| Як записувати gate decisions? | TraceEvent::Policy з redaction | `fcp-telemetry/trace_capture.rs:174` (NEW v2.2) |
+| Де описувати операції формально? | manifest.toml | 5 конекторів вже мають (NEW v2.2) |
 
 ## 13. Change Log
 
@@ -1079,9 +1225,10 @@ Phase Gates автоматично створюють immutable checkpoints з q
 | 2026-01-27 | 1.0.0 | Початкове дослідження |
 | 2026-01-27 | 2.0.0 | Process Decomposition, Policy Profiles, Enterprise Types |
 | 2026-01-28 | 2.1.0 | Інтеграція upstream модулів, факти про Odoo API, архітектура на основі існуючих connectors, FCP module mappings, Gateway patterns |
+| 2026-02-05 | 2.2.0 | manifest.toml (обов'язковий), PolicyBundle, ProvisioningInterface, CapabilityUsageEvent, TraceCapture, VectorDB як референс |
 
 ---
 
-*Документ оновлено: 2026-01-28*
-*Версія: 2.1.0*
-*Ключові зміни v2.1: JSON-2 API Client, upstream modules, FCP Posture mapping, Shamir quorum, Gateway patterns, Policy Simulation*
+*Документ оновлено: 2026-02-05*
+*Версія: 2.2.0*
+*Ключові зміни v2.2: manifest.toml, PolicyBundle, Provisioning, CapabilityUsageEvent, TraceCapture — все підтверджено кодом*
