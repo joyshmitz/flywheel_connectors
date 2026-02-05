@@ -219,6 +219,25 @@ pub struct ConnectorStateDelta {
 }
 ```
 
+**Cursor State Schema (NORMATIVE for polling connectors):**
+
+Polling connectors SHOULD store cursor/offset state in `ConnectorStateObject.state_cbor` using
+canonical CBOR (no schema hash prefix). The canonical schema is:
+
+```rust
+/// Canonical cursor state payload (stored in ConnectorStateObject.state_cbor)
+pub struct CursorState {
+    pub offset: Option<i64>,        // e.g., update_id + 1
+    pub last_seen_id: Option<String>,
+    pub watermark: Option<u64>,     // Unix seconds
+}
+```
+
+**Monotonicity rules:**
+- `offset` MUST be non-decreasing.
+- `watermark` MUST be non-decreasing if present.
+- `last_seen_id` SHOULD only move forward per connector-specific ordering.
+
 **Single-Writer Semantics (NORMATIVE):**
 
 For any connector declaring `singleton_writer = true` in its manifest, the MeshNode MUST ensure
@@ -1739,9 +1758,35 @@ pub struct EventEnvelope {
     pub seq: u64,
     pub cursor: String,
     pub requires_ack: bool,
-    pub data: Value,
+    pub data: EventData,
+}
+
+pub struct EventData {
+    pub connector_id: ConnectorId,
+    pub instance_id: InstanceId,
+    pub zone_id: ZoneId,
+    pub principal: Principal,
+    pub payload: Value,
+    pub correlation_id: Option<CorrelationId>,
+    pub resource_uris: Vec<String>,
+    pub thread_info: Option<ThreadInfo>,
+}
+
+pub struct ThreadInfo {
+    pub thread_id: String,
+    pub parent_id: Option<String>,
+    pub kind: ThreadKind,
+}
+
+pub enum ThreadKind {
+    Thread,
+    ForumTopic,
+    Channel,
+    Reply,
 }
 ```
+
+Threading is optional metadata. Use `thread_info` to normalize forum topics (Telegram), platform-native threads (Discord/Slack), or reply chains across connectors.
 
 ---
 
@@ -2066,6 +2111,9 @@ value_from = "bot_token"
 scope = "connector:fcp.telegram"
 ```
 
+Implementation note: core recipe/types live in `fcp_core::ProvisioningRecipe`,
+`ProvisioningStep`, and `ProvisioningStepType`.
+
 ### 13.2 Provisioning Interface
 
 | Operation | Purpose |
@@ -2074,6 +2122,10 @@ scope = "connector:fcp.telegram"
 | `fcp.provision.poll` | Check status |
 | `fcp.provision.complete` | Finalize credentials |
 | `fcp.provision.abort` | Cancel and cleanup |
+
+Implementation note: the connector-facing interface is defined as
+`fcp_core::ProvisioningInterface`, with `ProvisioningState` and
+`ProvisioningStepResult` used for status reporting.
 
 ---
 

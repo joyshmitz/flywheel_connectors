@@ -24,6 +24,7 @@ raptorq.workspace = true
 # Internal crates
 fcp-core = { path = "../fcp-core" }
 fcp-raptorq = { path = "../fcp-raptorq" }
+fcp-telemetry = { path = "../fcp-telemetry" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
@@ -34,6 +35,7 @@ chrono.workspace = true
 uuid.workspace = true
 rand.workspace = true
 criterion = { version = "0.5", features = ["html_reports"] }
+fcp-testkit = { path = "../fcp-testkit", default-features = false }
 
 [[bench]]
 name = "symbol_store"

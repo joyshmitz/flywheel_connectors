@@ -7,14 +7,14 @@ use serde::{Deserialize, Serialize};
 /// Configuration for the Discord connector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordConfig {
-    /// Bot token from Discord Developer Portal
-    pub bot_token: String,
+    /// Bot credential from Discord Developer Portal
+    pub bot_credential: String,
 
     /// Application ID
     #[serde(skip_serializing_if = "Option::is_none")]
     pub application_id: Option<String>,
 
-    /// Base URL for the Discord API (default: https://discord.com/api/v10)
+    /// Base URL for the Discord API (default: <https://discord.com/api/v10>)
     #[serde(default = "default_api_url")]
     pub api_url: String,
 
@@ -43,11 +43,11 @@ fn default_api_url() -> String {
     "https://discord.com/api/v10".into()
 }
 
-fn default_timeout() -> Duration {
+const fn default_timeout() -> Duration {
     Duration::from_secs(30)
 }
 
-fn default_intents() -> u64 {
+const fn default_intents() -> u64 {
     // Default intents: Guilds, GuildMessages, MessageContent, DirectMessages
     (1 << 0) | (1 << 9) | (1 << 15) | (1 << 12)
 }
@@ -92,19 +92,19 @@ pub struct RetryConfig {
     pub jitter: f64,
 }
 
-fn default_max_attempts() -> u32 {
+const fn default_max_attempts() -> u32 {
     3
 }
 
-fn default_initial_delay_ms() -> u64 {
+const fn default_initial_delay_ms() -> u64 {
     500
 }
 
-fn default_max_delay_ms() -> u64 {
+const fn default_max_delay_ms() -> u64 {
     30_000
 }
 
-fn default_jitter() -> f64 {
+const fn default_jitter() -> f64 {
     0.1
 }
 
@@ -132,7 +132,7 @@ pub struct ShardConfig {
 impl Default for DiscordConfig {
     fn default() -> Self {
         Self {
-            bot_token: String::new(),
+            bot_credential: String::new(),
             application_id: None,
             api_url: default_api_url(),
             gateway_url: None,

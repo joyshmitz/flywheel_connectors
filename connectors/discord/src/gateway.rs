@@ -6,7 +6,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message as WsMessage,
 };
@@ -50,22 +50,100 @@ pub enum GatewayOpcode {
     HeartbeatAck = 11,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn gateway_opcode_try_from_known_values() {
+        assert_eq!(GatewayOpcode::try_from(0), Ok(GatewayOpcode::Dispatch));
+        assert_eq!(GatewayOpcode::try_from(10), Ok(GatewayOpcode::Hello));
+        assert_eq!(GatewayOpcode::try_from(11), Ok(GatewayOpcode::HeartbeatAck));
+    }
+
+    #[test]
+    fn gateway_opcode_try_from_unknown_is_err() {
+        assert!(GatewayOpcode::try_from(42).is_err());
+    }
+
+    #[test]
+    fn dispatch_event_updates_state_on_ready() {
+        let mut state = GatewayState::default();
+        let data = json!({
+            "v": 10,
+            "user": { "id": "123", "username": "bot" },
+            "session_id": "sess-1",
+            "resume_gateway_url": "wss://gateway.discord.gg"
+        });
+
+        let event = dispatch_event("READY".to_string(), data, &mut state).unwrap();
+
+        match event {
+            GatewayEvent::Ready(ready) => {
+                assert_eq!(ready.session_id, "sess-1");
+            }
+            _ => panic!("expected READY event"),
+        }
+
+        assert_eq!(state.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(
+            state.resume_url.as_deref(),
+            Some("wss://gateway.discord.gg")
+        );
+    }
+
+    #[test]
+    fn dispatch_event_maps_message_create() {
+        let mut state = GatewayState::default();
+        let data = json!({ "id": "msg-1" });
+
+        let event = dispatch_event("MESSAGE_CREATE".to_string(), data.clone(), &mut state).unwrap();
+
+        match event {
+            GatewayEvent::MessageCreate(payload) => {
+                assert_eq!(payload, data);
+            }
+            _ => panic!("expected MESSAGE_CREATE event"),
+        }
+    }
+
+    #[test]
+    fn dispatch_event_unknown_passthrough() {
+        let mut state = GatewayState::default();
+        let data = json!({ "foo": "bar" });
+
+        let event = dispatch_event("SOMETHING_ELSE".to_string(), data.clone(), &mut state).unwrap();
+
+        match event {
+            GatewayEvent::Unknown {
+                event_name,
+                data: payload,
+            } => {
+                assert_eq!(event_name, "SOMETHING_ELSE");
+                assert_eq!(payload, data);
+            }
+            _ => panic!("expected Unknown event"),
+        }
+    }
+}
+
 impl TryFrom<i32> for GatewayOpcode {
     type Error = ();
 
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(GatewayOpcode::Dispatch),
-            1 => Ok(GatewayOpcode::Heartbeat),
-            2 => Ok(GatewayOpcode::Identify),
-            3 => Ok(GatewayOpcode::PresenceUpdate),
-            4 => Ok(GatewayOpcode::VoiceStateUpdate),
-            6 => Ok(GatewayOpcode::Resume),
-            7 => Ok(GatewayOpcode::Reconnect),
-            8 => Ok(GatewayOpcode::RequestGuildMembers),
-            9 => Ok(GatewayOpcode::InvalidSession),
-            10 => Ok(GatewayOpcode::Hello),
-            11 => Ok(GatewayOpcode::HeartbeatAck),
+            0 => Ok(Self::Dispatch),
+            1 => Ok(Self::Heartbeat),
+            2 => Ok(Self::Identify),
+            3 => Ok(Self::PresenceUpdate),
+            4 => Ok(Self::VoiceStateUpdate),
+            6 => Ok(Self::Resume),
+            7 => Ok(Self::Reconnect),
+            8 => Ok(Self::RequestGuildMembers),
+            9 => Ok(Self::InvalidSession),
+            10 => Ok(Self::Hello),
+            11 => Ok(Self::HeartbeatAck),
             _ => Err(()),
         }
     }
@@ -105,9 +183,7 @@ pub enum GatewayEvent {
 pub struct GatewayConnection {
     config: DiscordConfig,
     api_client: Arc<DiscordApiClient>,
-    session_id: Option<String>,
-    resume_url: Option<String>,
-    sequence: Option<u64>,
+    state: Arc<Mutex<GatewayState>>,
 }
 
 impl GatewayConnection {
@@ -116,103 +192,102 @@ impl GatewayConnection {
         Self {
             config,
             api_client,
-            session_id: None,
-            resume_url: None,
-            sequence: None,
+            state: Arc::new(Mutex::new(GatewayState::default())),
         }
     }
 
-    /// Connect to the gateway and start receiving events.
+    /// Connect to the gateway once and return the event stream handle.
     /// If we have a previous session, will attempt to resume.
     #[instrument(skip(self))]
-    pub async fn connect(&mut self) -> DiscordResult<mpsc::Receiver<GatewayEvent>> {
+    pub async fn connect_once(&self) -> DiscordResult<GatewayStream> {
         let (event_tx, event_rx) = mpsc::channel(256);
 
-        // Spawn the gateway supervisor task
         let config = self.config.clone();
         let api_client = self.api_client.clone();
+        let state_store = Arc::clone(&self.state);
 
-        // Initial state
-        let mut state = GatewayState {
-            session_id: self.session_id.clone(),
-            resume_url: self.resume_url.clone(),
-            sequence: self.sequence,
+        let state_snapshot = {
+            let state = state_store.lock().await;
+            state.clone()
         };
 
-        tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
-            let max_backoff = Duration::from_secs(60);
+        // Determine gateway URL
+        let gateway_url = if let Some(ref url) = state_snapshot.resume_url {
+            url.clone()
+        } else if let Some(url) = &config.gateway_url {
+            url.clone()
+        } else {
+            api_client.get_gateway().await?
+        };
 
-            loop {
-                // Determine gateway URL
-                let gateway_url_result = if let Some(ref url) = state.resume_url {
-                    Ok(url.clone())
-                } else if let Some(url) = &config.gateway_url {
-                    Ok(url.clone())
-                } else {
-                    api_client.get_gateway().await
-                };
+        let ws_url = format!("{gateway_url}/?v=10&encoding=json");
+        info!(
+            url = %ws_url,
+            resuming = state_snapshot.session_id.is_some(),
+            "Connecting to Discord gateway"
+        );
 
-                let gateway_url = match gateway_url_result {
-                    Ok(url) => url,
-                    Err(e) => {
-                        error!(error = %e, "Failed to get gateway URL");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
-                        continue;
-                    }
-                };
+        let (ws_stream, _) = connect_async(&ws_url)
+            .await
+            .map_err(|e| DiscordError::Gateway(format!("Failed to connect WS: {e}")))?;
 
-                // Connect
-                let ws_url = format!("{}/?v=10&encoding=json", gateway_url);
-                info!(url = %ws_url, resuming = state.session_id.is_some(), "Connecting to Discord gateway");
-
-                let connect_result = connect_async(&ws_url).await;
-
-                match connect_result {
-                    Ok((ws_stream, _)) => {
-                        // Reset backoff on successful connection
-                        backoff = Duration::from_secs(1);
-
-                        // Run the loop
-                        match run_gateway_loop(
-                            ws_stream,
-                            config.clone(),
-                            event_tx.clone(),
-                            state.clone(),
-                        )
-                        .await
-                        {
-                            Ok(new_state) => {
-                                // Graceful exit or expected reconnection
-                                state = new_state;
-                                info!("Gateway loop ended, reconnecting immediately");
-                            }
-                            Err(e) => {
-                                error!(error = %e, "Gateway connection error");
-                                tokio::time::sleep(backoff).await;
-                                backoff = (backoff * 2).min(max_backoff);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(error = %e, "Failed to connect WS");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(max_backoff);
-                    }
-                }
-            }
+        let join_handle = tokio::spawn(async move {
+            run_gateway_loop(ws_stream, config, event_tx, state_snapshot, state_store).await
         });
 
-        Ok(event_rx)
+        Ok(GatewayStream {
+            events: event_rx,
+            join_handle,
+        })
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct GatewayState {
     session_id: Option<String>,
     resume_url: Option<String>,
     sequence: Option<u64>,
+}
+
+fn dispatch_event(
+    event_name: String,
+    data: serde_json::Value,
+    state: &mut GatewayState,
+) -> DiscordResult<GatewayEvent> {
+    let event = match event_name.as_str() {
+        "READY" => {
+            let ready: GatewayReady = serde_json::from_value(data)?;
+            state.session_id = Some(ready.session_id.clone());
+            state.resume_url = Some(ready.resume_gateway_url.clone());
+            info!(
+                user = ?ready.user.username,
+                session_id = %ready.session_id,
+                "Gateway ready"
+            );
+            GatewayEvent::Ready(ready)
+        }
+        "RESUMED" => {
+            info!("Session resumed successfully");
+            GatewayEvent::Resumed
+        }
+        "MESSAGE_CREATE" => GatewayEvent::MessageCreate(data),
+        "MESSAGE_UPDATE" => GatewayEvent::MessageUpdate(data),
+        "MESSAGE_DELETE" => GatewayEvent::MessageDelete(data),
+        "GUILD_CREATE" => GatewayEvent::GuildCreate(data),
+        "GUILD_UPDATE" => GatewayEvent::GuildUpdate(data),
+        "CHANNEL_CREATE" => GatewayEvent::ChannelCreate(data),
+        "CHANNEL_UPDATE" => GatewayEvent::ChannelUpdate(data),
+        "TYPING_START" => GatewayEvent::TypingStart(data),
+        _ => GatewayEvent::Unknown { event_name, data },
+    };
+
+    Ok(event)
+}
+
+/// Handle for a single gateway connection attempt.
+pub struct GatewayStream {
+    pub events: mpsc::Receiver<GatewayEvent>,
+    pub join_handle: tokio::task::JoinHandle<DiscordResult<()>>,
 }
 
 /// Run the gateway event loop.
@@ -221,7 +296,20 @@ async fn run_gateway_loop(
     config: DiscordConfig,
     event_tx: mpsc::Sender<GatewayEvent>,
     mut state: GatewayState,
-) -> DiscordResult<GatewayState> {
+    state_store: Arc<Mutex<GatewayState>>,
+) -> DiscordResult<()> {
+    let result = run_gateway_loop_inner(ws_stream, config, &event_tx, &mut state).await;
+    let mut store = state_store.lock().await;
+    *store = state;
+    result
+}
+
+async fn run_gateway_loop_inner(
+    ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    config: DiscordConfig,
+    event_tx: &mpsc::Sender<GatewayEvent>,
+    state: &mut GatewayState,
+) -> DiscordResult<()> {
     let (mut write, mut read) = ws_stream.split();
 
     // Wait for Hello
@@ -258,7 +346,7 @@ async fn run_gateway_loop(
         info!(session_id = %sess_id, sequence = seq, "Attempting to resume session");
 
         let resume = GatewayResume {
-            token: config.bot_token.clone(),
+            token: config.bot_credential.clone(),
             session_id: sess_id.clone(),
             seq,
         };
@@ -279,7 +367,7 @@ async fn run_gateway_loop(
     } else {
         // Fresh connection - send Identify
         let identify = GatewayIdentify {
-            token: config.bot_token.clone(),
+            token: config.bot_credential.clone(),
             intents: config.intents,
             properties: GatewayProperties {
                 os: std::env::consts::OS.into(),
@@ -351,37 +439,11 @@ async fn run_gateway_loop(
                             Ok(GatewayOpcode::Dispatch) => {
                                 let event_name = payload.t.clone().unwrap_or_default();
                                 let data = payload.d.clone().unwrap_or_default();
-
-                                let event = match event_name.as_str() {
-                                    "READY" => {
-                                        let ready: GatewayReady = serde_json::from_value(data)?;
-                                        state.session_id = Some(ready.session_id.clone());
-                                        state.resume_url = Some(ready.resume_gateway_url.clone());
-                                        info!(
-                                            user = ?ready.user.username,
-                                            session_id = %ready.session_id,
-                                            "Gateway ready"
-                                        );
-                                        GatewayEvent::Ready(ready)
-                                    }
-                                    "RESUMED" => {
-                                        info!("Session resumed successfully");
-                                        GatewayEvent::Resumed
-                                    }
-                                    "MESSAGE_CREATE" => GatewayEvent::MessageCreate(data),
-                                    "MESSAGE_UPDATE" => GatewayEvent::MessageUpdate(data),
-                                    "MESSAGE_DELETE" => GatewayEvent::MessageDelete(data),
-                                    "GUILD_CREATE" => GatewayEvent::GuildCreate(data),
-                                    "GUILD_UPDATE" => GatewayEvent::GuildUpdate(data),
-                                    "CHANNEL_CREATE" => GatewayEvent::ChannelCreate(data),
-                                    "CHANNEL_UPDATE" => GatewayEvent::ChannelUpdate(data),
-                                    "TYPING_START" => GatewayEvent::TypingStart(data),
-                                    _ => GatewayEvent::Unknown { event_name, data },
-                                };
+                                let event = dispatch_event(event_name, data, state)?;
 
                                 if event_tx.send(event).await.is_err() {
                                     info!("Event receiver dropped, closing gateway");
-                                    return Ok(state);
+                                    return Ok(());
                                 }
                             }
                             Ok(GatewayOpcode::HeartbeatAck) => {
@@ -390,7 +452,7 @@ async fn run_gateway_loop(
                             }
                             Ok(GatewayOpcode::Reconnect) => {
                                 info!("Received reconnect request");
-                                return Ok(state);
+                                return Ok(());
                             }
                             Ok(GatewayOpcode::InvalidSession) => {
                                 let resumable = payload.d.and_then(|v| v.as_bool()).unwrap_or(false);
@@ -401,7 +463,7 @@ async fn run_gateway_loop(
                                     state.resume_url = None;
                                     state.sequence = None;
                                 }
-                                return Ok(state);
+                                return Ok(());
                             }
                             Ok(GatewayOpcode::Heartbeat) => {
                                 // Immediately send heartbeat
@@ -421,7 +483,7 @@ async fn run_gateway_loop(
                     }
                     Some(Ok(WsMessage::Close(frame))) => {
                         info!(frame = ?frame, "Gateway connection closed");
-                        return Ok(state);
+                        return Ok(());
                     }
                     Some(Ok(_)) => {
                         // Ignore other message types (ping, pong, binary)
@@ -432,7 +494,7 @@ async fn run_gateway_loop(
                     }
                     None => {
                         info!("Gateway connection ended");
-                        return Ok(state);
+                        return Ok(());
                     }
                 }
             }

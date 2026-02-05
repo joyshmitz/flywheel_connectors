@@ -4,6 +4,7 @@
 //! Uses the Discord Gateway (WebSocket) for real-time events and REST API for operations.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 use std::io::{BufRead, Write};
 
@@ -79,12 +80,13 @@ async fn handle_message(connector: &mut DiscordConnector, message: &str) -> serd
     let params = request
         .get("params")
         .cloned()
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let result = match method {
         "configure" => connector.handle_configure(params).await,
         "handshake" => connector.handle_handshake(params).await,
         "health" => connector.handle_health().await,
+        "self_check" => connector.handle_self_check().await,
         "introspect" => connector.handle_introspect().await,
         "invoke" => connector.handle_invoke(params).await,
         "simulate" => connector.handle_simulate(params).await,

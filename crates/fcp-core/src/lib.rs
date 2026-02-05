@@ -28,10 +28,13 @@ mod policy;
 mod posture;
 mod protocol;
 mod provenance;
+mod provisioning;
 mod quorum;
 mod ratelimit;
+mod release;
 mod revocation;
 mod secret;
+mod telemetry;
 pub mod util;
 mod zone_keys;
 
@@ -54,10 +57,13 @@ pub use policy::*;
 pub use posture::*;
 pub use protocol::*;
 pub use provenance::*;
+pub use provisioning::*;
 pub use quorum::*;
 pub use ratelimit::*;
+pub use release::*;
 pub use revocation::*;
 pub use secret::*;
+pub use telemetry::*;
 pub use zone_keys::*;
 
 // Re-export commonly used external types

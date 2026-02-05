@@ -5,22 +5,264 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::OpenAIClient,
+    client::{DEFAULT_BASE_URL, OpenAIAuth, OpenAIClient},
     error::OpenAIError,
     types::{Message, Model, Tool, ToolChoice, Usage},
 };
 
+#[derive(Debug, Clone)]
+struct OpenAIConfig {
+    auth: OpenAIAuth,
+    base_url: String,
+    organization: Option<String>,
+    default_model: Model,
+    deployment_profile: Option<DeploymentProfile>,
+}
+
+#[derive(Debug, Clone)]
+struct DeploymentProfile {
+    name: Option<String>,
+    base_url: Option<String>,
+    organization: Option<String>,
+    default_model: Option<Model>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeploymentProfileObject {
+    name: Option<String>,
+    base_url: Option<String>,
+    organization: Option<String>,
+    default_model: Option<Model>,
+}
+
+impl From<DeploymentProfileObject> for DeploymentProfile {
+    fn from(obj: DeploymentProfileObject) -> Self {
+        Self {
+            name: obj.name,
+            base_url: obj.base_url,
+            organization: obj.organization,
+            default_model: obj.default_model,
+        }
+    }
+}
+
+impl OpenAIConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let api_key = params
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+
+        let credential_id = match params.get("credential_id") {
+            Some(value) => {
+                let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential_id must be a string".into(),
+                })?;
+                Some(
+                    CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential_id must be a valid UUID".into(),
+                    })?,
+                )
+            }
+            None => None,
+        };
+
+        let auth = match (api_key, credential_id) {
+            (Some(key), None) => OpenAIAuth::ApiKey(key),
+            (None, Some(cred_id)) => OpenAIAuth::CredentialId(cred_id),
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of api_key or credential_id".into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing api_key or credential_id in configuration".into(),
+                });
+            }
+        };
+
+        let deployment_profile = parse_deployment_profile(params.get("deployment_profile"))?;
+
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| deployment_profile.as_ref().and_then(|p| p.base_url.clone()))
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+
+        let base_url = normalize_base_url(&base_url)?;
+
+        let organization = params
+            .get("organization")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                deployment_profile
+                    .as_ref()
+                    .and_then(|p| p.organization.clone())
+            });
+
+        let default_model = if let Some(model_value) = params.get("default_model") {
+            serde_json::from_value(model_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid default_model: {e}"),
+            })?
+        } else if let Some(profile_model) =
+            deployment_profile.as_ref().and_then(|p| p.default_model)
+        {
+            profile_model
+        } else {
+            Model::default()
+        };
+
+        Ok(Self {
+            auth,
+            base_url,
+            organization,
+            default_model,
+            deployment_profile,
+        })
+    }
+
+    fn deployment_profile_name(&self) -> Option<&str> {
+        self.deployment_profile
+            .as_ref()
+            .and_then(|profile| profile.name.as_deref())
+    }
+}
+
+fn parse_deployment_profile(
+    value: Option<&serde_json::Value>,
+) -> FcpResult<Option<DeploymentProfile>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        serde_json::Value::String(name) => Ok(Some(DeploymentProfile {
+            name: Some(name.clone()),
+            base_url: None,
+            organization: None,
+            default_model: None,
+        })),
+        serde_json::Value::Object(_) => {
+            let profile: DeploymentProfileObject =
+                serde_json::from_value(value.clone()).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid deployment_profile: {e}"),
+                })?;
+            Ok(Some(profile.into()))
+        }
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "deployment_profile must be a string or object".into(),
+        }),
+    }
+}
+
+fn normalize_base_url(base_url: &str) -> FcpResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url cannot be empty".into(),
+        });
+    }
+
+    let parsed = url::Url::parse(trimmed).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url: {e}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must be http or https".into(),
+        });
+    }
+
+    if parsed.host_str().is_none() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must include a host".into(),
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+/// Doctor check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorResult {
+    /// Overall status.
+    status: DoctorStatus,
+    /// Individual check results.
+    checks: Vec<DoctorCheck>,
+}
+
+/// Doctor status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorStatus {
+    /// All checks passed.
+    Healthy,
+    /// Some non-critical checks failed.
+    Degraded,
+    /// Critical checks failed.
+    Unhealthy,
+}
+
+/// Individual doctor check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DoctorCheck {
+    /// Check name.
+    name: String,
+    /// Check passed.
+    passed: bool,
+    /// Check message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    /// Whether this check is critical.
+    critical: bool,
+}
+
+impl DoctorResult {
+    /// Create a new doctor result from checks.
+    #[must_use]
+    fn from_checks(checks: Vec<DoctorCheck>) -> Self {
+        let status = if checks.iter().any(|c| c.critical && !c.passed) {
+            DoctorStatus::Unhealthy
+        } else if checks.iter().any(|c| !c.passed) {
+            DoctorStatus::Degraded
+        } else {
+            DoctorStatus::Healthy
+        };
+
+        Self { status, checks }
+    }
+}
+
 /// FCP OpenAI Connector.
 pub struct OpenAIConnector {
     base: Arc<BaseConnector>,
+    config: Option<OpenAIConfig>,
     client: Option<OpenAIClient>,
     total_cost: AtomicU64, // Store as fixed-point (cost * 1_000_000_000)
     verifier: Option<CapabilityVerifier>,
@@ -33,6 +275,7 @@ impl OpenAIConnector {
     pub fn new() -> Self {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("openai"))),
+            config: None,
             client: None,
             total_cost: AtomicU64::new(0),
             verifier: None,
@@ -71,33 +314,28 @@ impl OpenAIConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let api_key =
-            params
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing api_key in configuration".into(),
-                })?;
+        let config = OpenAIConfig::from_params(&params)?;
+        let mut client =
+            OpenAIClient::new_with_auth(config.auth.clone()).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?;
 
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-        let organization = params.get("organization").and_then(|v| v.as_str());
-
-        let mut client = OpenAIClient::new(api_key).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
-
-        if let Some(url) = base_url {
-            client = client.with_base_url(url);
-        }
-
-        if let Some(org) = organization {
+        client = client.with_base_url(&config.base_url);
+        if let Some(org) = &config.organization {
             client = client.with_organization(org);
         }
 
+        let auth_label = config.auth.redacted_label();
+        let deployment_profile = config.deployment_profile_name().map(str::to_string);
+
         self.client = Some(client);
+        self.config = Some(config);
         self.base.set_configured(true);
-        info!("OpenAI connector configured");
+        info!(
+            auth = %auth_label,
+            deployment_profile = ?deployment_profile,
+            "OpenAI connector configured"
+        );
 
         Ok(json!({ "status": "configured" }))
     }
@@ -157,15 +395,145 @@ impl OpenAIConnector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.client.is_some();
+        let configured = self.config.is_some();
+        let auth = self
+            .config
+            .as_ref()
+            .map(|c| c.auth.redacted_label())
+            .unwrap_or_else(|| "unconfigured".to_string());
+        let base_url = self
+            .config
+            .as_ref()
+            .map(|c| c.base_url.clone())
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let deployment_profile = self
+            .config
+            .as_ref()
+            .and_then(|c| c.deployment_profile_name())
+            .map(str::to_string);
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
+            "auth": auth,
+            "base_url": base_url,
+            "deployment_profile": deployment_profile,
             "metrics": {
                 "requests_total": self.total_requests(),
                 "requests_error": self.total_errors(),
                 "total_cost_usd": self.total_cost()
             }
         }))
+    }
+
+    /// Handle doctor checks.
+    pub async fn handle_doctor(&self) -> FcpResult<serde_json::Value> {
+        let result = self.build_doctor_result();
+        serde_json::to_value(result).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize doctor result: {e}"),
+        })
+    }
+
+    fn build_doctor_result(&self) -> DoctorResult {
+        let mut checks = Vec::new();
+
+        let configured = self.config.is_some();
+        checks.push(DoctorCheck {
+            name: "configuration".into(),
+            passed: configured,
+            message: Some(if configured {
+                "Configuration loaded".into()
+            } else {
+                "Not configured - run configure first".into()
+            }),
+            critical: true,
+        });
+
+        let Some(config) = &self.config else {
+            return DoctorResult::from_checks(checks);
+        };
+
+        checks.push(DoctorCheck {
+            name: "client_initialized".into(),
+            passed: self.client.is_some(),
+            message: Some(if self.client.is_some() {
+                "HTTP client initialized".into()
+            } else {
+                "HTTP client missing; re-run configure".into()
+            }),
+            critical: true,
+        });
+
+        let scheme = if config.base_url.starts_with("https://") {
+            "https"
+        } else if config.base_url.starts_with("http://") {
+            "http"
+        } else {
+            "unknown"
+        };
+
+        checks.push(DoctorCheck {
+            name: "base_url".into(),
+            passed: true,
+            message: Some(format!("Base URL ({scheme}): {}", config.base_url)),
+            critical: false,
+        });
+
+        checks.push(DoctorCheck {
+            name: "auth_mode".into(),
+            passed: true,
+            message: Some(format!("Auth: {}", config.auth.redacted_label())),
+            critical: true,
+        });
+
+        let secretless = config.auth.is_secretless();
+        checks.push(DoctorCheck {
+            name: "credential_injection".into(),
+            passed: !secretless,
+            message: Some(if secretless {
+                "Credential injection required via egress proxy".into()
+            } else {
+                "Direct API key configured".into()
+            }),
+            critical: false,
+        });
+
+        DoctorResult::from_checks(checks)
+    }
+
+    /// Handle connector self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(client) = &self.client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        if let Some(config) = &self.config {
+            if config.auth.is_secretless() {
+                let report = SelfCheckReport::degraded(
+                    "credential_injection_required",
+                    "Configured with credential_id; egress proxy injection required for checks",
+                );
+                return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize self-check report: {e}"),
+                });
+            }
+        }
+
+        let report = match client.health_check().await {
+            Ok(()) => SelfCheckReport::ok(),
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
     }
 
     /// Handle introspect method.
@@ -341,8 +709,6 @@ impl OpenAIConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        self.base.record_request(true); // Optimistically count total
-
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
         result
@@ -378,22 +744,31 @@ impl OpenAIConnector {
             })?;
 
         // Verify token
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
+        })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
         })?;
 
         let mut resource_uris = Vec::new();
         if operation == "openai.chat" || operation == "openai.simple_chat" {
+            let default_model = self
+                .config
+                .as_ref()
+                .map(|c| c.default_model.as_str())
+                .unwrap_or(Model::default().as_str());
             let model = input
                 .get("model")
                 .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o");
+                .unwrap_or(default_model);
             resource_uris.push(format!("openai:model:{model}"));
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -412,10 +787,15 @@ impl OpenAIConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         // Parse model
+        let default_model = self
+            .config
+            .as_ref()
+            .map(|c| c.default_model)
+            .unwrap_or_default();
         let model_str = input
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("gpt-4o");
+            .unwrap_or(default_model.as_str());
 
         let model = match model_str {
             "gpt-4o" => Model::Gpt4o,
@@ -521,10 +901,15 @@ impl OpenAIConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         // Parse model
+        let default_model = self
+            .config
+            .as_ref()
+            .map(|c| c.default_model)
+            .unwrap_or_default();
         let model_str = input
             .get("model")
             .and_then(|v| v.as_str())
-            .unwrap_or("gpt-4o");
+            .unwrap_or(default_model.as_str());
 
         let model = match model_str {
             "gpt-4o" => Model::Gpt4o,
@@ -631,9 +1016,108 @@ impl Default for OpenAIConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
+    use chrono::{Duration, SecondsFormat, Utc};
+    use fcp_core::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_testkit::LogCapture;
+    use std::time::Instant;
+    use uuid::Uuid;
+
+    struct TestLog {
+        test_name: &'static str,
+        module: &'static str,
+        correlation_id: String,
+        start: Instant,
+        assertions_passed: u32,
+        assertions_failed: u32,
+        capture: LogCapture,
+    }
+
+    impl TestLog {
+        fn new(test_name: &'static str) -> Self {
+            Self {
+                test_name,
+                module: "fcp-openai-connector",
+                correlation_id: Uuid::new_v4().to_string(),
+                start: Instant::now(),
+                assertions_passed: 0,
+                assertions_failed: 0,
+                capture: LogCapture::new(),
+            }
+        }
+
+        fn check(&mut self, condition: bool, message: &str) -> Result<(), String> {
+            if !condition {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                return Err(message.to_string());
+            }
+            self.assertions_passed = self.assertions_passed.saturating_add(1);
+            Ok(())
+        }
+
+        fn check_eq<T: std::fmt::Debug + PartialEq>(
+            &mut self,
+            left: T,
+            right: T,
+            context: &str,
+        ) -> Result<(), String> {
+            if left != right {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                return Err(format!("{context}: left={left:?} right={right:?}"));
+            }
+            self.assertions_passed = self.assertions_passed.saturating_add(1);
+            Ok(())
+        }
+
+        fn emit(&mut self, phase: &str, result: &str, context: serde_json::Value) {
+            let duration_ms = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let entry = serde_json::json!({
+                "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                "log_version": "v1",
+                "level": "info",
+                "test_name": self.test_name,
+                "module": self.module,
+                "phase": phase,
+                "correlation_id": self.correlation_id,
+                "result": result,
+                "duration_ms": duration_ms,
+                "assertions": {
+                    "passed": self.assertions_passed,
+                    "failed": self.assertions_failed
+                },
+                "context": context
+            });
+
+            let serialized = serde_json::to_string(&entry).unwrap_or_else(|err| {
+                self.assertions_failed = self.assertions_failed.saturating_add(1);
+                format!("{{\"error\":\"log_serialization_failed\",\"detail\":\"{err}\"}}")
+            });
+            println!("{serialized}");
+            let _ = self.capture.push_value(&entry);
+            if !std::thread::panicking() {
+                self.capture.assert_valid();
+            }
+        }
+    }
+
+    impl Drop for TestLog {
+        fn drop(&mut self) {
+            let result = if std::thread::panicking() {
+                if self.assertions_failed == 0 {
+                    self.assertions_failed = 1;
+                }
+                "fail"
+            } else {
+                "pass"
+            };
+            self.emit(
+                "verify",
+                result,
+                serde_json::json!({ "connector_id": "openai" }),
+            );
+        }
+    }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
         let now = Utc::now();
@@ -668,11 +1152,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_configure_requires_auth() {
+        let mut connector = OpenAIConnector::new();
+        let result = connector.handle_configure(json!({})).await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_configure_rejects_both_auth() {
+        let mut connector = OpenAIConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_configure_with_credential_id_profile() {
+        let mut connector = OpenAIConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "deployment_profile": {
+                    "name": "staging",
+                    "base_url": "https://api.openai.com",
+                    "default_model": "gpt-4o-mini"
+                },
+                "organization": "org-test"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+
+        let config = connector.config.as_ref().expect("config should be set");
+        assert!(matches!(config.auth, OpenAIAuth::CredentialId(_)));
+        assert_eq!(config.base_url, "https://api.openai.com");
+        assert_eq!(config.deployment_profile_name(), Some("staging"));
+        assert_eq!(config.default_model, Model::Gpt4oMini);
+        assert_eq!(
+            config.organization.as_deref(),
+            Some("org-test"),
+            "organization should be stored"
+        );
+
+        let parsed = CredentialId::parse("11223344-5566-7788-99aa-bbccddeeff00").unwrap();
+        if let OpenAIAuth::CredentialId(cred) = &config.auth {
+            assert_eq!(cred, &parsed);
+        }
+    }
+
+    #[tokio::test]
     async fn test_health_not_configured() {
         let connector = OpenAIConnector::new();
         let result = connector.handle_health().await.unwrap();
 
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[tokio::test]
+    async fn test_doctor_not_configured() -> Result<(), String> {
+        let mut log = TestLog::new("openai_doctor_not_configured");
+        let connector = OpenAIConnector::new();
+        let value = connector
+            .handle_doctor()
+            .await
+            .map_err(|err| format!("doctor failed: {err}"))?;
+        let result: DoctorResult =
+            serde_json::from_value(value).map_err(|err| format!("doctor parse failed: {err}"))?;
+
+        log.check_eq(result.status, DoctorStatus::Unhealthy, "status")?;
+        let config_check = result
+            .checks
+            .iter()
+            .find(|check| check.name == "configuration")
+            .ok_or("missing configuration check")?;
+        log.check(!config_check.passed, "configuration should be unhealthy")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_doctor_configured_api_key() -> Result<(), String> {
+        let mut log = TestLog::new("openai_doctor_configured_api_key");
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({ "api_key": "test-key" }))
+            .await
+            .map_err(|err| format!("configure failed: {err}"))?;
+
+        let value = connector
+            .handle_doctor()
+            .await
+            .map_err(|err| format!("doctor failed: {err}"))?;
+        let result: DoctorResult =
+            serde_json::from_value(value).map_err(|err| format!("doctor parse failed: {err}"))?;
+
+        log.check_eq(result.status, DoctorStatus::Healthy, "status")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_doctor_configured_credential_id() -> Result<(), String> {
+        let mut log = TestLog::new("openai_doctor_configured_credential_id");
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+            }))
+            .await
+            .map_err(|err| format!("configure failed: {err}"))?;
+
+        let value = connector
+            .handle_doctor()
+            .await
+            .map_err(|err| format!("doctor failed: {err}"))?;
+        let result: DoctorResult =
+            serde_json::from_value(value).map_err(|err| format!("doctor parse failed: {err}"))?;
+
+        log.check_eq(result.status, DoctorStatus::Degraded, "status")?;
+        let injection_check = result
+            .checks
+            .iter()
+            .find(|check| check.name == "credential_injection")
+            .ok_or("missing credential_injection check")?;
+        log.check(
+            !injection_check.passed,
+            "credential_injection should be marked not passed",
+        )?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -744,11 +1356,15 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
+        let err = result.unwrap_err();
+        match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("messages"));
             }
-            e => panic!("Unexpected error: {e:?}"),
+            _ => assert!(
+                false,
+                "Expected InvalidRequest for missing messages, got: {err:?}"
+            ),
         }
     }
 

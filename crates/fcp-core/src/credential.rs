@@ -212,10 +212,10 @@ impl CredentialObject {
             pattern_lower.strip_prefix("*.").map_or_else(
                 // Exact match when no wildcard
                 || host_lower == pattern_lower,
-                |base_domain| {
-                    // Wildcard match: *.example.com matches foo.example.com
+                |_| {
+                    // Wildcard match: *.example.com matches foo.example.com (not base domain)
                     let suffix = &pattern_lower[1..]; // ".example.com"
-                    host_lower.ends_with(suffix) || host_lower == base_domain
+                    host_lower.ends_with(suffix) && host_lower.len() > suffix.len()
                 },
             )
         })
@@ -514,7 +514,7 @@ mod tests {
 
         assert!(cred.is_host_allowed("api.example.com"));
         assert!(cred.is_host_allowed("foo.example.com"));
-        assert!(cred.is_host_allowed("example.com")); // also matches base domain
+        assert!(!cred.is_host_allowed("example.com")); // wildcard does not match base domain
         assert!(!cred.is_host_allowed("example.net"));
         assert!(!cred.is_host_allowed("notexample.com"));
     }
@@ -732,12 +732,13 @@ mod tests {
         let result = cred.validate_host_policy(true);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            CredentialValidationError::HostNotAllowed { host, .. } => {
-                assert_eq!(host, "192.168.1.1");
-            }
-            _ => panic!("Expected HostNotAllowed error"),
-        }
+        assert!(
+            matches!(
+                &err,
+                CredentialValidationError::HostNotAllowed { host, .. } if host == "192.168.1.1"
+            ),
+            "Expected HostNotAllowed error, got {err:?}"
+        );
 
         // Should allow when reject_ip_literals is false
         assert!(cred.validate_host_policy(false).is_ok());

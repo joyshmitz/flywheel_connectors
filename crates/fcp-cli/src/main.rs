@@ -2,10 +2,13 @@
 //!
 //! This CLI provides tooling for FCP2 operators and developers:
 //! - `fcp audit` - Audit chain operations for incident response
+//! - `fcp budget` - Usage budget status per zone
 //! - `fcp bench` - Performance benchmarking suite
 //! - `fcp connector` - Connector discovery and introspection
 //! - `fcp explain` - Operation decision explanations
 //! - `fcp install` - Connector installation with verification
+//! - `fcp manifest` - Manifest repair and lint checks
+//! - `fcp net` - Egress policy debugging (`NetworkConstraints`)
 //! - `fcp policy` - Policy simulation and preflight checks
 //! - `fcp repair` - Coverage status and repair planning
 
@@ -13,10 +16,13 @@
 
 mod audit;
 mod bench;
+mod budget;
 mod connector;
 mod doctor;
 mod explain;
 mod install;
+mod manifest;
+mod net;
 mod new;
 mod package;
 mod policy;
@@ -71,6 +77,11 @@ enum Commands {
     /// Outputs machine-readable JSON with environment metadata for regression tracking.
     Bench(bench::BenchArgs),
 
+    /// Report usage budgets per zone.
+    ///
+    /// Shows current usage vs budget and enforcement mode for each zone.
+    Budget(budget::BudgetArgs),
+
     /// Connector discovery and introspection.
     ///
     /// List, inspect, and introspect registered connectors. The introspect
@@ -93,11 +104,19 @@ enum Commands {
     /// then mirror the connector to the mesh store.
     Install(install::InstallArgs),
 
+    /// Repair and validate connector manifests.
+    ///
+    /// Recompute interface hashes and lint manifest defaults.
+    Manifest(manifest::ManifestArgs),
+
     /// Create a new FCP2-compliant connector scaffold.
     ///
     /// Generates a complete connector crate with manifest, source files,
     /// and test scaffolding. Runs compliance prechecks automatically.
     New(new::NewArgs),
+
+    /// Explain egress policy decisions for a URL.
+    Net(net::NetArgs),
 
     /// Package a connector for distribution.
     ///
@@ -224,7 +243,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let _pager = PagerConfig::from_cli(&cli);
 
-    let _stdin_input = if cli.input_stdin {
+    let stdin_input = if cli.input_stdin {
         Some(read_stdin_input(cli.input_format)?)
     } else {
         None
@@ -233,8 +252,14 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Audit(args) => audit::run(args),
         Commands::Bench(args) => bench::run(args),
+        Commands::Budget(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            budget::run(&args)
+        }
         Commands::Connector(args) => connector::run(&args),
-        Commands::Doctor(args) => doctor::run(&args),
+        Commands::Doctor(args) => doctor::run(&args, stdin_input.as_ref()),
         Commands::Explain(args) => {
             if cli.input_stdin {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
@@ -247,11 +272,23 @@ fn main() -> Result<()> {
             }
             install::run(args)
         }
+        Commands::Manifest(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            manifest::run(args)
+        }
         Commands::New(args) => {
             if cli.input_stdin {
                 anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
             }
             new::run(&args)
+        }
+        Commands::Net(args) => {
+            if cli.input_stdin {
+                anyhow::bail!("--input-stdin is currently supported only for `fcp doctor`");
+            }
+            net::run(args)
         }
         Commands::Package(args) => {
             if cli.input_stdin {

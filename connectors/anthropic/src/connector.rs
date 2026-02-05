@@ -335,8 +335,6 @@ impl AnthropicConnector {
 
     /// Handle invoke method.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        self.base.record_request(true);
-
         let result = self.handle_invoke_internal(params).await;
         self.base.record_request(result.is_ok());
         result
@@ -372,9 +370,13 @@ impl AnthropicConnector {
             })?;
 
         // Verify token
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
+        })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
         })?;
 
         let mut resource_uris = Vec::new();
@@ -387,7 +389,7 @@ impl AnthropicConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -738,11 +740,15 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
+        let err = result.unwrap_err();
+        match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("messages"));
             }
-            e => panic!("Unexpected error: {:?}", e),
+            _ => assert!(
+                false,
+                "Expected InvalidRequest for missing messages, got: {err:?}"
+            ),
         }
     }
 

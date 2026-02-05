@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
-use tracing::{debug, instrument, warn};
+use tracing::{instrument, warn};
 
 use crate::types::*;
 
 /// Telegram Bot API client.
 #[derive(Debug, Clone)]
 pub struct TelegramClient {
-    token: String,
+    credential: String,
     client: Client,
     base_url: String,
 }
@@ -24,15 +24,15 @@ impl TelegramClient {
     ///
     /// # Errors
     /// Returns an error if the HTTP client fails to build.
-    pub fn new(token: impl Into<String>) -> Result<Self, TelegramError> {
-        let token = token.into();
+    pub fn new(credential: impl Into<String>) -> Result<Self, TelegramError> {
+        let bot_credential = credential.into();
         let client = Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(TelegramError::Http)?;
 
         Ok(Self {
-            token,
+            credential: bot_credential,
             client,
             base_url: "https://api.telegram.org".into(),
         })
@@ -47,7 +47,7 @@ impl TelegramClient {
 
     /// Build the API URL for a method.
     fn api_url(&self, method: &str) -> String {
-        format!("{}/bot{}/{}", self.base_url, self.token, method)
+        format!("{}/bot{}/{}", self.base_url, self.credential, method)
     }
 
     /// Execute a request with retries.
@@ -193,27 +193,8 @@ impl TelegramClient {
             message_thread_id: options.message_thread_id,
         };
 
-        match self
-            .request("POST", "sendMessage", Some(&request), None)
+        self.request("POST", "sendMessage", Some(&request), None)
             .await
-        {
-            Ok(msg) => Ok(msg),
-            Err(TelegramError::Api { code, description }) => {
-                // Check for parse errors and retry without parse mode
-                if is_parse_error(&description) && request.parse_mode.is_some() {
-                    warn!("Parse mode error, retrying without formatting");
-                    let retry_request = SendMessageRequest {
-                        parse_mode: None,
-                        ..request
-                    };
-                    return self
-                        .request("POST", "sendMessage", Some(&retry_request), None)
-                        .await;
-                }
-                Err(TelegramError::Api { code, description })
-            }
-            Err(e) => Err(e),
-        }
     }
 
     /// Get file information for downloading.
@@ -251,7 +232,10 @@ impl TelegramClient {
 
     /// Download a file by its path.
     pub fn file_download_url(&self, file_path: &str) -> String {
-        format!("{}/file/bot{}/{}", self.base_url, self.token, file_path)
+        format!(
+            "{}/file/bot{}/{}",
+            self.base_url, self.credential, file_path
+        )
     }
 
     /// Answer a callback query (acknowledge button press).
@@ -395,18 +379,10 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
     )))
 }
 
-/// Check if an error message indicates a parse mode error.
-fn is_parse_error(description: &str) -> bool {
-    let lower = description.to_lowercase();
-    lower.contains("can't parse entities")
-        || lower.contains("parse entities")
-        || lower.contains("find end of the entity")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -436,15 +412,6 @@ mod tests {
         assert!(normalize_chat_id("---").is_err()); // Invalid numeric
         assert!(normalize_chat_id("1-2-3").is_err()); // Invalid numeric
         assert!(normalize_chat_id("-").is_err()); // Just a dash
-    }
-
-    #[test]
-    fn test_is_parse_error() {
-        assert!(is_parse_error("can't parse entities"));
-        assert!(is_parse_error("Can't Parse Entities: some detail"));
-        assert!(is_parse_error("find end of the entity starting"));
-        assert!(!is_parse_error("some other error"));
-        assert!(!is_parse_error(""));
     }
 
     // Helper to create a mock server with a test client
@@ -498,12 +465,10 @@ mod tests {
         let result = client.get_me().await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            TelegramError::Api { code, description } => {
-                assert_eq!(code, 401);
-                assert_eq!(description, "Unauthorized");
-            }
-            _ => panic!("Expected Api error, got {err:?}"),
+        assert!(matches!(err, TelegramError::Api { .. }));
+        if let TelegramError::Api { code, description } = err {
+            assert_eq!(code, 401);
+            assert_eq!(description, "Unauthorized");
         }
     }
 
@@ -571,6 +536,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_send_message_with_reply_and_thread() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/sendMessage"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456",
+                "text": "*Hello*",
+                "parse_mode": "MarkdownV2",
+                "reply_to_message_id": 7,
+                "message_thread_id": 9
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 44,
+                    "chat": {
+                        "id": 123456,
+                        "type": "private",
+                        "first_name": "Test"
+                    },
+                    "date": 1234567890,
+                    "text": "Hello"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut options = SendMessageOptions::default()
+            .markdown_v2()
+            .reply_to_message_id(7);
+        options.message_thread_id = Some(9);
+
+        let message = client
+            .send_message("123456", "*Hello*", options)
+            .await
+            .unwrap();
+
+        assert_eq!(message.message_id, 44);
+    }
+
+    #[tokio::test]
     async fn test_send_message_rate_limited() {
         let (mock_server, client) = setup_mock_client().await;
 
@@ -591,11 +598,9 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.is_retryable());
-        match err {
-            TelegramError::Api { code, .. } => {
-                assert_eq!(code, 429);
-            }
-            _ => panic!("Expected Api error"),
+        assert!(matches!(err, TelegramError::Api { .. }));
+        if let TelegramError::Api { code, .. } = err {
+            assert_eq!(code, 429);
         }
     }
 

@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fcp_core::{
-    ConnectorHealth, ConnectorId, Introspection, OperationInfo, RateLimitDeclarations, SafetyTier,
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
+    Introspection, OperationInfo, RateLimitDeclarations, RiskLevel, SafetyTier, SelfCheckReport,
+    UsageBudgetSnapshot, ZoneId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -209,6 +211,19 @@ pub struct IntrospectionResponse {
     pub introspection: Introspection,
 }
 
+/// Response from a connector self-check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfCheckResponse {
+    /// Connector identifier.
+    pub connector_id: ConnectorId,
+
+    /// Self-check report from the connector.
+    pub report: SelfCheckReport,
+
+    /// Timestamp when the self-check was executed.
+    pub checked_at: DateTime<Utc>,
+}
+
 /// MCP-compatible tool descriptor.
 ///
 /// Per SEP-1382 and MCP 2025 spec.
@@ -226,8 +241,21 @@ pub struct ToolDescriptor {
     /// JSON Schema for output.
     pub output_schema: serde_json::Value,
 
+    /// Required capability.
+    pub capability: CapabilityId,
+
+    /// Risk level (for agent UX).
+    pub risk_level: RiskLevel,
+
     /// Safety tier.
     pub safety_tier: SafetyTier,
+
+    /// Idempotency class.
+    pub idempotency: IdempotencyClass,
+
+    /// Approval mode required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<ApprovalMode>,
 
     /// Whether this tool requires confirmation.
     pub requires_confirmation: bool,
@@ -252,7 +280,7 @@ pub struct ToolDescriptor {
 
     /// AI agent hints.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ai_hints: Option<String>,
+    pub ai_hints: Option<AgentHint>,
 }
 
 impl From<&OperationInfo> for ToolDescriptor {
@@ -262,7 +290,11 @@ impl From<&OperationInfo> for ToolDescriptor {
             description: op.description.clone().unwrap_or_else(|| op.summary.clone()),
             input_schema: op.input_schema.clone(),
             output_schema: op.output_schema.clone(),
+            capability: op.capability.clone(),
+            risk_level: op.risk_level,
             safety_tier: op.safety_tier,
+            idempotency: op.idempotency,
+            approval_mode: op.requires_approval,
             requires_confirmation: op.requires_approval.is_some(),
             idempotent: matches!(
                 op.idempotency,
@@ -271,7 +303,10 @@ impl From<&OperationInfo> for ToolDescriptor {
             supports_simulate: true, // Assume all support simulate by default
             latency_hint: None,
             rate_limits: op.rate_limit.as_ref().map_or_else(Vec::new, |rl| {
-                vec![rl.scope.clone().unwrap_or_else(|| "default".to_string())]
+                rl.pool_name
+                    .clone()
+                    .or_else(|| rl.scope.clone())
+                    .map_or_else(Vec::new, |value| vec![value])
             }),
             examples: op
                 .ai_hints
@@ -283,12 +318,31 @@ impl From<&OperationInfo> for ToolDescriptor {
                     output: None,
                 })
                 .collect(),
-            ai_hints: if op.ai_hints.when_to_use.is_empty() {
+            ai_hints: if op.ai_hints.when_to_use.is_empty()
+                && op.ai_hints.common_mistakes.is_empty()
+                && op.ai_hints.examples.is_empty()
+                && op.ai_hints.related.is_empty()
+            {
                 None
             } else {
-                Some(op.ai_hints.when_to_use.clone())
+                Some(op.ai_hints.clone())
             },
         }
+    }
+}
+
+impl ToolDescriptor {
+    pub(crate) fn from_operation(
+        op: &OperationInfo,
+        declarations: Option<&RateLimitDeclarations>,
+    ) -> Self {
+        let mut tool = Self::from(op);
+        if let Some(decls) = declarations
+            && let Some(pools) = decls.tool_pool_map.get(op.id.as_str())
+        {
+            tool.rate_limits.clone_from(pools);
+        }
+        tool
     }
 }
 
@@ -341,6 +395,10 @@ pub struct PreflightRequest {
     /// Principal making the request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+
+    /// Zone the operation would execute in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<ZoneId>,
 }
 
 /// Response from preflight check.
@@ -364,6 +422,10 @@ pub struct PreflightResponse {
     /// Estimated cost (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_cost: Option<EstimatedCost>,
+
+    /// Usage budget snapshot (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_status: Option<UsageBudgetSnapshot>,
 }
 
 impl PreflightResponse {
@@ -376,6 +438,7 @@ impl PreflightResponse {
             missing_capabilities: Vec::new(),
             rate_limit: None,
             estimated_cost: None,
+            budget_status: None,
         }
     }
 
@@ -388,6 +451,7 @@ impl PreflightResponse {
             missing_capabilities: vec![],
             rate_limit: None,
             estimated_cost: None,
+            budget_status: None,
         }
     }
 }
@@ -508,6 +572,9 @@ pub trait ConnectorRegistry: Send + Sync {
     /// Get rate limit declarations for a connector.
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<RateLimitDeclarations>;
 
+    /// Run a connector self-check.
+    async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport>;
+
     /// Get the current registry version.
     fn version(&self) -> u64;
 }
@@ -603,7 +670,7 @@ where
         let tools: Vec<ToolDescriptor> = introspection
             .operations
             .iter()
-            .map(ToolDescriptor::from)
+            .map(|op| ToolDescriptor::from_operation(op, rate_limits.as_ref()))
             .collect();
 
         Ok(IntrospectionResponse {
@@ -612,6 +679,25 @@ where
             rate_limits,
             archetype,
             introspection,
+        })
+    }
+
+    /// Run a connector self-check (read-only).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::ConnectorNotFound`] if the connector is missing.
+    pub async fn self_check(&self, connector_id: &ConnectorId) -> HostResult<SelfCheckResponse> {
+        let report = self
+            .registry
+            .self_check(connector_id)
+            .await
+            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+
+        Ok(SelfCheckResponse {
+            connector_id: connector_id.clone(),
+            report,
+            checked_at: Utc::now(),
         })
     }
 
@@ -694,6 +780,7 @@ impl DiscoveryCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::SelfCheckStatus;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -943,14 +1030,23 @@ mod tests {
             description: "Send a message to a channel".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
             output_schema: serde_json::json!({"type": "object"}),
+            capability: CapabilityId::new("cap.send_message").expect("capability"),
+            risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            approval_mode: Some(ApprovalMode::Interactive),
             requires_confirmation: true,
             idempotent: false,
             supports_simulate: true,
             latency_hint: Some(LatencyHint::Fast),
             rate_limits: vec!["discord_api".to_string()],
             examples: vec![],
-            ai_hints: Some("Use for sending chat messages".to_string()),
+            ai_hints: Some(AgentHint {
+                when_to_use: "Use for sending chat messages".to_string(),
+                common_mistakes: vec!["Missing channel_id".to_string()],
+                examples: vec![r#"{"channel_id":"123","content":"hi"}"#.to_string()],
+                related: vec![CapabilityId::new("discord.delete_message").expect("capability")],
+            }),
         };
 
         let json = serde_json::to_string(&tool).unwrap();
@@ -1053,6 +1149,10 @@ mod tests {
 
         async fn get_rate_limits(&self, _id: &ConnectorId) -> Option<RateLimitDeclarations> {
             None
+        }
+
+        async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+            self.find(id).map(|_| SelfCheckReport::ok())
         }
 
         fn version(&self) -> u64 {
@@ -1177,6 +1277,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_endpoint_self_check_missing_connector() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+        let id = ConnectorId::new("missing", "test", "v1").unwrap();
+
+        let err = endpoint.self_check(&id).await.unwrap_err();
+        assert!(matches!(err, HostError::ConnectorNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_self_check_ok() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "self-check",
+            "test",
+            "v1",
+            vec!["test"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary.clone()], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let response = endpoint.self_check(&summary.id).await.unwrap();
+        assert_eq!(response.connector_id, summary.id);
+        assert_eq!(response.report.status, SelfCheckStatus::Ok);
+    }
+
+    #[tokio::test]
     async fn discovery_endpoint_preflight_passthrough() {
         let calls = Arc::new(AtomicUsize::new(0));
         let registry = CountingRegistry::new(vec![], Arc::clone(&calls));
@@ -1187,10 +1317,389 @@ mod tests {
             operation: "invoke".to_string(),
             params: None,
             principal: None,
+            zone_id: None,
         };
 
         let response = endpoint.preflight(request).await;
         assert!(!response.allowed);
         assert_eq!(response.reason.as_deref(), Some("policy denied"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Combined filter tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn filter_matches_combined_category_and_risk() {
+        let filter = DiscoveryFilter {
+            category: Some("messaging".to_string()),
+            max_risk: Some(SafetyTier::Risky),
+            health: None,
+        };
+
+        // Matches both category and risk
+        let safe_msg = make_summary(
+            "test",
+            "sm",
+            "v1",
+            vec!["messaging"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&safe_msg));
+
+        // Right category, too risky
+        let dangerous_msg = make_summary(
+            "test",
+            "dm",
+            "v1",
+            vec!["messaging"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&dangerous_msg));
+
+        // Wrong category, right risk
+        let safe_storage = make_summary(
+            "test",
+            "ss",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&safe_storage));
+    }
+
+    #[test]
+    fn filter_matches_all_three_dimensions() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".to_string()),
+            max_risk: Some(SafetyTier::Risky),
+            health: Some(HealthFilter::Available),
+        };
+
+        // Matches all
+        let good = make_summary(
+            "test",
+            "g",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Risky,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&good));
+
+        // Matches category + risk, but unavailable
+        let down = make_summary(
+            "test",
+            "dn",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::unavailable("down"),
+        );
+        assert!(!filter.matches(&down));
+
+        // Degraded counts as available
+        let degraded = make_summary(
+            "test",
+            "dg",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::degraded("slow"),
+        );
+        assert!(filter.matches(&degraded));
+    }
+
+    #[test]
+    fn filter_health_degraded_only_matches_degraded() {
+        let filter = DiscoveryFilter {
+            health: Some(HealthFilter::Degraded),
+            ..Default::default()
+        };
+
+        let healthy = make_summary(
+            "test",
+            "hh",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let degraded = make_summary(
+            "test",
+            "dd",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::degraded("slow"),
+        );
+
+        assert!(!filter.matches(&healthy));
+        assert!(filter.matches(&degraded));
+    }
+
+    #[test]
+    fn filter_health_all_matches_everything() {
+        let filter = DiscoveryFilter {
+            health: Some(HealthFilter::All),
+            ..Default::default()
+        };
+
+        let healthy = make_summary(
+            "test",
+            "ah",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let degraded = make_summary(
+            "test",
+            "ad",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::degraded("slow"),
+        );
+        let unavailable = make_summary(
+            "test",
+            "au",
+            "v1",
+            vec![],
+            SafetyTier::Safe,
+            ConnectorHealth::unavailable("down"),
+        );
+
+        assert!(filter.matches(&healthy));
+        assert!(filter.matches(&degraded));
+        assert!(filter.matches(&unavailable));
+    }
+
+    #[test]
+    fn filter_category_with_multi_category_connector() {
+        let filter = DiscoveryFilter {
+            category: Some("ai".to_string()),
+            ..Default::default()
+        };
+
+        let multi = make_summary(
+            "test",
+            "mc",
+            "v1",
+            vec!["messaging", "ai", "knowledge"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(filter.matches(&multi));
+
+        let no_match = make_summary(
+            "test",
+            "nm",
+            "v1",
+            vec!["messaging", "storage"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        assert!(!filter.matches(&no_match));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PreflightResponse populated fields
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn preflight_response_with_missing_capabilities() {
+        let mut resp = PreflightResponse::denied("missing caps");
+        resp.missing_capabilities = vec!["cap.read".to_string(), "cap.write".to_string()];
+
+        assert!(!resp.allowed);
+        assert_eq!(resp.missing_capabilities.len(), 2);
+        assert!(resp.missing_capabilities.contains(&"cap.read".to_string()));
+    }
+
+    #[test]
+    fn preflight_response_with_rate_limit() {
+        let mut resp = PreflightResponse::denied("rate limited");
+        resp.rate_limit = Some(PreflightRateLimit {
+            limited: true,
+            remaining: 0,
+            reset_at: Some(Utc::now()),
+        });
+
+        assert!(resp.rate_limit.as_ref().unwrap().limited);
+        assert_eq!(resp.rate_limit.as_ref().unwrap().remaining, 0);
+        assert!(resp.rate_limit.as_ref().unwrap().reset_at.is_some());
+    }
+
+    #[test]
+    fn preflight_response_with_estimated_cost() {
+        let mut resp = PreflightResponse::allowed();
+        resp.estimated_cost = Some(EstimatedCost {
+            api_calls: Some(3),
+            tokens: Some(1500),
+            cost_cents: Some(2),
+        });
+
+        let cost = resp.estimated_cost.as_ref().unwrap();
+        assert_eq!(cost.api_calls, Some(3));
+        assert_eq!(cost.tokens, Some(1500));
+        assert_eq!(cost.cost_cents, Some(2));
+    }
+
+    #[test]
+    fn preflight_response_serialization_roundtrip() {
+        use fcp_core::{
+            BudgetEnforcement, BudgetStatus, UsageBudgetUsage, UsageMetricKind, ZoneId,
+        };
+
+        let mut resp = PreflightResponse::denied("rate limited");
+        resp.missing_capabilities = vec!["cap.send".to_string()];
+        resp.rate_limit = Some(PreflightRateLimit {
+            limited: true,
+            remaining: 5,
+            reset_at: None,
+        });
+        resp.estimated_cost = Some(EstimatedCost {
+            api_calls: Some(1),
+            tokens: None,
+            cost_cents: Some(10),
+        });
+        resp.budget_status = Some(UsageBudgetSnapshot {
+            zone_id: ZoneId::work(),
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetUsage {
+                metric: UsageMetricKind::Tokens,
+                used: 1500,
+                limit: 2000,
+                remaining: 500,
+                window_started_at: 1_700_000_000,
+                window_resets_at: 1_700_000_060,
+                status: BudgetStatus::Ok,
+            }],
+            updated_at: 1_700_000_020,
+        });
+
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: PreflightResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(!parsed.allowed);
+        assert_eq!(parsed.reason.as_deref(), Some("rate limited"));
+        assert_eq!(parsed.missing_capabilities, vec!["cap.send"]);
+        assert!(parsed.rate_limit.as_ref().unwrap().limited);
+        assert_eq!(parsed.rate_limit.as_ref().unwrap().remaining, 5);
+        assert_eq!(parsed.estimated_cost.as_ref().unwrap().api_calls, Some(1));
+        assert!(parsed.estimated_cost.as_ref().unwrap().tokens.is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EstimatedCost + HostHealth serialization
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn estimated_cost_partial_fields() {
+        let cost = EstimatedCost {
+            api_calls: None,
+            tokens: Some(500),
+            cost_cents: None,
+        };
+
+        let json = serde_json::to_string(&cost).unwrap();
+        let parsed: EstimatedCost = serde_json::from_str(&json).unwrap();
+        assert!(parsed.api_calls.is_none());
+        assert_eq!(parsed.tokens, Some(500));
+        assert!(parsed.cost_cents.is_none());
+    }
+
+    #[test]
+    fn host_health_response_serialization() {
+        let response = HostHealthResponse {
+            status: HostHealthStatus::Degraded,
+            connectors: HashMap::new(),
+            uptime_seconds: 3600,
+            active_connections: 5,
+            timestamp: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: HostHealthResponse = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(parsed.status, HostHealthStatus::Degraded));
+        assert_eq!(parsed.uptime_seconds, 3600);
+        assert_eq!(parsed.active_connections, 5);
+    }
+
+    #[test]
+    fn host_health_status_serialization() {
+        for status in [
+            HostHealthStatus::Healthy,
+            HostHealthStatus::Degraded,
+            HostHealthStatus::Unhealthy,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let parsed: HostHealthStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                std::mem::discriminant(&parsed),
+                std::mem::discriminant(&status)
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Endpoint: discover with strict filter returns empty
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn discovery_endpoint_discover_all_filtered_out() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let summary = make_summary(
+            "test",
+            "only",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::healthy(),
+        );
+        let registry = CountingRegistry::new(vec![summary], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        // Filter that excludes everything: wrong category + too strict risk
+        let filter = DiscoveryFilter {
+            category: Some("messaging".to_string()),
+            max_risk: Some(SafetyTier::Safe),
+            health: None,
+        };
+
+        let response = endpoint.discover(Some(filter)).await;
+        assert!(response.connectors.is_empty());
+        assert_eq!(response.registry_version, 1);
+    }
+
+    #[tokio::test]
+    async fn discovery_endpoint_discover_no_filter_returns_all() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let s1 = make_summary(
+            "a",
+            "first",
+            "v1",
+            vec!["ai"],
+            SafetyTier::Safe,
+            ConnectorHealth::healthy(),
+        );
+        let s2 = make_summary(
+            "b",
+            "second",
+            "v1",
+            vec!["storage"],
+            SafetyTier::Dangerous,
+            ConnectorHealth::degraded("slow"),
+        );
+        let registry = CountingRegistry::new(vec![s1, s2], Arc::clone(&calls));
+        let endpoint = DiscoveryEndpoint::new(Arc::new(registry), Arc::new(AllowPolicy));
+
+        let response = endpoint.discover(None).await;
+        assert_eq!(response.connectors.len(), 2);
     }
 }

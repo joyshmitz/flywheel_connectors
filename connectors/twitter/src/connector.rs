@@ -7,11 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    BaseConnector, CapabilityGrant, CapabilityToken, CapabilityVerifier, ConnectorId, EventCaps,
-    FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest, SimulateResponse,
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, HandshakeRequest, HandshakeResponse, SessionId, SimulateRequest,
+    SimulateResponse,
+};
+use fcp_sdk::runtime::{
+    InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
+    SupervisorConfig,
 };
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, watch};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -49,6 +54,12 @@ pub struct TwitterConnector {
 
     /// Stream subscriber count
     stream_subscribers: Arc<AtomicU64>,
+
+    /// Stream shutdown signal
+    stream_shutdown_tx: Option<watch::Sender<bool>>,
+
+    /// Stream supervisor task
+    stream_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TwitterConnector {
@@ -67,6 +78,8 @@ impl TwitterConnector {
             event_tx,
             stream_active: Arc::new(RwLock::new(false)),
             stream_subscribers: Arc::new(AtomicU64::new(0)),
+            stream_shutdown_tx: None,
+            stream_task: None,
         }
     }
 
@@ -147,7 +160,7 @@ impl TwitterConnector {
         })?;
 
         info!(username = %user.username, user_id = %user.id, "Authenticated as user");
-        self.authenticated_user = Some(user.clone());
+        self.authenticated_user = Some(user);
 
         // Set up verifier
         self.verifier = Some(CapabilityVerifier::new(
@@ -263,7 +276,7 @@ impl TwitterConnector {
 
     /// Handle the invoke method.
     #[instrument(skip(self, params))]
-    pub async fn handle_invoke(&mut self, params: Value) -> Result<Value, FcpError> {
+    pub async fn handle_invoke(&self, params: Value) -> Result<Value, FcpError> {
         let operation = params
             .get("operation")
             .and_then(|v| v.as_str())
@@ -272,17 +285,18 @@ impl TwitterConnector {
                 message: "Missing 'operation' field".into(),
             })?;
 
-        let args = params.get("args").cloned().unwrap_or(json!({}));
+        let args = params.get("args").cloned().unwrap_or_else(|| json!({}));
 
         debug!(operation = %operation, "Invoking Twitter operation");
 
         // Extract and verify capability token
-        let token_value = params
-            .get("capability_token")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing capability_token".into(),
-            })?;
+        let token_value =
+            params
+                .get("capability_token")
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
 
         let token: CapabilityToken =
             serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
@@ -290,9 +304,14 @@ impl TwitterConnector {
                 message: format!("Invalid capability_token format: {e}"),
             })?;
 
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: fcp_core::OperationId =
+            operation.parse().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid operation ID format".into(),
+            })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
-            message: "Invalid operation ID format".into(),
+            message: "Invalid capability ID format".into(),
         })?;
 
         // Extract resource URIs
@@ -305,7 +324,7 @@ impl TwitterConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -336,59 +355,114 @@ impl TwitterConnector {
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
 
         // Start stream if not already active
-        let mut stream_active = self.stream_active.write().await;
-        if !*stream_active {
-            let stream = FilteredStream::new(config.clone()).map_err(|e| e.to_fcp_error())?;
+        let should_start = {
+            let mut active = self.stream_active.write().await;
+            if *active {
+                false
+            } else {
+                *active = true;
+                true
+            }
+        };
 
-            let mut event_rx = stream.connect().await.map_err(|e| e.to_fcp_error())?;
+        if should_start {
+            let stream = match FilteredStream::new(config.clone()) {
+                Ok(stream) => stream,
+                Err(err) => {
+                    *self.stream_active.write().await = false;
+                    return Err(err.to_fcp_error());
+                }
+            };
+            let stream = Arc::new(stream);
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            self.stream_shutdown_tx = Some(shutdown_tx.clone());
 
             let event_tx = self.event_tx.clone();
             let stream_active_flag = self.stream_active.clone();
 
-            tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    let value = match &event {
-                        StreamEvent::Tweet(tweet) => {
-                            json!({
-                                "type": "tweet",
-                                "data": tweet
-                            })
-                        }
-                        StreamEvent::Connected => {
-                            json!({
-                                "type": "connected"
-                            })
-                        }
-                        StreamEvent::Disconnected { reason } => {
-                            json!({
-                                "type": "disconnected",
-                                "reason": reason
-                            })
-                        }
-                        StreamEvent::Heartbeat => {
-                            json!({
-                                "type": "heartbeat"
-                            })
-                        }
-                        StreamEvent::Error(msg) => {
-                            json!({
-                                "type": "error",
-                                "message": msg
-                            })
-                        }
-                    };
+            let mut supervisor = StreamingSupervisor::new(
+                SupervisorConfig {
+                    heartbeat_interval_ms: 0, // SSE heartbeats are connector-managed
+                    ..SupervisorConfig::default()
+                },
+                InMemoryStreamingSession::new(),
+            );
 
-                    if event_tx.send(value).is_err() {
-                        // No subscribers
-                        break;
-                    }
-                }
+            let task = tokio::spawn(async move {
+                let outcome = supervisor
+                    .run(
+                        shutdown_rx,
+                        |_session| {
+                            let stream = Arc::clone(&stream);
+                            async move {
+                                let handle = stream
+                                    .connect_once()
+                                    .await
+                                    .map_err(|e| -> StreamingError { Box::new(e) })?;
+                                let join_handle = tokio::spawn(async move {
+                                    match handle.join_handle.await {
+                                        Ok(Ok(())) => Ok(()),
+                                        Ok(Err(e)) => Err(Box::new(e) as StreamingError),
+                                        Err(e) => Err(Box::new(e) as StreamingError),
+                                    }
+                                });
+                                Ok(StreamingConnection {
+                                    events: handle.events,
+                                    join_handle,
+                                })
+                            }
+                        },
+                        |event, _session| {
+                            let event_tx = event_tx.clone();
+                            let shutdown_tx = shutdown_tx.clone();
+                            async move {
+                                let value = match &event {
+                                    StreamEvent::Tweet(tweet) => {
+                                        json!({
+                                            "type": "tweet",
+                                            "data": tweet
+                                        })
+                                    }
+                                    StreamEvent::Connected => {
+                                        json!({
+                                            "type": "connected"
+                                        })
+                                    }
+                                    StreamEvent::Disconnected { reason } => {
+                                        json!({
+                                            "type": "disconnected",
+                                            "reason": reason
+                                        })
+                                    }
+                                    StreamEvent::Heartbeat => {
+                                        json!({
+                                            "type": "heartbeat"
+                                        })
+                                    }
+                                    StreamEvent::Error(msg) => {
+                                        json!({
+                                            "type": "error",
+                                            "message": msg
+                                        })
+                                    }
+                                };
 
+                                if event_tx.send(value).is_err() {
+                                    let _ = shutdown_tx.send(true);
+                                }
+
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await;
+
+                info!(?outcome, "Twitter stream supervisor stopped");
                 let mut active = stream_active_flag.write().await;
                 *active = false;
             });
 
-            *stream_active = true;
+            self.stream_task = Some(task);
         }
 
         self.stream_subscribers.fetch_add(1, Ordering::Relaxed);
@@ -404,9 +478,19 @@ impl TwitterConnector {
     pub async fn handle_shutdown(&mut self, _params: Value) -> Result<Value, FcpError> {
         info!("Shutting down Twitter connector");
 
+        if let Some(shutdown_tx) = self.stream_shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+
+        if let Some(task) = self.stream_task.take() {
+            task.abort();
+        }
+
         // Mark stream as inactive
-        let mut stream_active = self.stream_active.write().await;
-        *stream_active = false;
+        {
+            let mut stream_active = self.stream_active.write().await;
+            *stream_active = false;
+        }
 
         self.base.set_handshaken(false);
 
@@ -556,7 +640,7 @@ impl TwitterConnector {
             query: query.to_string(),
             max_results: args
                 .get("max_results")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|v| v as u32),
             next_token: args
                 .get("next_token")
@@ -709,7 +793,7 @@ impl TwitterConnector {
 
         let max_results = args
             .get("max_results")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
         let pagination_token = args.get("pagination_token").and_then(|v| v.as_str());
 
@@ -742,7 +826,7 @@ impl TwitterConnector {
 
         let max_results = args
             .get("max_results")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .map(|v| v as u32);
         let pagination_token = args.get("pagination_token").and_then(|v| v.as_str());
 

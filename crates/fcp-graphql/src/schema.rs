@@ -21,9 +21,16 @@ impl SchemaCache {
         schema.hash(&mut hasher);
         let key = hasher.finish();
 
-        if let Some(existing) = self.inner.lock().expect("schema cache lock").get(&key) {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| GraphqlClientError::Protocol {
+                message: "schema cache lock poisoned".to_string(),
+            })?;
+        if let Some(existing) = guard.get(&key) {
             return Ok(Arc::clone(existing));
         }
+        drop(guard);
 
         let value: Value = serde_json::from_str(schema)?;
         let validator =
@@ -35,7 +42,9 @@ impl SchemaCache {
         let validator = Arc::new(validator);
         self.inner
             .lock()
-            .expect("schema cache lock")
+            .map_err(|_| GraphqlClientError::Protocol {
+                message: "schema cache lock poisoned".to_string(),
+            })?
             .insert(key, Arc::clone(&validator));
 
         Ok(validator)

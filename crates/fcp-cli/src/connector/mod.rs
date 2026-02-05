@@ -24,12 +24,16 @@ pub mod types;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use fcp_core::{ConnectorHealth, SafetyTier};
+use fcp_core::{
+    AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, IdempotencyClass, RateLimitConfig,
+    RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
+    RiskLevel, SafetyTier,
+};
 use types::{
-    AgentHintsDescriptor, AuthCapsDescriptor, ConnectorHealthDisplay, ConnectorInfo,
-    ConnectorIntrospection, ConnectorListOutput, ConnectorMetricsInfo, ConnectorSummary,
-    EventCapsDescriptor, EventDescriptor, EventSummary, OperationDescriptor, OperationSummary,
-    RateLimitDescriptor, ResourceTypeDescriptor, SandboxInfo, ZoneConnectors,
+    AuthCapsDescriptor, ConnectorHealthDisplay, ConnectorInfo, ConnectorIntrospection,
+    ConnectorListOutput, ConnectorMetricsInfo, ConnectorSummary, EventCapsDescriptor,
+    EventDescriptor, EventSummary, OperationDescriptor, OperationSummary, RateLimitDescriptor,
+    ResourceTypeDescriptor, SandboxInfo, ZoneConnectors,
 };
 
 /// Arguments for the `fcp connector` command.
@@ -239,10 +243,55 @@ fn simulate_list_output(zone_filter: Option<&str>) -> ConnectorListOutput {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Static connector simulation is inherently verbose
 fn simulate_connector_info(connector_id: &str) -> Result<ConnectorInfo> {
     // Simulate looking up the connector
     match connector_id {
-        "fcp.twitter:social:v1" => Ok(ConnectorInfo {
+        "fcp.twitter:social:v1" => {
+            let rate_limits = RateLimitDeclarations {
+                limits: vec![
+                    RateLimitPool {
+                        id: "twitter_api".to_string(),
+                        description: "Twitter API request pool".to_string(),
+                        config: RateLimitConfig {
+                            requests: 180,
+                            window: std::time::Duration::from_secs(900),
+                            burst: Some(18),
+                            unit: RateLimitUnit::Requests,
+                        },
+                        enforcement: RateLimitEnforcement::Hard,
+                        scope: RateLimitScope::Credential,
+                    },
+                    RateLimitPool {
+                        id: "twitter_write".to_string(),
+                        description: "Twitter write operations".to_string(),
+                        config: RateLimitConfig {
+                            requests: 300,
+                            window: std::time::Duration::from_secs(10800),
+                            burst: Some(30),
+                            unit: RateLimitUnit::Requests,
+                        },
+                        enforcement: RateLimitEnforcement::Hard,
+                        scope: RateLimitScope::Credential,
+                    },
+                ],
+                tool_pool_map: std::collections::HashMap::from([
+                    (
+                        "twitter.get_timeline".to_string(),
+                        vec!["twitter_api".to_string()],
+                    ),
+                    (
+                        "twitter.post_tweet".to_string(),
+                        vec!["twitter_write".to_string()],
+                    ),
+                    (
+                        "twitter.send_dm".to_string(),
+                        vec!["twitter_write".to_string()],
+                    ),
+                ]),
+            };
+
+            Ok(ConnectorInfo {
             id: "fcp.twitter:social:v1".to_string(),
             name: "Twitter/X Connector".to_string(),
             version: "1.2.0".to_string(),
@@ -252,37 +301,40 @@ fn simulate_connector_info(connector_id: &str) -> Result<ConnectorInfo> {
             home_zone: "z:private".to_string(),
             allowed_source_zones: vec!["z:private".to_string(), "z:work".to_string()],
             required_capabilities: vec![
-                "twitter:read:tweets".to_string(),
-                "twitter:read:profile".to_string(),
+                CapabilityId::new("twitter:read:tweets").expect("valid capability id"),
+                CapabilityId::new("twitter:read:profile").expect("valid capability id"),
             ],
             optional_capabilities: vec![
-                "twitter:write:tweets".to_string(),
-                "twitter:write:dms".to_string(),
-                "twitter:read:dms".to_string(),
+                CapabilityId::new("twitter:write:tweets").expect("valid capability id"),
+                CapabilityId::new("twitter:write:dms").expect("valid capability id"),
+                CapabilityId::new("twitter:read:dms").expect("valid capability id"),
             ],
             operations: vec![
                 OperationSummary {
                     id: "twitter.get_timeline".to_string(),
                     summary: "Get home timeline".to_string(),
-                    capability: "twitter:read:tweets".to_string(),
-                    risk_level: "low".to_string(),
-                    safety_tier: "T0".to_string(),
+                    capability: CapabilityId::new("twitter:read:tweets")
+                        .expect("valid capability id"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
                 },
                 OperationSummary {
                     id: "twitter.post_tweet".to_string(),
                     summary: "Post a tweet".to_string(),
-                    capability: "twitter:write:tweets".to_string(),
-                    risk_level: "medium".to_string(),
-                    safety_tier: "T2".to_string(),
+                    capability: CapabilityId::new("twitter:write:tweets")
+                        .expect("valid capability id"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
                 },
                 OperationSummary {
                     id: "twitter.send_dm".to_string(),
                     summary: "Send a direct message".to_string(),
-                    capability: "twitter:write:dms".to_string(),
-                    risk_level: "medium".to_string(),
-                    safety_tier: "T2".to_string(),
+                    capability: CapabilityId::new("twitter:write:dms").expect("valid capability id"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
                 },
             ],
+            rate_limits: Some(rate_limits),
             events: vec![
                 EventSummary {
                     topic: "tweets.new".to_string(),
@@ -312,7 +364,8 @@ fn simulate_connector_info(connector_id: &str) -> Result<ConnectorInfo> {
             publisher: Some("Flywheel Labs".to_string()),
             signed: true,
             attestations: vec!["in-toto".to_string(), "reproducible-build".to_string()],
-        }),
+        })
+        }
         _ => anyhow::bail!("Connector not found: {connector_id}"),
     }
 }
@@ -359,11 +412,12 @@ fn simulate_introspection(
                             "next_cursor": {"type": "string"}
                         }
                     }),
-                    capability: "twitter:read:tweets".to_string(),
-                    risk_level: "low".to_string(),
-                    safety_tier: "T0".to_string(),
-                    idempotency: "read_only".to_string(),
-                    ai_hints: AgentHintsDescriptor {
+                    capability: CapabilityId::new("twitter:read:tweets")
+                        .expect("valid capability id"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::BestEffort,
+                    ai_hints: AgentHint {
                         when_to_use: "When the user wants to see recent tweets or catch up on their timeline".to_string(),
                         common_mistakes: vec![
                             "Requesting too many tweets at once (use pagination)".to_string(),
@@ -373,7 +427,10 @@ fn simulate_introspection(
                             r#"{"count": 20}"#.to_string(),
                             r#"{"count": 50, "since_id": "1234567890"}"#.to_string(),
                         ],
-                        related: vec!["twitter.get_user_tweets".to_string()],
+                        related: vec![
+                            CapabilityId::new("twitter:read:user_tweets")
+                                .expect("valid capability id"),
+                        ],
                     },
                     rate_limit: Some(RateLimitDescriptor {
                         requests: 180,
@@ -415,11 +472,12 @@ fn simulate_introspection(
                             "text": {"type": "string"}
                         }
                     }),
-                    capability: "twitter:write:tweets".to_string(),
-                    risk_level: "medium".to_string(),
-                    safety_tier: "T2".to_string(),
-                    idempotency: "non_idempotent".to_string(),
-                    ai_hints: AgentHintsDescriptor {
+                    capability: CapabilityId::new("twitter:write:tweets")
+                        .expect("valid capability id"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
                         when_to_use: "Only when the user explicitly requests to post a tweet. Always confirm content before posting.".to_string(),
                         common_mistakes: vec![
                             "Posting without explicit user confirmation".to_string(),
@@ -430,14 +488,17 @@ fn simulate_introspection(
                             r#"{"text": "Hello world!"}"#.to_string(),
                             r#"{"text": "Replying to your tweet", "reply_to_id": "1234567890"}"#.to_string(),
                         ],
-                        related: vec!["twitter.delete_tweet".to_string()],
+                        related: vec![
+                            CapabilityId::new("twitter:delete:tweets")
+                                .expect("valid capability id"),
+                        ],
                     },
                     rate_limit: Some(RateLimitDescriptor {
                         requests: 300,
                         period_secs: 10800,
                         formatted: "300/3hr".to_string(),
                     }),
-                    requires_approval: Some("interactive".to_string()),
+                    requires_approval: Some(ApprovalMode::Interactive),
                 },
                 OperationDescriptor {
                     id: "twitter.send_dm".to_string(),
@@ -465,11 +526,12 @@ fn simulate_introspection(
                             "created_at": {"type": "string", "format": "date-time"}
                         }
                     }),
-                    capability: "twitter:write:dms".to_string(),
-                    risk_level: "medium".to_string(),
-                    safety_tier: "T2".to_string(),
-                    idempotency: "non_idempotent".to_string(),
-                    ai_hints: AgentHintsDescriptor {
+                    capability: CapabilityId::new("twitter:write:dms")
+                        .expect("valid capability id"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
                         when_to_use: "When the user wants to send a private message to someone on Twitter".to_string(),
                         common_mistakes: vec![
                             "Sending without user confirmation".to_string(),
@@ -478,14 +540,17 @@ fn simulate_introspection(
                         examples: vec![
                             r#"{"recipient_id": "12345", "text": "Hello!"}"#.to_string(),
                         ],
-                        related: vec!["twitter.get_dms".to_string()],
+                        related: vec![
+                            CapabilityId::new("twitter:read:dms")
+                                .expect("valid capability id"),
+                        ],
                     },
                     rate_limit: Some(RateLimitDescriptor {
                         requests: 1000,
                         period_secs: 86400,
                         formatted: "1000/day".to_string(),
                     }),
-                    requires_approval: Some("interactive".to_string()),
+                    requires_approval: Some(ApprovalMode::Interactive),
                 },
             ];
 
@@ -494,6 +559,49 @@ fn simulate_introspection(
                 let filter_ops: Vec<&str> = filter.split(',').map(str::trim).collect();
                 operations.retain(|op| filter_ops.iter().any(|f| op.id.contains(f)));
             }
+
+            let rate_limits = RateLimitDeclarations {
+                limits: vec![
+                    RateLimitPool {
+                        id: "twitter_api".to_string(),
+                        description: "Twitter API request pool".to_string(),
+                        config: RateLimitConfig {
+                            requests: 180,
+                            window: std::time::Duration::from_secs(900),
+                            burst: Some(18),
+                            unit: RateLimitUnit::Requests,
+                        },
+                        enforcement: RateLimitEnforcement::Hard,
+                        scope: RateLimitScope::Credential,
+                    },
+                    RateLimitPool {
+                        id: "twitter_write".to_string(),
+                        description: "Twitter write operations".to_string(),
+                        config: RateLimitConfig {
+                            requests: 300,
+                            window: std::time::Duration::from_secs(10800),
+                            burst: Some(30),
+                            unit: RateLimitUnit::Requests,
+                        },
+                        enforcement: RateLimitEnforcement::Hard,
+                        scope: RateLimitScope::Credential,
+                    },
+                ],
+                tool_pool_map: std::collections::HashMap::from([
+                    (
+                        "twitter.get_timeline".to_string(),
+                        vec!["twitter_api".to_string()],
+                    ),
+                    (
+                        "twitter.post_tweet".to_string(),
+                        vec!["twitter_write".to_string()],
+                    ),
+                    (
+                        "twitter.send_dm".to_string(),
+                        vec!["twitter_write".to_string()],
+                    ),
+                ]),
+            };
 
             Ok(ConnectorIntrospection {
                 connector_id: "fcp.twitter:social:v1".to_string(),
@@ -527,6 +635,7 @@ fn simulate_introspection(
                         requires_ack: true,
                     },
                 ],
+                rate_limits: Some(rate_limits),
                 resource_types: vec![
                     ResourceTypeDescriptor {
                         name: "Tweet".to_string(),
@@ -619,10 +728,12 @@ fn print_list_human_readable(output: &ConnectorListOutput) {
     }
 }
 
+#[allow(clippy::too_many_lines)] // CLI output formatting is intentionally verbose
 fn print_info_human_readable(info: &ConnectorInfo) {
     let reset = "\x1b[0m";
     let bold = "\x1b[1m";
     let dim = "\x1b[2m";
+    let cyan = "\x1b[36m";
     let color = info.status.ansi_color();
     let symbol = info.status.symbol();
     let label = info.status.label();
@@ -649,30 +760,70 @@ fn print_info_human_readable(info: &ConnectorInfo) {
     println!("{bold}Capabilities{reset}");
     println!("  Required:");
     for cap in &info.required_capabilities {
-        println!("    - {cap}");
+        println!("    - {}", cap.as_str());
     }
     if !info.optional_capabilities.is_empty() {
         println!("  Optional:");
         for cap in &info.optional_capabilities {
-            println!("    - {cap}");
+            println!("    - {}", cap.as_str());
         }
     }
     println!();
 
     println!("{bold}Operations{reset} ({})", info.operations.len());
     for op in &info.operations {
-        let risk_color = match op.risk_level.as_str() {
-            "low" => "\x1b[32m",
-            "medium" => "\x1b[33m",
-            "high" | "critical" => "\x1b[31m",
-            _ => "",
+        let risk_color = match op.risk_level {
+            RiskLevel::Low => "\x1b[32m",
+            RiskLevel::Medium => "\x1b[33m",
+            RiskLevel::High | RiskLevel::Critical => "\x1b[31m",
         };
         println!(
             "  {dim}{}{reset}: {} {risk_color}[{} / {}]{reset}",
-            op.id, op.summary, op.risk_level, op.safety_tier
+            op.id,
+            op.summary,
+            risk_level_label(op.risk_level),
+            safety_tier_label(op.safety_tier)
         );
     }
     println!();
+
+    if let Some(rate_limits) = &info.rate_limits {
+        println!("{bold}Rate Limits{reset}");
+        if rate_limits.limits.is_empty() {
+            println!("  {dim}No pools declared{reset}");
+        } else {
+            for pool in &rate_limits.limits {
+                let window_secs = pool.config.window.as_secs();
+                let burst = pool
+                    .config
+                    .burst
+                    .map_or_else(|| "none".to_string(), |b| b.to_string());
+                println!("  {cyan}{bold}{}{reset}", pool.id);
+                if !pool.description.is_empty() {
+                    println!("    {dim}{}{}", pool.description, reset);
+                }
+                println!(
+                    "    {dim}Limit:{reset} {} per {}s (burst {})",
+                    pool.config.requests, window_secs, burst
+                );
+                println!(
+                    "    {dim}Unit:{reset} {}  {dim}Enforcement:{reset} {}  {dim}Scope:{reset} {}",
+                    rate_limit_unit_label(pool.config.unit),
+                    rate_limit_enforcement_label(pool.enforcement),
+                    rate_limit_scope_label(pool.scope)
+                );
+            }
+        }
+
+        if !rate_limits.tool_pool_map.is_empty() {
+            println!();
+            println!("{bold}Tool -> Pools{reset}");
+            for (tool, pools) in &rate_limits.tool_pool_map {
+                println!("  {tool}: {}", pools.join(", "));
+            }
+        }
+        println!();
+    }
 
     if !info.events.is_empty() {
         println!("{bold}Events{reset}");
@@ -721,6 +872,7 @@ fn print_info_human_readable(info: &ConnectorInfo) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
     let reset = "\x1b[0m";
     let bold = "\x1b[1m";
@@ -735,15 +887,52 @@ fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
     println!("{}", "=".repeat(50));
     println!();
 
+    if let Some(rate_limits) = &intro.rate_limits {
+        println!("{bold}Rate Limits{reset}");
+        if rate_limits.limits.is_empty() {
+            println!("  {dim}No pools declared{reset}");
+        } else {
+            for pool in &rate_limits.limits {
+                let window_secs = pool.config.window.as_secs();
+                let burst = pool
+                    .config
+                    .burst
+                    .map_or_else(|| "none".to_string(), |b| b.to_string());
+                println!("  {cyan}{bold}{}{reset}", pool.id);
+                if !pool.description.is_empty() {
+                    println!("    {dim}{}{}", pool.description, reset);
+                }
+                println!(
+                    "    {dim}Limit:{reset} {} per {}s (burst {})",
+                    pool.config.requests, window_secs, burst
+                );
+                println!(
+                    "    {dim}Unit:{reset} {}  {dim}Enforcement:{reset} {}  {dim}Scope:{reset} {}",
+                    rate_limit_unit_label(pool.config.unit),
+                    rate_limit_enforcement_label(pool.enforcement),
+                    rate_limit_scope_label(pool.scope)
+                );
+            }
+        }
+
+        if !rate_limits.tool_pool_map.is_empty() {
+            println!();
+            println!("{bold}Tool -> Pools{reset}");
+            for (tool, pools) in &rate_limits.tool_pool_map {
+                println!("  {tool}: {}", pools.join(", "));
+            }
+        }
+        println!();
+    }
+
     println!("{bold}Operations{reset} ({})", intro.operations.len());
     println!();
 
     for op in &intro.operations {
-        let risk_color = match op.risk_level.as_str() {
-            "low" => "\x1b[32m",
-            "medium" => "\x1b[33m",
-            "high" | "critical" => "\x1b[31m",
-            _ => "",
+        let risk_color = match op.risk_level {
+            RiskLevel::Low => "\x1b[32m",
+            RiskLevel::Medium => "\x1b[33m",
+            RiskLevel::High | RiskLevel::Critical => "\x1b[31m",
         };
 
         println!("{cyan}{bold}{}{reset}", op.id);
@@ -754,12 +943,17 @@ fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
         println!();
         println!(
             "  {dim}Capability:{reset} {}  {risk_color}Risk: {} / {}{reset}",
-            op.capability, op.risk_level, op.safety_tier
+            op.capability.as_str(),
+            risk_level_label(op.risk_level),
+            safety_tier_label(op.safety_tier)
         );
-        println!("  {dim}Idempotency:{reset} {}", op.idempotency);
+        println!(
+            "  {dim}Idempotency:{reset} {}",
+            idempotency_label(op.idempotency)
+        );
 
         if let Some(approval) = &op.requires_approval {
-            println!("  {dim}Approval:{reset} {approval}");
+            println!("  {dim}Approval:{reset} {}", approval_label(*approval));
         }
 
         if let Some(rate) = &op.rate_limit {
@@ -786,6 +980,12 @@ fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
             println!("    Examples:");
             for example in &op.ai_hints.examples {
                 println!("      {example}");
+            }
+        }
+        if !op.ai_hints.related.is_empty() {
+            println!("    Related capabilities:");
+            for related in &op.ai_hints.related {
+                println!("      - {}", related.as_str());
             }
         }
 
@@ -830,6 +1030,67 @@ fn print_introspection_human_readable(intro: &ConnectorIntrospection) {
     }
 }
 
+const fn risk_level_label(level: RiskLevel) -> &'static str {
+    match level {
+        RiskLevel::Low => "low",
+        RiskLevel::Medium => "medium",
+        RiskLevel::High => "high",
+        RiskLevel::Critical => "critical",
+    }
+}
+
+const fn safety_tier_label(tier: SafetyTier) -> &'static str {
+    match tier {
+        SafetyTier::Safe => "safe",
+        SafetyTier::Risky => "risky",
+        SafetyTier::Dangerous => "dangerous",
+        SafetyTier::Critical => "critical",
+        SafetyTier::Forbidden => "forbidden",
+    }
+}
+
+const fn idempotency_label(class: IdempotencyClass) -> &'static str {
+    match class {
+        IdempotencyClass::None => "none",
+        IdempotencyClass::BestEffort => "best_effort",
+        IdempotencyClass::Strict => "strict",
+    }
+}
+
+const fn approval_label(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::None => "none",
+        ApprovalMode::Policy => "policy",
+        ApprovalMode::Interactive => "interactive",
+        ApprovalMode::ElevationToken => "elevation_token",
+    }
+}
+
+const fn rate_limit_unit_label(unit: RateLimitUnit) -> &'static str {
+    match unit {
+        RateLimitUnit::Requests => "requests",
+        RateLimitUnit::Tokens => "tokens",
+        RateLimitUnit::Bytes => "bytes",
+        RateLimitUnit::Custom => "custom",
+    }
+}
+
+const fn rate_limit_enforcement_label(enforcement: RateLimitEnforcement) -> &'static str {
+    match enforcement {
+        RateLimitEnforcement::Hard => "hard",
+        RateLimitEnforcement::Soft => "soft",
+        RateLimitEnforcement::Advisory => "advisory",
+    }
+}
+
+const fn rate_limit_scope_label(scope: RateLimitScope) -> &'static str {
+    match scope {
+        RateLimitScope::Instance => "instance",
+        RateLimitScope::Credential => "credential",
+        RateLimitScope::Global => "global",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +1123,7 @@ mod tests {
         assert_eq!(info.id, "fcp.twitter:social:v1");
         assert_eq!(info.archetype, "bidirectional");
         assert!(!info.operations.is_empty());
+        assert!(info.rate_limits.is_some());
     }
 
     #[test]
@@ -876,6 +1138,7 @@ mod tests {
         assert_eq!(intro.connector_id, "fcp.twitter:social:v1");
         assert_eq!(intro.operations.len(), 3);
         assert!(intro.event_caps.is_some());
+        assert!(intro.rate_limits.is_some());
     }
 
     #[test]

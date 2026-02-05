@@ -9,11 +9,19 @@ use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
-    Principal, RiskLevel, SafetyTier, SessionId, SimulateRequest, SimulateResponse, TrustLevel,
-    ZoneId,
+    Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
+    SimulateResponse, TrustLevel, ZoneId,
+};
+use fcp_sdk::{
+    Limits,
+    runtime::{
+        InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSupervisor,
+        SupervisorConfig,
+    },
+    validate_input_with_limits, validate_output_with_limits,
 };
 use serde_json::json;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::info;
 
 use crate::{
@@ -28,7 +36,7 @@ pub struct DiscordConnector {
     base: Arc<BaseConnector>,
     config: Option<DiscordConfig>,
     api_client: Option<Arc<DiscordApiClient>>,
-    gateway: Option<GatewayConnection>,
+    gateway: Option<Arc<GatewayConnection>>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     bot_user_id: Option<String>,
@@ -38,6 +46,7 @@ pub struct DiscordConnector {
 
     // Gateway task
     gateway_task: Option<tokio::task::JoinHandle<()>>,
+    gateway_shutdown_tx: Option<watch::Sender<bool>>,
 
     // Metrics
     start_time: Instant,
@@ -45,6 +54,7 @@ pub struct DiscordConnector {
 
 impl DiscordConnector {
     /// Create a new Discord connector.
+    #[must_use]
     pub fn new() -> Self {
         let (event_tx, _) = broadcast::channel(1000);
 
@@ -58,6 +68,7 @@ impl DiscordConnector {
             bot_user_id: None,
             event_tx,
             gateway_task: None,
+            gateway_shutdown_tx: None,
             start_time: Instant::now(),
         }
     }
@@ -73,10 +84,10 @@ impl DiscordConnector {
                 message: format!("Invalid configuration: {e}"),
             })?;
 
-        if config.bot_token.is_empty() {
+        if config.bot_credential.is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
-                message: "Missing required 'bot_token' in configuration".into(),
+                message: "Missing required 'bot_credential' in configuration".into(),
             });
         }
 
@@ -107,7 +118,7 @@ impl DiscordConnector {
 
         self.bot_user_id = Some(user.id.clone());
         self.api_client = Some(api_client.clone());
-        self.gateway = Some(GatewayConnection::new(config.clone(), api_client));
+        self.gateway = Some(Arc::new(GatewayConnection::new(config.clone(), api_client)));
         self.config = Some(config);
         self.base.set_configured(true);
 
@@ -183,14 +194,11 @@ impl DiscordConnector {
 
     /// Handle health check.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let api_client = match &self.api_client {
-            Some(c) => c,
-            None => {
-                return Ok(json!({
-                    "status": "not_configured",
-                    "uptime_ms": self.start_time.elapsed().as_millis() as u64
-                }));
-            }
+        let Some(api_client) = &self.api_client else {
+            return Ok(json!({
+                "status": "not_configured",
+                "uptime_ms": self.start_time.elapsed().as_millis() as u64
+            }));
         };
 
         // Check if we can reach Discord
@@ -209,6 +217,204 @@ impl DiscordConnector {
         }
     }
 
+    /// Handle connector self-check.
+    pub async fn handle_self_check(&self) -> FcpResult<serde_json::Value> {
+        let Some(api_client) = &self.api_client else {
+            let report = SelfCheckReport::degraded("not_configured", "Connector is not configured");
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        };
+
+        let report = match api_client.get_current_user().await {
+            Ok(user) => {
+                let mut report = SelfCheckReport::ok();
+                report.details = Some(json!({
+                    "user_id": user.id,
+                    "username": user.username,
+                    "bot": user.bot,
+                }));
+                report
+            }
+            Err(err) => {
+                if err.is_retryable() {
+                    SelfCheckReport::degraded("self_check_retryable", err.to_string())
+                } else {
+                    SelfCheckReport::failed("self_check_failed", err.to_string())
+                }
+            }
+        };
+
+        serde_json::to_value(report).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize self-check report: {e}"),
+        })
+    }
+
+    fn send_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string", "description": "Channel ID" },
+                "content": { "type": "string", "description": "Message content" },
+                "embeds": { "type": "array", "items": { "type": "object" } },
+                "reply_to": { "type": "string", "description": "Message ID to reply to" }
+            },
+            "required": ["channel_id"]
+        })
+    }
+
+    fn send_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "channel_id": { "type": "string" },
+                "content": { "type": "string" }
+            }
+        })
+    }
+
+    fn edit_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string" },
+                "message_id": { "type": "string" },
+                "content": { "type": "string" },
+                "embeds": { "type": "array" }
+            },
+            "required": ["channel_id", "message_id"]
+        })
+    }
+
+    fn edit_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "content": { "type": "string" }
+            }
+        })
+    }
+
+    fn delete_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string" },
+                "message_id": { "type": "string" }
+            },
+            "required": ["channel_id", "message_id"]
+        })
+    }
+
+    fn delete_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "deleted": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn get_channel_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string" }
+            },
+            "required": ["channel_id"]
+        })
+    }
+
+    fn get_channel_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "type": { "type": "integer" }
+            }
+        })
+    }
+
+    fn get_guild_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "guild_id": { "type": "string", "description": "Guild/server ID" }
+            },
+            "required": ["guild_id"]
+        })
+    }
+
+    fn get_guild_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "icon": { "type": "string" },
+                "owner_id": { "type": "string" }
+            }
+        })
+    }
+
+    fn trigger_typing_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "channel_id": { "type": "string", "description": "Channel ID" }
+            },
+            "required": ["channel_id"]
+        })
+    }
+
+    fn trigger_typing_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "triggered": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn message_event_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" },
+                "channel_id": { "type": "string" },
+                "content": { "type": "string" },
+                "author": { "type": "object" }
+            }
+        })
+    }
+
+    fn input_schema_for(operation: &str) -> Option<serde_json::Value> {
+        match operation {
+            "discord.send_message" => Some(Self::send_message_input_schema()),
+            "discord.edit_message" => Some(Self::edit_message_input_schema()),
+            "discord.delete_message" => Some(Self::delete_message_input_schema()),
+            "discord.get_channel" => Some(Self::get_channel_input_schema()),
+            "discord.get_guild" => Some(Self::get_guild_input_schema()),
+            "discord.trigger_typing" => Some(Self::trigger_typing_input_schema()),
+            _ => None,
+        }
+    }
+
+    fn output_schema_for(operation: &str) -> Option<serde_json::Value> {
+        match operation {
+            "discord.send_message" => Some(Self::send_message_output_schema()),
+            "discord.edit_message" => Some(Self::edit_message_output_schema()),
+            "discord.delete_message" => Some(Self::delete_message_output_schema()),
+            "discord.get_channel" => Some(Self::get_channel_output_schema()),
+            "discord.get_guild" => Some(Self::get_guild_output_schema()),
+            "discord.trigger_typing" => Some(Self::trigger_typing_output_schema()),
+            _ => None,
+        }
+    }
+
     /// Handle introspection.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
@@ -216,24 +422,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.send_message"),
                     summary: "Send a message to a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string", "description": "Channel ID" },
-                            "content": { "type": "string", "description": "Message content" },
-                            "embeds": { "type": "array", "items": { "type": "object" } },
-                            "reply_to": { "type": "string", "description": "Message ID to reply to" }
-                        },
-                        "required": ["channel_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "channel_id": { "type": "string" },
-                            "content": { "type": "string" }
-                        }
-                    }),
+                    input_schema: Self::send_message_input_schema(),
+                    output_schema: Self::send_message_output_schema(),
                     capability: CapabilityId::from_static("discord.send"),
                     risk_level: RiskLevel::Medium,
                     description: None,
@@ -256,23 +446,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.edit_message"),
                     summary: "Edit a message in a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string" },
-                            "message_id": { "type": "string" },
-                            "content": { "type": "string" },
-                            "embeds": { "type": "array" }
-                        },
-                        "required": ["channel_id", "message_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "content": { "type": "string" }
-                        }
-                    }),
+                    input_schema: Self::edit_message_input_schema(),
+                    output_schema: Self::edit_message_output_schema(),
                     capability: CapabilityId::from_static("discord.edit"),
                     risk_level: RiskLevel::Medium,
                     description: None,
@@ -290,20 +465,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.delete_message"),
                     summary: "Delete a message from a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string" },
-                            "message_id": { "type": "string" }
-                        },
-                        "required": ["channel_id", "message_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "deleted": { "type": "boolean" }
-                        }
-                    }),
+                    input_schema: Self::delete_message_input_schema(),
+                    output_schema: Self::delete_message_output_schema(),
                     capability: CapabilityId::from_static("discord.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
@@ -321,21 +484,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.get_channel"),
                     summary: "Get information about a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string" }
-                        },
-                        "required": ["channel_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "type": { "type": "integer" }
-                        }
-                    }),
+                    input_schema: Self::get_channel_input_schema(),
+                    output_schema: Self::get_channel_output_schema(),
                     capability: CapabilityId::from_static("discord.read"),
                     risk_level: RiskLevel::Low,
                     description: None,
@@ -353,22 +503,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.get_guild"),
                     summary: "Get information about a Discord server (guild)".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "guild_id": { "type": "string", "description": "Guild/server ID" }
-                        },
-                        "required": ["guild_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string" },
-                            "name": { "type": "string" },
-                            "icon": { "type": "string" },
-                            "owner_id": { "type": "string" }
-                        }
-                    }),
+                    input_schema: Self::get_guild_input_schema(),
+                    output_schema: Self::get_guild_output_schema(),
                     capability: CapabilityId::from_static("discord.read"),
                     risk_level: RiskLevel::Low,
                     description: None,
@@ -386,19 +522,8 @@ impl DiscordConnector {
                 OperationInfo {
                     id: OperationId::from_static("discord.trigger_typing"),
                     summary: "Show typing indicator in a Discord channel".into(),
-                    input_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "channel_id": { "type": "string", "description": "Channel ID" }
-                        },
-                        "required": ["channel_id"]
-                    }),
-                    output_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "triggered": { "type": "boolean" }
-                        }
-                    }),
+                    input_schema: Self::trigger_typing_input_schema(),
+                    output_schema: Self::trigger_typing_output_schema(),
                     capability: CapabilityId::from_static("discord.send"),
                     risk_level: RiskLevel::Low,
                     description: None,
@@ -418,15 +543,7 @@ impl DiscordConnector {
             ],
             events: vec![EventInfo {
                 topic: "discord.message".into(),
-                schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "channel_id": { "type": "string" },
-                        "content": { "type": "string" },
-                        "author": { "type": "object" }
-                    }
-                }),
+                schema: Self::message_event_schema(),
                 requires_ack: false,
             }],
             resource_types: vec![],
@@ -465,6 +582,10 @@ impl DiscordConnector {
         const MAX_CONTENT_LENGTH: usize = 2000;
         const MAX_EMBEDS: usize = 10;
         const MAX_EMBED_TOTAL_CHARS: usize = 6000;
+
+        if let Some(schema) = Self::input_schema_for(operation) {
+            validate_input_with_limits(&schema, input, &Limits::default())?;
+        }
 
         match operation {
             "discord.send_message" | "discord.edit_message" => {
@@ -511,18 +632,13 @@ impl DiscordConnector {
                             let mut size = 0;
 
                             // Title
-                            size += e
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.len())
-                                .unwrap_or(0);
+                            size += e.get("title").and_then(|v| v.as_str()).map_or(0, str::len);
 
                             // Description
                             size += e
                                 .get("description")
                                 .and_then(|v| v.as_str())
-                                .map(|s| s.len())
-                                .unwrap_or(0);
+                                .map_or(0, str::len);
 
                             // Fields
                             if let Some(fields) = e.get("fields").and_then(|v| v.as_array()) {
@@ -530,13 +646,11 @@ impl DiscordConnector {
                                     size += field
                                         .get("name")
                                         .and_then(|v| v.as_str())
-                                        .map(|s| s.len())
-                                        .unwrap_or(0);
+                                        .map_or(0, str::len);
                                     size += field
                                         .get("value")
                                         .and_then(|v| v.as_str())
-                                        .map(|s| s.len())
-                                        .unwrap_or(0);
+                                        .map_or(0, str::len);
                                 }
                             }
 
@@ -545,8 +659,7 @@ impl DiscordConnector {
                                 size += footer
                                     .get("text")
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.len())
-                                    .unwrap_or(0);
+                                    .map_or(0, str::len);
                             }
 
                             // Author
@@ -554,8 +667,7 @@ impl DiscordConnector {
                                 size += author
                                     .get("name")
                                     .and_then(|v| v.as_str())
-                                    .map(|s| s.len())
-                                    .unwrap_or(0);
+                                    .map_or(0, str::len);
                             }
 
                             size
@@ -591,28 +703,28 @@ impl DiscordConnector {
         &self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let operation =
-            params
-                .get("operation")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing operation".into(),
-                })?;
+        let operation = params
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation".into(),
+            })?;
 
-        let input = params.get("input").cloned().unwrap_or(json!({}));
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
         // Early validation: Check input structure and limits before capability token
         // This prevents wasting resources on capability verification for invalid requests
         Self::validate_input_early(operation, &input)?;
 
         // Extract and verify capability token
-        let token_value = params
-            .get("capability_token")
-            .ok_or(FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing capability_token".into(),
-            })?;
+        let token_value =
+            params
+                .get("capability_token")
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
 
         let token: fcp_core::CapabilityToken = serde_json::from_value(token_value.clone())
             .map_err(|e| FcpError::InvalidRequest {
@@ -622,9 +734,13 @@ impl DiscordConnector {
 
         // Verify token
         // Extract target resources (channel_id, guild_id) from input to validate constraints.
-        let op_id = operation.parse().map_err(|_| FcpError::InvalidRequest {
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
+        })?;
+        let cap_id: CapabilityId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
         })?;
 
         let mut resource_uris = Vec::new();
@@ -636,7 +752,7 @@ impl DiscordConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &op_id, &resource_uris)?;
+            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -655,15 +771,16 @@ impl DiscordConnector {
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        const MAX_CONTENT_LENGTH: usize = 2000;
+
         // Validate input first (before checking api) for better error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = input
@@ -680,7 +797,6 @@ impl DiscordConnector {
         }
 
         // Validate message content length (Discord limit: 2000 characters)
-        const MAX_CONTENT_LENGTH: usize = 2000;
         if let Some(content) = content {
             if content.len() > MAX_CONTENT_LENGTH {
                 return Err(FcpError::InvalidRequest {
@@ -765,30 +881,36 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(message).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.send_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_edit_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
-        // Validate input first (before checking api) for better error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        const MAX_CONTENT_LENGTH: usize = 2000;
 
-        let message_id =
-            input
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing message_id".into(),
-                })?;
+        // Validate input first (before checking api) for better error messages
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
+
+        let message_id = input
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing message_id".into(),
+            })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = input
@@ -796,7 +918,6 @@ impl DiscordConnector {
             .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         // Validate message content length (Discord limit: 2000 characters)
-        const MAX_CONTENT_LENGTH: usize = 2000;
         if let Some(content) = content {
             if content.len() > MAX_CONTENT_LENGTH {
                 return Err(FcpError::InvalidRequest {
@@ -881,9 +1002,15 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(message).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.edit_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_delete_message(
@@ -891,23 +1018,21 @@ impl DiscordConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
-        let message_id =
-            input
-                .get("message_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing message_id".into(),
-                })?;
+        let message_id = input
+            .get("message_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing message_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -915,19 +1040,22 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        Ok(json!({ "deleted": true }))
+        let response = json!({ "deleted": true });
+        if let Some(schema) = Self::output_schema_for("discord.delete_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
     }
 
     async fn invoke_get_channel(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -936,21 +1064,26 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(channel).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(channel).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize channel: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.get_channel") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_get_guild(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let guild_id =
-            input
-                .get("guild_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing guild_id".into(),
-                })?;
+        let guild_id = input
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing guild_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -959,9 +1092,15 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        serde_json::to_value(guild).map_err(|e| FcpError::Internal {
+        let response = serde_json::to_value(guild).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize guild: {e}"),
-        })
+        })?;
+
+        if let Some(schema) = Self::output_schema_for("discord.get_guild") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_trigger_typing(
@@ -969,14 +1108,13 @@ impl DiscordConnector {
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         // Validate input first (before checking api) for consistent error messages
-        let channel_id =
-            input
-                .get("channel_id")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing channel_id".into(),
-                })?;
+        let channel_id = input
+            .get("channel_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing channel_id".into(),
+            })?;
 
         let api = self.require_api()?;
 
@@ -984,7 +1122,11 @@ impl DiscordConnector {
             .await
             .map_err(|e| e.to_fcp_error())?;
 
-        Ok(json!({ "triggered": true }))
+        let response = json!({ "triggered": true });
+        if let Some(schema) = Self::output_schema_for("discord.trigger_typing") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
     }
 
     /// Handle subscribe method.
@@ -1015,6 +1157,10 @@ impl DiscordConnector {
     ) -> FcpResult<serde_json::Value> {
         info!("Shutting down Discord connector");
 
+        if let Some(shutdown_tx) = self.gateway_shutdown_tx.take() {
+            let _ = shutdown_tx.send(true);
+        }
+
         if let Some(task) = self.gateway_task.take() {
             task.abort();
         }
@@ -1024,27 +1170,81 @@ impl DiscordConnector {
 
     /// Connect to the Discord gateway.
     async fn connect_gateway(&mut self) -> FcpResult<()> {
-        let gateway = self.gateway.as_mut().ok_or(FcpError::NotConfigured)?;
+        if let Some(task) = &self.gateway_task {
+            if !task.is_finished() {
+                return Ok(()); // Already connected
+            }
+        }
+        self.gateway_task = None;
+        self.gateway_shutdown_tx = None;
 
-        let mut event_rx = gateway.connect().await.map_err(|e| e.to_fcp_error())?;
+        let gateway = self.gateway.clone().ok_or(FcpError::NotConfigured)?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        self.gateway_shutdown_tx = Some(shutdown_tx.clone());
 
         let event_tx = self.event_tx.clone();
         let connector_id = self.base.id.clone();
         let instance_id = self.base.instance_id.clone();
         let base = self.base.clone();
 
+        let mut supervisor = StreamingSupervisor::new(
+            SupervisorConfig {
+                heartbeat_interval_ms: 0, // Gateway handles its own heartbeat
+                ..SupervisorConfig::default()
+            },
+            InMemoryStreamingSession::new(),
+        );
+
         let task = tokio::spawn(async move {
-            while let Some(gateway_event) = event_rx.recv().await {
-                if let Some(event) =
-                    gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
-                {
-                    base.record_event();
-                    if event_tx.send(Ok(event)).is_err() {
-                        tracing::info!("Event receiver dropped, stopping gateway event forwarding");
-                        break;
-                    }
-                }
-            }
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    |session| {
+                        let gateway = Arc::clone(&gateway);
+                        async move {
+                            let stream = gateway
+                                .connect_once()
+                                .await
+                                .map_err(|e| -> StreamingError { Box::new(e) })?;
+                            let join_handle = tokio::spawn(async move {
+                                match stream.join_handle.await {
+                                    Ok(Ok(())) => Ok(()),
+                                    Ok(Err(e)) => Err(Box::new(e) as StreamingError),
+                                    Err(e) => Err(Box::new(e) as StreamingError),
+                                }
+                            });
+                            let _ = session; // Session reserved for future use
+                            Ok(StreamingConnection {
+                                events: stream.events,
+                                join_handle,
+                            })
+                        }
+                    },
+                    |gateway_event, _session| {
+                        let event_tx = event_tx.clone();
+                        let connector_id = connector_id.clone();
+                        let instance_id = instance_id.clone();
+                        let base = base.clone();
+                        let shutdown_tx = shutdown_tx.clone();
+                        async move {
+                            if let Some(event) =
+                                gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
+                            {
+                                base.record_event();
+                                if event_tx.send(Ok(event)).is_err() {
+                                    tracing::info!(
+                                        "Event receiver dropped, stopping gateway stream"
+                                    );
+                                    let _ = shutdown_tx.send(true);
+                                }
+                            }
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+
+            tracing::info!(?outcome, "Discord gateway supervisor stopped");
         });
 
         self.gateway_task = Some(task);
@@ -1062,7 +1262,7 @@ impl Default for DiscordConnector {
     }
 }
 
-/// Convert a Discord gateway event to an FCP EventEnvelope.
+/// Convert a Discord gateway event to an FCP `EventEnvelope`.
 fn gateway_event_to_fcp(
     event: &GatewayEvent,
     connector_id: &ConnectorId,
@@ -1201,6 +1401,28 @@ fn gateway_event_to_fcp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
+    use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    fn generate_capability(
+        signing_key: &Ed25519SigningKey,
+        capability_id: &str,
+        operations: &[&str],
+    ) -> CapabilityArtifact {
+        let now = Utc::now();
+        let cose = CapabilityBuilder::new()
+            .capability_id(capability_id)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(operations)
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .sign(signing_key)
+            .unwrap();
+        CapabilityArtifact { raw: cose }
+    }
 
     #[tokio::test]
     async fn test_send_message_content_too_long() {
@@ -1227,13 +1449,12 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(
                     message.contains("character limit"),
-                    "Expected content length error, got: {}",
-                    message
+                    "Expected content length error, got: {message}"
                 );
             }
-            _ => panic!(
-                "Expected InvalidRequest error for content too long, got: {:?}",
-                err
+            _ => assert!(
+                false,
+                "Expected InvalidRequest error for content too long, got: {err:?}"
             ),
         }
     }
@@ -1256,11 +1477,9 @@ mod tests {
         // Validation happens before config check, so we get InvalidRequest
         assert!(result.is_err());
         let err = result.unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("content") || message.contains("embeds"));
-            }
-            _ => panic!("Expected InvalidRequest error, got: {:?}", err),
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("content") || message.contains("embeds"));
         }
     }
 
@@ -1308,11 +1527,96 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(
                     message.contains("Total embed character count"),
-                    "Got: {}",
-                    message
+                    "Got: {message}"
                 );
             }
-            _ => panic!("Expected InvalidRequest for embed limit, got: {:?}", err),
+            _ => assert!(
+                false,
+                "Expected InvalidRequest for embed limit, got: {err:?}"
+            ),
         }
+    }
+
+    #[tokio::test]
+    async fn test_invoke_missing_capability_token() {
+        let connector = DiscordConnector::new();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": {
+                    "channel_id": "123456789",
+                    "content": "Hello"
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::InvalidRequest { code: 1003, ref message } if message.contains("capability_token")),
+            "Expected InvalidRequest for missing capability_token, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invoke_capability_not_granted() {
+        let mut connector = DiscordConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector.verifier = Some(CapabilityVerifier::new(
+            verifying_key.to_bytes(),
+            ZoneId::work(),
+            connector.base.instance_id.clone(),
+        ));
+
+        let capability = generate_capability(
+            &signing_key,
+            "discord.get_channel",
+            &["discord.get_channel"],
+        );
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "discord.send_message",
+                "input": {
+                    "channel_id": "123456789",
+                    "content": "Hello"
+                },
+                "capability_token": capability
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, FcpError::OperationNotGranted { .. }),
+            "Expected OperationNotGranted, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_gateway_event_to_fcp_message_create() {
+        let connector_id = ConnectorId::from_static("discord");
+        let instance_id = InstanceId::new();
+        let payload = json!({
+            "id": "msg-1",
+            "content": "Hello",
+            "author": {
+                "id": "user-1",
+                "username": "alice"
+            }
+        });
+
+        let event = GatewayEvent::MessageCreate(payload.clone());
+        let envelope =
+            gateway_event_to_fcp(&event, &connector_id, &instance_id).expect("event envelope");
+
+        assert_eq!(envelope.topic, "discord.message");
+        assert_eq!(envelope.data.payload, payload);
+        assert_eq!(envelope.data.zone_id, ZoneId::community());
+        assert_eq!(envelope.data.principal.id, "user-1");
+        assert_eq!(envelope.data.principal.display.as_deref(), Some("alice"));
     }
 }

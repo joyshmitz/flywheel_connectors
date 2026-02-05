@@ -6,7 +6,20 @@
 //! - State model serialization
 //! - Archetype associations
 
+use std::sync::Arc;
+
+use fcp_cbor::SchemaId;
+use fcp_core::{ObjectHeader, Signature};
+
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_core::ObjectIdKey;
 use fcp_sdk::prelude::*;
+use semver::Version;
+
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_sdk::runtime::ObjectStoreCursorBackend;
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ConnectorStateModel Tests
@@ -116,6 +129,328 @@ fn test_state_model_serialize_crdt() {
 
     assert_eq!(json["type"], "crdt");
     assert_eq!(json["crdt_type"], "lww_map");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CursorStore Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn test_header(created_at: u64) -> ObjectHeader {
+    ObjectHeader {
+        schema: SchemaId::new("fcp.test", "ConnectorStateObject", Version::new(1, 0, 0)),
+        zone_id: ZoneId::work(),
+        created_at,
+        provenance: Provenance {
+            origin_zone: ZoneId::work(),
+            chain: Vec::new(),
+            taint: TaintLevel::Untainted,
+            elevated: false,
+            elevation_token: None,
+        },
+        refs: Vec::new(),
+        foreign_refs: Vec::new(),
+        ttl_secs: None,
+        placement: None,
+    }
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+fn object_store_header(created_at: u64, zone_id: ZoneId) -> ObjectHeader {
+    ObjectHeader {
+        schema: SchemaId::new("fcp.connector_state", "state_object", Version::new(1, 0, 0)),
+        zone_id: zone_id.clone(),
+        created_at,
+        provenance: Provenance {
+            origin_zone: zone_id,
+            chain: Vec::new(),
+            taint: TaintLevel::Untainted,
+            elevated: false,
+            elevation_token: None,
+        },
+        refs: Vec::new(),
+        foreign_refs: Vec::new(),
+        ttl_secs: None,
+        placement: None,
+    }
+}
+
+#[test]
+fn cursor_store_commit_and_load() {
+    let backend = InMemoryCursorStoreBackend::new();
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    let cursor = CursorState {
+        offset: Some(10),
+        last_seen_id: Some("id-10".to_string()),
+        watermark: Some(100),
+    };
+
+    let lease = CursorLease {
+        lease_seq: 1,
+        lease_object_id: ObjectId::from_bytes([0x11; 32]),
+    };
+
+    let object_id = store
+        .commit_cursor(
+            cursor.clone(),
+            test_header(1_700_000_000),
+            lease,
+            Signature::zero(),
+        )
+        .expect("commit should succeed");
+
+    assert_eq!(store.head(), Some(object_id));
+
+    let loaded = store
+        .load_cursor()
+        .expect("load should succeed")
+        .expect("cursor should exist");
+    assert_eq!(loaded, cursor);
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+#[test]
+fn cursor_store_object_store_roundtrip() {
+    let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+    let object_id_key = ObjectIdKey::from_bytes([0xA5; 32]);
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+
+    let backend = ObjectStoreCursorBackend::new(
+        object_store,
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    );
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    let cursor = CursorState {
+        offset: Some(42),
+        last_seen_id: Some("id-42".to_string()),
+        watermark: Some(420),
+    };
+
+    let lease = CursorLease {
+        lease_seq: 1,
+        lease_object_id: ObjectId::from_bytes([0x11; 32]),
+    };
+
+    let object_id = store
+        .commit_cursor(
+            cursor.clone(),
+            object_store_header(1_700_100_000, ZoneId::work()),
+            lease,
+            Signature::zero(),
+        )
+        .expect("commit should succeed");
+
+    assert_eq!(store.head(), Some(object_id));
+
+    let loaded = store
+        .load_cursor()
+        .expect("load should succeed")
+        .expect("cursor should exist");
+    assert_eq!(loaded, cursor);
+}
+
+#[test]
+fn cursor_store_rejects_offset_regression() {
+    let backend = InMemoryCursorStoreBackend::new();
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    let lease = CursorLease {
+        lease_seq: 1,
+        lease_object_id: ObjectId::from_bytes([0x22; 32]),
+    };
+
+    let cursor = CursorState {
+        offset: Some(10),
+        last_seen_id: Some("id-10".to_string()),
+        watermark: Some(100),
+    };
+
+    store
+        .commit_cursor(cursor, test_header(1_700_000_001), lease, Signature::zero())
+        .expect("initial commit should succeed");
+
+    let regressed = CursorState {
+        offset: Some(9),
+        last_seen_id: Some("id-9".to_string()),
+        watermark: Some(100),
+    };
+
+    let err = store
+        .commit_cursor(
+            regressed,
+            test_header(1_700_000_002),
+            CursorLease {
+                lease_seq: 2,
+                lease_object_id: ObjectId::from_bytes([0x23; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect_err("offset regression should be rejected");
+
+    assert!(matches!(err, CursorStoreError::OffsetRegression { .. }));
+}
+
+#[test]
+fn cursor_store_rejects_stale_lease_seq() {
+    let backend = InMemoryCursorStoreBackend::new();
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    store
+        .commit_cursor(
+            CursorState {
+                offset: Some(1),
+                last_seen_id: None,
+                watermark: None,
+            },
+            test_header(1_700_000_010),
+            CursorLease {
+                lease_seq: 5,
+                lease_object_id: ObjectId::from_bytes([0x33; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("initial commit should succeed");
+
+    let err = store
+        .commit_cursor(
+            CursorState {
+                offset: Some(2),
+                last_seen_id: None,
+                watermark: None,
+            },
+            test_header(1_700_000_011),
+            CursorLease {
+                lease_seq: 4,
+                lease_object_id: ObjectId::from_bytes([0x34; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect_err("stale lease_seq should be rejected");
+
+    assert!(matches!(err, CursorStoreError::StaleLeaseSeq { .. }));
+}
+
+#[test]
+fn cursor_store_rejects_watermark_regression() {
+    let backend = InMemoryCursorStoreBackend::new();
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store = CursorStore::new(backend, connector_id, zone_id);
+
+    store
+        .commit_cursor(
+            CursorState {
+                offset: Some(10),
+                last_seen_id: None,
+                watermark: Some(200),
+            },
+            test_header(1_700_000_020),
+            CursorLease {
+                lease_seq: 1,
+                lease_object_id: ObjectId::from_bytes([0x35; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("initial commit should succeed");
+
+    let err = store
+        .commit_cursor(
+            CursorState {
+                offset: Some(11),
+                last_seen_id: None,
+                watermark: Some(100),
+            },
+            test_header(1_700_000_021),
+            CursorLease {
+                lease_seq: 2,
+                lease_object_id: ObjectId::from_bytes([0x36; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect_err("watermark regression should be rejected");
+
+    assert!(matches!(err, CursorStoreError::WatermarkRegression { .. }));
+}
+
+#[test]
+fn cursor_store_failover_rejects_stale_writer() {
+    let backend = Arc::new(InMemoryCursorStoreBackend::new());
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let mut store_a = CursorStore::new(Arc::clone(&backend), connector_id.clone(), zone_id.clone());
+    let mut store_b = CursorStore::new(Arc::clone(&backend), connector_id, zone_id);
+
+    store_a
+        .commit_cursor(
+            CursorState {
+                offset: Some(1),
+                last_seen_id: None,
+                watermark: Some(10),
+            },
+            test_header(1_700_000_030),
+            CursorLease {
+                lease_seq: 1,
+                lease_object_id: ObjectId::from_bytes([0x41; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("first writer commit should succeed");
+
+    let loaded = store_b
+        .load_cursor()
+        .expect("second writer should load cursor")
+        .expect("cursor should be present");
+    assert_eq!(loaded.offset, Some(1));
+
+    store_b
+        .commit_cursor(
+            CursorState {
+                offset: Some(2),
+                last_seen_id: None,
+                watermark: Some(20),
+            },
+            test_header(1_700_000_031),
+            CursorLease {
+                lease_seq: 2,
+                lease_object_id: ObjectId::from_bytes([0x42; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect("second writer commit should succeed");
+
+    let refreshed = store_a
+        .load_cursor()
+        .expect("first writer reload should succeed")
+        .expect("cursor should be present");
+    assert_eq!(refreshed.offset, Some(2));
+
+    let err = store_a
+        .commit_cursor(
+            CursorState {
+                offset: Some(3),
+                last_seen_id: None,
+                watermark: Some(30),
+            },
+            test_header(1_700_000_032),
+            CursorLease {
+                lease_seq: 1,
+                lease_object_id: ObjectId::from_bytes([0x43; 32]),
+            },
+            Signature::zero(),
+        )
+        .expect_err("stale lease after failover should be rejected");
+
+    assert!(matches!(err, CursorStoreError::StaleLeaseSeq { .. }));
 }
 
 #[test]

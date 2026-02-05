@@ -22,14 +22,27 @@
 //! ```
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use fcp_sdk::runtime::{
-    InMemoryPollingCursor, InMemoryStreamingSession, PollResult, PollingCursor, PollingSupervisor,
-    PollingSupervisorStats, StreamingSession, SupervisorConfig, SupervisorOutcome,
+use fcp_cbor::SchemaId;
+use fcp_core::{
+    ConnectorId, ConnectorStateSnapshot, CursorState, ObjectHeader, ObjectId, Provenance,
+    Signature, TaintLevel, ZoneId,
 };
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_sdk::runtime::ObjectStoreCursorBackend;
+use fcp_sdk::runtime::{
+    CursorLease, CursorStore, CursorStoreError, InMemoryCursorStoreBackend, InMemoryPollingCursor,
+    InMemoryStreamingSession, PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats,
+    StreamingSession, SupervisorConfig, SupervisorOutcome,
+};
+use semver::Version;
 use tokio::sync::watch;
 
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_core::ObjectIdKey;
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_store::MemoryObjectStore;
 // ─────────────────────────────────────────────────────────────────────────────
 // Fake Polling API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,6 +334,231 @@ impl FakePollingConnector {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CursorStore Polling Example
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A polling connector example that persists cursor state via `CursorStore`.
+///
+/// Demonstrates lease acquisition (`CursorLease`), cursor load, commit, and snapshot creation.
+pub struct FakeCursorStoreConnector {
+    api: Arc<FakePollingApi>,
+    backend: Arc<InMemoryCursorStoreBackend>,
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    processed_updates: Arc<AtomicU64>,
+}
+
+impl FakeCursorStoreConnector {
+    /// Create a new connector using an in-memory cursor store backend.
+    #[must_use]
+    pub fn new(api: FakePollingApi) -> Self {
+        Self {
+            api: Arc::new(api),
+            backend: Arc::new(InMemoryCursorStoreBackend::new()),
+            connector_id: ConnectorId::from_static("fake:operational:1.0"),
+            zone_id: ZoneId::work(),
+            processed_updates: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Return a handle to the backend (for reuse across restarts).
+    #[must_use]
+    pub fn backend(&self) -> Arc<InMemoryCursorStoreBackend> {
+        Arc::clone(&self.backend)
+    }
+
+    /// Execute a single poll + commit cycle using `CursorStore`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cursor store cannot load or commit the cursor state.
+    ///
+    /// Returns the committed cursor state.
+    pub fn run_once(
+        &self,
+        backend: Arc<InMemoryCursorStoreBackend>,
+        lease: CursorLease,
+        created_at: u64,
+    ) -> Result<CursorState, CursorStoreError> {
+        let mut store = CursorStore::new(backend, self.connector_id.clone(), self.zone_id.clone());
+        let previous = store.load_cursor()?;
+        let offset = previous.as_ref().and_then(|cursor| cursor.offset);
+
+        let result = self.api.poll(offset);
+        let updates = match result {
+            PollResult::Success(items) => items,
+            _ => Vec::new(),
+        };
+
+        let mut cursor = offset.map_or_else(InMemoryPollingCursor::new, |offset| {
+            InMemoryPollingCursor::with_offset(offset)
+        });
+
+        let mut last_seen = None;
+        for update in updates {
+            cursor.advance_if_newer(update.id);
+            last_seen = Some(update.id.to_string());
+            self.processed_updates.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let cursor_state = CursorState {
+            offset: cursor.offset(),
+            last_seen_id: last_seen,
+            watermark: Some(created_at),
+        };
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "ConnectorStateObject", Version::new(1, 0, 0)),
+            zone_id: self.zone_id.clone(),
+            created_at,
+            provenance: Provenance {
+                origin_zone: self.zone_id.clone(),
+                chain: Vec::new(),
+                taint: TaintLevel::Untainted,
+                elevated: false,
+                elevation_token: None,
+            },
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let head = store.commit_cursor(cursor_state.clone(), header, lease, Signature::zero())?;
+        let _snapshot = Self::build_snapshot(
+            head,
+            &cursor_state,
+            self.connector_id.clone(),
+            self.zone_id.clone(),
+            created_at,
+        );
+
+        Ok(cursor_state)
+    }
+
+    /// Execute a single poll + commit cycle using an `ObjectStoreCursorBackend`.
+    ///
+    /// Demonstrates mesh-persistent cursor storage via `ObjectStore`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cursor store cannot load or commit the cursor state.
+    #[cfg(feature = "cursor-store-object-store")]
+    pub fn run_once_object_store(
+        &self,
+        object_store: Arc<MemoryObjectStore>,
+        object_id_key: ObjectIdKey,
+        lease: CursorLease,
+        created_at: u64,
+    ) -> Result<CursorState, CursorStoreError> {
+        let backend = ObjectStoreCursorBackend::new(
+            object_store,
+            object_id_key,
+            self.connector_id.clone(),
+            self.zone_id.clone(),
+        );
+        let mut store = CursorStore::new(backend, self.connector_id.clone(), self.zone_id.clone());
+        let previous = store.load_cursor()?;
+        let offset = previous.as_ref().and_then(|cursor| cursor.offset);
+
+        let result = self.api.poll(offset);
+        let updates = match result {
+            PollResult::Success(items) => items,
+            _ => Vec::new(),
+        };
+
+        let mut cursor = offset.map_or_else(InMemoryPollingCursor::new, |offset| {
+            InMemoryPollingCursor::with_offset(offset)
+        });
+
+        let mut last_seen = None;
+        for update in updates {
+            cursor.advance_if_newer(update.id);
+            last_seen = Some(update.id.to_string());
+            self.processed_updates.fetch_add(1, Ordering::SeqCst);
+        }
+
+        let cursor_state = CursorState {
+            offset: cursor.offset(),
+            last_seen_id: last_seen,
+            watermark: Some(created_at),
+        };
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.connector_state", "state_object", Version::new(1, 0, 0)),
+            zone_id: self.zone_id.clone(),
+            created_at,
+            provenance: Provenance {
+                origin_zone: self.zone_id.clone(),
+                chain: Vec::new(),
+                taint: TaintLevel::Untainted,
+                elevated: false,
+                elevation_token: None,
+            },
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let head = store.commit_cursor(cursor_state.clone(), header, lease, Signature::zero())?;
+        let _snapshot = Self::build_snapshot(
+            head,
+            &cursor_state,
+            self.connector_id.clone(),
+            self.zone_id.clone(),
+            created_at,
+        );
+
+        Ok(cursor_state)
+    }
+
+    /// Build a snapshot object from cursor state (example only).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cursor state cannot be encoded to canonical CBOR.
+    #[must_use]
+    pub fn build_snapshot(
+        covers_head: ObjectId,
+        cursor_state: &CursorState,
+        connector_id: ConnectorId,
+        zone_id: ZoneId,
+        snapshotted_at: u64,
+    ) -> ConnectorStateSnapshot {
+        let state_cbor = cursor_state.to_cbor().expect("cursor state should encode");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.test", "ConnectorStateSnapshot", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: snapshotted_at,
+            provenance: Provenance {
+                origin_zone: zone_id.clone(),
+                chain: Vec::new(),
+                taint: TaintLevel::Untainted,
+                elevated: false,
+                elevation_token: None,
+            },
+            refs: vec![covers_head],
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+
+        ConnectorStateSnapshot {
+            header,
+            connector_id,
+            instance_id: None,
+            zone_id,
+            covers_head,
+            covers_seq: 0,
+            state_cbor,
+            snapshotted_at,
+            signature: Signature::zero(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Fake Streaming Session
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -364,10 +602,10 @@ pub struct FakeStreamingSession {
     inner: InMemoryStreamingSession,
     /// Events received in this session.
     pub events: Vec<FakeStreamEvent>,
-    /// Whether persist was called.
-    pub persist_called: bool,
+    /// Whether persist was called (uses interior mutability for `&self`).
+    persist_called: AtomicBool,
     /// Whether restore was called.
-    pub restore_called: bool,
+    restore_called: bool,
 }
 
 impl FakeStreamingSession {
@@ -377,7 +615,7 @@ impl FakeStreamingSession {
         Self {
             inner: InMemoryStreamingSession::new(),
             events: Vec::new(),
-            persist_called: false,
+            persist_called: AtomicBool::new(false),
             restore_called: false,
         }
     }
@@ -392,6 +630,18 @@ impl FakeStreamingSession {
     #[must_use]
     pub fn event_count(&self) -> usize {
         self.events.len()
+    }
+
+    /// Check if persist was called.
+    #[must_use]
+    pub fn persist_called(&self) -> bool {
+        self.persist_called.load(Ordering::Relaxed)
+    }
+
+    /// Check if restore was called.
+    #[must_use]
+    pub const fn restore_called(&self) -> bool {
+        self.restore_called
     }
 }
 
@@ -438,13 +688,21 @@ impl StreamingSession for FakeStreamingSession {
         self.inner.last_heartbeat_ack()
     }
 
+    fn heartbeat_seq(&self) -> u64 {
+        self.inner.heartbeat_seq()
+    }
+
+    fn ack_seq(&self) -> u64 {
+        self.inner.ack_seq()
+    }
+
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // In a real connector, this would write to disk/database
+        self.persist_called.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // In a real connector, this would read from disk/database
+        self.restore_called = true;
         Ok(())
     }
 }
@@ -522,7 +780,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Run briefly then shutdown
-        let handle = tokio::spawn({ async move { connector.run(shutdown_rx).await } });
+        let handle = tokio::spawn(async move { connector.run(shutdown_rx).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         shutdown_tx.send(true).unwrap();
@@ -561,6 +819,39 @@ mod tests {
     }
 
     #[test]
+    fn fake_cursor_store_connector_restart() {
+        let api = FakePollingApi::always_success(2);
+        let connector = FakeCursorStoreConnector::new(api);
+        let backend = connector.backend();
+
+        let first = connector
+            .run_once(
+                Arc::clone(&backend),
+                CursorLease {
+                    lease_seq: 1,
+                    lease_object_id: ObjectId::from_bytes([0x11; 32]),
+                },
+                1_700_000_000,
+            )
+            .expect("first run should succeed");
+
+        assert_eq!(first.offset, Some(3));
+
+        let second = connector
+            .run_once(
+                Arc::clone(&backend),
+                CursorLease {
+                    lease_seq: 2,
+                    lease_object_id: ObjectId::from_bytes([0x12; 32]),
+                },
+                1_700_000_010,
+            )
+            .expect("second run should succeed");
+
+        assert!(second.offset.unwrap_or(0) > first.offset.unwrap_or(0));
+    }
+
+    #[test]
     fn fake_streaming_session_basics() {
         let mut session = FakeStreamingSession::new();
 
@@ -580,5 +871,22 @@ mod tests {
 
         session.clear_resume_token();
         assert!(session.resume_token().is_none());
+    }
+
+    #[test]
+    fn fake_streaming_session_persist_restore_tracking() {
+        let mut session = FakeStreamingSession::new();
+
+        // Initially both flags are false
+        assert!(!session.persist_called());
+        assert!(!session.restore_called());
+
+        // Call persist() and verify flag is set
+        session.persist().unwrap();
+        assert!(session.persist_called());
+
+        // Call restore() and verify flag is set
+        session.restore().unwrap();
+        assert!(session.restore_called());
     }
 }

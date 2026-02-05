@@ -13,19 +13,27 @@
 #![allow(clippy::redundant_clone)]
 #![allow(clippy::unreadable_literal)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
-use fcp_core::{ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId};
+use chrono::{SecondsFormat, Utc};
+use fcp_core::{
+    ConnectorId, DecisionReasonCode, EpochId, ObjectId, TailscaleNodeId, ZoneId,
+    ZoneTransportPolicy,
+};
 use fcp_mesh::admission::{AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget};
 use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, GpuProfile, GpuVendor, InstalledConnector,
     LatencyClass, PowerSource,
 };
-use fcp_mesh::gossip::{GossipConfig, GossipState};
+use fcp_mesh::gossip::{GossipConfig, GossipRequest, GossipState, MeshGossip};
 use fcp_mesh::planner::{
     ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
 };
+use fcp_mesh::transport::{TransportPath, TransportPathKind, TransportSelector};
 use fcp_tailscale::NodeId;
+use fcp_testkit::LogCapture;
 
 // ============================================================================
 // Test Utilities
@@ -34,12 +42,28 @@ use fcp_tailscale::NodeId;
 /// Structured test event for JSON logging.
 #[derive(Debug, serde::Serialize)]
 struct TestEvent {
+    timestamp: String,
+    log_version: &'static str,
+    level: &'static str,
+    module: &'static str,
+    phase: &'static str,
+    correlation_id: String,
     test_name: &'static str,
-    category: &'static str,
-    status: &'static str,
-    details: serde_json::Value,
+    result: &'static str,
+    duration_ms: u64,
+    assertions: TestAssertions,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    context: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TestAssertions {
+    passed: u32,
+    failed: u32,
 }
 
 // ============================================================================
@@ -52,6 +76,8 @@ mod meshnode {
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
     use fcp_core::{ObjectHeader, Provenance, ZoneKeyId};
+    use fcp_mesh::admission::AdmissionError;
+    use fcp_mesh::admission::ObjectAdmissionClass;
     use fcp_mesh::{
         ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig, MeshSession,
         RetentionClass, SymbolRequestError,
@@ -66,7 +92,7 @@ mod meshnode {
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
         ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
-        StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
+        QuarantinedObject, StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
     };
     use raptorq::ObjectTransmissionInformation;
     use semver::Version;
@@ -116,6 +142,7 @@ mod meshnode {
 
     async fn seed_symbols(store: &Arc<dyn SymbolStore>, meta: &ObjectSymbolMeta, source_node: u64) {
         store.put_object_meta(meta.clone()).await.unwrap();
+        let symbol_size = meta.oti.symbol_size as usize;
 
         for esi in 0..meta.source_symbols {
             let esi_byte = u8::try_from(esi).expect("esi fits in u8");
@@ -127,7 +154,7 @@ mod meshnode {
                     source_node: Some(source_node),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             store.put_symbol(symbol).await.unwrap();
         }
@@ -165,8 +192,8 @@ mod meshnode {
             first_symbol_at: 0,
         };
 
+        let symbol_size = meta.oti.symbol_size as usize;
         symbol_store.put_object_meta(meta).await.unwrap();
-
         for esi in 0..4u32 {
             let esi_byte = u8::try_from(esi).expect("esi fits in u8");
             let symbol = StoredSymbol {
@@ -177,7 +204,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -203,6 +230,583 @@ mod meshnode {
     }
 
     #[tokio::test]
+    async fn meshnode_symbol_request_missing_object() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-missing-object");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store);
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect_err("missing object should return error");
+
+        assert!(matches!(err, SymbolRequestError::ObjectNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_no_symbols() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-no-symbols");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect_err("missing symbols should return error");
+
+        assert!(matches!(err, SymbolRequestError::ObjectNotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_no_resend() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-no-resend");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let response = node
+            .handle_symbol_request(request.clone(), &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("initial symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 2);
+        let mut first: HashSet<u32> = response.symbol_esis.into_iter().collect();
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("follow-up symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 2);
+        assert!(response.symbol_esis.iter().all(|esi| !first.contains(esi)));
+
+        first.extend(response.symbol_esis);
+        assert_eq!(first.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_prioritizes_missing_hint() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-missing-hint");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        )
+        .with_missing_hint(vec![3, 1]);
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert_eq!(response.symbol_esis, vec![3, 1]);
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_fills_after_missing_hint() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-hint-fill");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            3,
+            1,
+        )
+        .with_missing_hint(vec![2]);
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 3);
+        assert_eq!(response.symbol_esis[0], 2);
+        assert!(response.symbol_esis.iter().all(|esi| *esi < 4));
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_ignores_unavailable_hints() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-hint-unavailable");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        )
+        .with_missing_hint(vec![9, 10]);
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 2);
+        assert!(response.symbol_esis.iter().all(|esi| *esi < 4));
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_rejects_oversized_hint() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-hint-oversized");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        )
+        .with_missing_hint(vec![0, 1, 2]);
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect_err("oversized missing hint should be rejected");
+
+        assert!(matches!(err, SymbolRequestError::InvalidRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_reports_bounded_response() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-bounded-response");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 2);
+        assert!(response.was_bounded);
+        assert!(!response.is_final);
+    }
+
+    #[tokio::test]
+    async fn meshnode_symbol_request_is_final_when_all_sent() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-final-response");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+
+        let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 4,
+            first_symbol_at: 0,
+        };
+
+        symbol_store.put_object_meta(meta).await.unwrap();
+
+        for esi in 0..4u32 {
+            let esi_byte = u8::try_from(esi).expect("esi fits in u8");
+            let symbol = StoredSymbol {
+                meta: SymbolMeta {
+                    object_id,
+                    esi,
+                    zone_id: zone_id.clone(),
+                    source_node: Some(1),
+                    stored_at: 0,
+                },
+                data: Bytes::from(vec![esi_byte; symbol_size]),
+            };
+            symbol_store.put_symbol(symbol).await.unwrap();
+        }
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            4,
+            1,
+        );
+
+        let response = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect("symbol request should succeed");
+
+        assert_eq!(response.symbol_esis.len(), 4);
+        assert!(!response.was_bounded);
+        assert!(response.is_final);
+    }
+
+    #[tokio::test]
+    async fn meshnode_quarantined_object_not_gossiped() {
+        let zone_id = ZoneId::work();
+        let object_id = test_object_id("meshnode-quarantine-gossip");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1");
+        let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store.clone());
+
+        quarantine_store
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -10,
+            })
+            .expect("quarantine");
+
+        let added =
+            node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
+
+        assert!(!added);
+        assert!(!node.gossip_mut().has_object(&zone_id, &object_id));
+    }
+
+    #[tokio::test]
+    async fn meshnode_quarantined_symbol_request_rejected() {
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([1u8; 8]);
+        let object_id = test_object_id("meshnode-quarantine-request");
+
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+        let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+        let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
+
+        let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
+        let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store.clone());
+
+        quarantine_store
+            .quarantine(QuarantinedObject {
+                object_id,
+                zone_id: zone_id.clone(),
+                data: Bytes::from_static(b"quarantined"),
+                source_peer: None,
+                received_at: 0,
+                peer_reputation: -10,
+            })
+            .expect("quarantine");
+
+        let request = SymbolRequest::new(
+            test_header(&zone_id),
+            object_id,
+            zone_id,
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = node
+            .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            .await
+            .expect_err("quarantined request should fail");
+
+        assert!(matches!(
+            err,
+            SymbolRequestError::AdmissionRejected(AdmissionError::ObjectQuarantined { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn meshnode_decode_status_stops_transfer() {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([2u8; 8]);
@@ -220,6 +824,7 @@ mod meshnode {
         );
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -239,7 +844,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -272,7 +877,7 @@ mod meshnode {
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
 
-        node.handle_decode_status(&status);
+        node.handle_decode_status(&status, 0);
 
         let err = node
             .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
@@ -300,6 +905,7 @@ mod meshnode {
         );
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
+        let symbol_size = oti.symbol_size() as usize;
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
@@ -319,7 +925,7 @@ mod meshnode {
                     source_node: Some(1),
                     stored_at: 0,
                 },
-                data: Bytes::from(vec![esi_byte; 16]),
+                data: Bytes::from(vec![esi_byte; symbol_size]),
             };
             symbol_store.put_symbol(symbol).await.unwrap();
         }
@@ -349,7 +955,7 @@ mod meshnode {
             4,
         );
 
-        node.handle_symbol_ack(&ack);
+        node.handle_symbol_ack(&ack, 0);
 
         let err = node
             .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
@@ -546,7 +1152,7 @@ mod meshnode {
                 zone_id.clone(),
                 zone_key_id,
                 1,
-                2,
+                meta.source_symbols,
                 1,
             )
             .with_missing_hint(missing.clone());
@@ -727,42 +1333,252 @@ mod meshnode {
     }
 }
 
-impl TestEvent {
-    fn emit(&self) {
-        println!("{}", serde_json::to_string(self).unwrap());
+// ============================================================================
+// TRANSPORT SELECTION INTEGRATION TESTS
+// ============================================================================
+
+mod transport_selection {
+    use super::*;
+
+    #[test]
+    fn transport_policy_enforced_in_ranking() {
+        const TEST_NAME: &str = "transport_policy_enforced_in_ranking";
+        const CATEGORY: &str = "routing";
+
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: false,
+            allow_funnel: false,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-1"),
+                "direct",
+                None,
+            ),
+            TransportPath::new(TransportPathKind::Mesh, NodeId::new("peer-2"), "mesh", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("peer-3"), "derp", None),
+            TransportPath::new(
+                TransportPathKind::Funnel,
+                NodeId::new("peer-4"),
+                "funnel",
+                None,
+            ),
+        ];
+
+        let ranked = TransportSelector::rank_paths(&paths, &policy);
+        assert_eq!(ranked[0].path.kind, TransportPathKind::Direct);
+        assert!(
+            ranked
+                .iter()
+                .take(2)
+                .all(|entry| entry.eligible && entry.reason.is_none())
+        );
+
+        let derp = ranked
+            .iter()
+            .find(|entry| entry.path.kind == TransportPathKind::Derp)
+            .expect("derp entry missing");
+        assert_eq!(
+            derp.reason,
+            Some(DecisionReasonCode::TransportDerpForbidden)
+        );
+
+        let funnel = ranked
+            .iter()
+            .find(|entry| entry.path.kind == TransportPathKind::Funnel)
+            .expect("funnel entry missing");
+        assert_eq!(
+            funnel.reason,
+            Some(DecisionReasonCode::TransportFunnelForbidden)
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "eligible_count": ranked.iter().filter(|entry| entry.eligible).count(),
+                "blocked": {
+                    "derp": derp.reason.is_some(),
+                    "funnel": funnel.reason.is_some()
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn transport_multipath_is_deterministic() {
+        const TEST_NAME: &str = "transport_multipath_is_deterministic";
+        const CATEGORY: &str = "routing";
+
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let policy = ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        };
+
+        let paths = vec![
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-1"),
+                "direct-a",
+                None,
+            ),
+            TransportPath::new(
+                TransportPathKind::Direct,
+                NodeId::new("peer-2"),
+                "direct-b",
+                None,
+            ),
+            TransportPath::new(TransportPathKind::Mesh, NodeId::new("peer-3"), "mesh", None),
+            TransportPath::new(TransportPathKind::Derp, NodeId::new("peer-4"), "derp", None),
+        ];
+
+        let object_id = test_object_id("transport-multipath");
+        let selection_a = TransportSelector::select_multipath(&paths, &policy, &object_id, 3, 2);
+        let selection_b = TransportSelector::select_multipath(&paths, &policy, &object_id, 3, 2);
+
+        assert_eq!(selection_a, selection_b);
+        assert!(
+            selection_a
+                .iter()
+                .all(|path| path.kind == TransportPathKind::Direct)
+        );
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "selected": selection_a.len(),
+                "kinds": selection_a.iter().map(|path| format!("{:?}", path.kind)).collect::<Vec<_>>(),
+            }),
+        );
     }
 }
 
+impl TestEvent {
+    fn emit(&self) {
+        let value = serde_json::to_value(self).expect("serialize test event");
+        println!("{}", serde_json::to_string(&value).unwrap());
+
+        let capture = log_capture();
+        if let Err(err) = capture.push_value(&value) {
+            panic!("failed to push log event: {err}");
+        }
+        if !std::thread::panicking() {
+            capture.assert_valid();
+        }
+    }
+}
+
+fn test_correlation_id(test_name: &str, category: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(test_name.as_bytes());
+    hasher.update(category.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn log_capture() -> &'static LogCapture {
+    static CAPTURE: OnceLock<LogCapture> = OnceLock::new();
+    CAPTURE.get_or_init(LogCapture::new)
+}
+
+fn test_start_times() -> &'static Mutex<HashMap<String, Instant>> {
+    static STARTS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    STARTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn start_timer(correlation_id: &str) {
+    let mut starts = test_start_times()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    starts.insert(correlation_id.to_string(), Instant::now());
+}
+
+fn finish_timer(correlation_id: &str) -> u64 {
+    let mut starts = test_start_times()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    starts.remove(correlation_id).map_or(0, |start| {
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    })
+}
+
 fn emit_test_start(test_name: &'static str, category: &'static str) {
+    let correlation_id = test_correlation_id(test_name, category);
+    start_timer(&correlation_id);
     TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
+        module: "fcp-mesh",
+        phase: "start",
+        correlation_id,
         test_name,
-        category,
-        status: "started",
-        details: serde_json::json!({}),
-        error: None,
+        result: "pass",
+        duration_ms: 0,
+        assertions: TestAssertions {
+            passed: 0,
+            failed: 0,
+        },
+        context: Some(serde_json::json!({ "category": category, "status": "started" })),
+        details: Some(serde_json::json!({})),
+        error_code: None,
     }
     .emit();
 }
 
 fn emit_test_pass(test_name: &'static str, category: &'static str, details: serde_json::Value) {
+    let correlation_id = test_correlation_id(test_name, category);
+    let duration_ms = finish_timer(&correlation_id);
     TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
+        module: "fcp-mesh",
+        phase: "complete",
+        correlation_id,
         test_name,
-        category,
-        status: "passed",
-        details,
-        error: None,
+        result: "pass",
+        duration_ms,
+        assertions: TestAssertions {
+            passed: 1,
+            failed: 0,
+        },
+        context: Some(serde_json::json!({ "category": category, "status": "passed" })),
+        details: Some(details),
+        error_code: None,
     }
     .emit();
 }
 
 #[allow(dead_code)]
 fn emit_test_fail(test_name: &'static str, category: &'static str, error: &str) {
+    let correlation_id = test_correlation_id(test_name, category);
+    let duration_ms = finish_timer(&correlation_id);
     TestEvent {
+        timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        log_version: "v2",
+        level: "info",
+        module: "fcp-mesh",
+        phase: "complete",
+        correlation_id,
         test_name,
-        category,
-        status: "failed",
-        details: serde_json::json!({}),
-        error: Some(error.to_string()),
+        result: "fail",
+        duration_ms,
+        assertions: TestAssertions {
+            passed: 0,
+            failed: 1,
+        },
+        context: Some(serde_json::json!({ "category": category, "status": "failed" })),
+        details: Some(serde_json::json!({})),
+        error_code: Some(error.to_string()),
     }
     .emit();
 }
@@ -1657,6 +2473,7 @@ mod policy_enforcement {
 
 mod gossip_integration {
     use super::*;
+    use fcp_mesh::admission::ObjectAdmissionClass;
 
     /// Test: Object availability announcement.
     #[test]
@@ -1874,6 +2691,79 @@ mod gossip_integration {
                 "total_objects": 20,
                 "limited_list_count": 5,
                 "full_list_count": 20,
+            }),
+        );
+    }
+
+    /// Test: `MeshGossip` `create_request` respects config bounds.
+    #[test]
+    fn test_gossip_create_request_respects_config_bounds() {
+        const TEST_NAME: &str = "gossip_create_request_config_bounds";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let config = GossipConfig {
+            max_objects_per_request: 1,
+            max_symbols_per_request: 1,
+            ..GossipConfig::default()
+        };
+        let gossip = MeshGossip::new(TailscaleNodeId::new("node-0"), config);
+
+        let object_ids = vec![test_object_id("obj-a"), test_object_id("obj-b")];
+        let request = gossip.create_request(&zone_id, object_ids, 1000);
+
+        assert_eq!(request.object_ids.len(), 1);
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "requested_objects": 2,
+                "bounded_objects": request.object_ids.len(),
+            }),
+        );
+    }
+
+    /// Test: `MeshGossip` drops over-config requests.
+    #[test]
+    fn test_gossip_request_rejects_over_config_bounds() {
+        const TEST_NAME: &str = "gossip_request_rejects_over_config_bounds";
+        const CATEGORY: &str = "gossip";
+        emit_test_start(TEST_NAME, CATEGORY);
+
+        let zone_id = ZoneId::work();
+        let config = GossipConfig {
+            max_objects_per_request: 1,
+            max_symbols_per_request: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-0"), config);
+
+        let object_ids = vec![test_object_id("obj-1"), test_object_id("obj-2")];
+        for object_id in &object_ids {
+            gossip.announce_object(&zone_id, object_id, ObjectAdmissionClass::Admitted, 1000);
+        }
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            zone_id.clone(),
+            object_ids,
+            1000,
+        );
+        let response = gossip.handle_request(&request);
+
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
+
+        emit_test_pass(
+            TEST_NAME,
+            CATEGORY,
+            serde_json::json!({
+                "zone": zone_id.as_str(),
+                "response_objects": response.have_objects.len(),
+                "response_symbols": response.have_symbols.len(),
             }),
         );
     }

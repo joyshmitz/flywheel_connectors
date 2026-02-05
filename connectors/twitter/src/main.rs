@@ -4,6 +4,7 @@
 //! Uses Twitter API v2 for tweets, users, and streaming.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 use std::io::{BufRead, Write};
 
@@ -80,7 +81,7 @@ async fn handle_message(connector: &mut TwitterConnector, message: &str) -> serd
     let params = request
         .get("params")
         .cloned()
-        .unwrap_or(serde_json::json!({}));
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let result = match method {
         "configure" => connector.handle_configure(params).await,

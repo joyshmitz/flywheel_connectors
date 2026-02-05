@@ -77,6 +77,7 @@ pub struct GraphqlRequest<V> {
 impl<V> GraphqlRequest<V> {
     /// Create a new request.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn new(query: GraphqlQuery, variables: V) -> Self {
         Self {
             query,
@@ -108,6 +109,7 @@ pub struct GraphqlBatchItem<V> {
 impl<V> GraphqlBatchItem<V> {
     /// Create a batch item.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn new(query: GraphqlQuery, variables: V) -> Self {
         Self {
             query,

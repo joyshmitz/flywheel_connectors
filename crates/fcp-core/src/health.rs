@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::FcpError;
+
 /// Health snapshot for a connector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthSnapshot {
@@ -24,6 +26,96 @@ pub struct HealthSnapshot {
     /// Rate limit status
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitStatus>,
+}
+
+/// Result of a connector self-check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfCheckReport {
+    /// Overall self-check status.
+    pub status: SelfCheckStatus,
+
+    /// Stable reason code for degraded/failed states.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+
+    /// Human-readable message for operators.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+
+    /// Optional structured details from the connector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+impl SelfCheckReport {
+    /// Self-check completed successfully.
+    #[must_use]
+    pub const fn ok() -> Self {
+        Self {
+            status: SelfCheckStatus::Ok,
+            reason_code: None,
+            message: None,
+            details: None,
+        }
+    }
+
+    /// Self-check completed but with degraded status.
+    #[must_use]
+    pub fn degraded(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: SelfCheckStatus::Degraded,
+            reason_code: Some(reason_code.into()),
+            message: Some(message.into()),
+            details: None,
+        }
+    }
+
+    /// Self-check failed.
+    #[must_use]
+    pub fn failed(reason_code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: SelfCheckStatus::Failed,
+            reason_code: Some(reason_code.into()),
+            message: Some(message.into()),
+            details: None,
+        }
+    }
+
+    /// Self-check is not supported by the connector.
+    #[must_use]
+    pub fn unsupported() -> Self {
+        Self {
+            status: SelfCheckStatus::Unsupported,
+            reason_code: Some("self_check_unsupported".to_string()),
+            message: Some("connector does not implement self-check".to_string()),
+            details: None,
+        }
+    }
+
+    /// Create a failed report from an `FcpError`.
+    #[must_use]
+    pub fn from_error(error: &FcpError) -> Self {
+        Self {
+            status: SelfCheckStatus::Failed,
+            reason_code: Some(error.error_code()),
+            message: Some(error.to_string()),
+            details: None,
+        }
+    }
+}
+
+/// Self-check status indicator.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfCheckStatus {
+    /// Self-check completed successfully.
+    Ok,
+    /// Self-check completed with issues.
+    Degraded,
+    /// Self-check failed.
+    Failed,
+    /// Self-check not supported by the connector.
+    Unsupported,
 }
 
 impl Default for HealthSnapshot {
@@ -324,11 +416,10 @@ mod tests {
         assert!(json.contains(r#""reason":"high latency""#));
 
         let parsed: HealthState = serde_json::from_str(&json).unwrap();
-        if let HealthState::Degraded { reason } = parsed {
-            assert_eq!(reason, "high latency");
-        } else {
-            panic!("expected Degraded state");
-        }
+        assert!(
+            matches!(&parsed, HealthState::Degraded { reason } if reason == "high latency"),
+            "expected Degraded state, got {parsed:?}"
+        );
     }
 
     #[test]
@@ -341,11 +432,10 @@ mod tests {
         assert!(json.contains(r#""reason":"connection failed""#));
 
         let parsed: HealthState = serde_json::from_str(&json).unwrap();
-        if let HealthState::Error { reason } = parsed {
-            assert_eq!(reason, "connection failed");
-        } else {
-            panic!("expected Error state");
-        }
+        assert!(
+            matches!(&parsed, HealthState::Error { reason } if reason == "connection failed"),
+            "expected Error state, got {parsed:?}"
+        );
     }
 
     #[test]
@@ -386,11 +476,11 @@ mod tests {
     fn health_snapshot_degraded() {
         let snapshot = HealthSnapshot::degraded("upstream slow");
 
-        if let HealthState::Degraded { reason } = &snapshot.status {
-            assert_eq!(reason, "upstream slow");
-        } else {
-            panic!("expected Degraded state");
-        }
+        assert!(
+            matches!(&snapshot.status, HealthState::Degraded { reason } if reason == "upstream slow"),
+            "expected Degraded state, got {:?}",
+            snapshot.status
+        );
         assert!(!snapshot.is_ready());
         assert!(snapshot.is_healthy());
     }
@@ -399,11 +489,11 @@ mod tests {
     fn health_snapshot_error() {
         let snapshot = HealthSnapshot::error("database down");
 
-        if let HealthState::Error { reason } = &snapshot.status {
-            assert_eq!(reason, "database down");
-        } else {
-            panic!("expected Error state");
-        }
+        assert!(
+            matches!(&snapshot.status, HealthState::Error { reason } if reason == "database down"),
+            "expected Error state, got {:?}",
+            snapshot.status
+        );
         assert!(!snapshot.is_ready());
         assert!(!snapshot.is_healthy());
     }
@@ -658,11 +748,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(health.is_available());
 
-        if let ConnectorHealth::Degraded { reason } = &health {
-            assert_eq!(reason, "high latency");
-        } else {
-            panic!("expected Degraded variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Degraded { reason } if reason == "high latency"),
+            "expected Degraded variant, got {health:?}"
+        );
     }
 
     #[test]
@@ -671,11 +760,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(!health.is_available());
 
-        if let ConnectorHealth::Unavailable { reason, since: _ } = &health {
-            assert_eq!(reason, "connection refused");
-        } else {
-            panic!("expected Unavailable variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Unavailable { reason, .. } if reason == "connection refused"),
+            "expected Unavailable variant, got {health:?}"
+        );
     }
 
     #[test]
@@ -729,11 +817,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(health.is_available());
 
-        if let ConnectorHealth::Degraded { reason } = health {
-            assert_eq!(reason, "slow upstream");
-        } else {
-            panic!("expected Degraded variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Degraded { reason } if reason == "slow upstream"),
+            "expected Degraded variant, got {health:?}"
+        );
     }
 
     #[test]
@@ -745,11 +832,10 @@ mod tests {
         assert!(!health.is_healthy());
         assert!(!health.is_available());
 
-        if let ConnectorHealth::Unavailable { reason, since: _ } = health {
-            assert_eq!(reason, "crash");
-        } else {
-            panic!("expected Unavailable variant");
-        }
+        assert!(
+            matches!(&health, ConnectorHealth::Unavailable { reason, .. } if reason == "crash"),
+            "expected Unavailable variant, got {health:?}"
+        );
     }
 
     #[test]

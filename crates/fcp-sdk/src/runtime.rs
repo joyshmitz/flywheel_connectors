@@ -4,6 +4,7 @@
 //! - [`SupervisorConfig`]: Configuration for backoff, retry budgets, and lifecycle management
 //! - [`StreamingSession`]: Trait for streaming connectors to manage session state
 //! - [`PollingCursor`]: Trait for polling connectors to manage cursor/offset state
+//! - [`CursorStore`]: Mesh-backed cursor state helper for polling connectors
 //! - [`HealthTracker`]: Health state machine with transition rules
 //!
 //! # Design Principles
@@ -29,11 +30,20 @@
 //! }
 //! ```
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
-use fcp_core::{HealthSnapshot, HealthState};
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_cbor::CanonicalSerializer;
+use fcp_core::{
+    ConnectorId, ConnectorStateObject, CursorState, HealthSnapshot, HealthState, InstanceId,
+    ObjectHeader, ObjectId, Signature, ZoneId,
+};
+#[cfg(feature = "cursor-store-object-store")]
+use fcp_core::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SupervisorConfig
@@ -281,6 +291,18 @@ pub trait StreamingSession: Send + Sync {
     /// Get the timestamp of the last received heartbeat acknowledgment.
     fn last_heartbeat_ack(&self) -> Option<Instant>;
 
+    /// Current heartbeat sequence counter (sent).
+    #[must_use]
+    fn heartbeat_seq(&self) -> u64 {
+        0
+    }
+
+    /// Current heartbeat acknowledgment sequence counter.
+    #[must_use]
+    fn ack_seq(&self) -> u64 {
+        0
+    }
+
     /// Check if heartbeats have timed out.
     ///
     /// Returns `true` if the last ack is older than the configured timeout.
@@ -318,6 +340,8 @@ pub struct InMemoryStreamingSession {
     sequence: u64,
     last_heartbeat_sent: Option<Instant>,
     last_heartbeat_ack: Option<Instant>,
+    heartbeat_seq: u64,
+    ack_seq: u64,
 }
 
 impl InMemoryStreamingSession {
@@ -351,10 +375,12 @@ impl StreamingSession for InMemoryStreamingSession {
 
     fn record_heartbeat_sent(&mut self, at: Instant) {
         self.last_heartbeat_sent = Some(at);
+        self.heartbeat_seq = self.heartbeat_seq.saturating_add(1);
     }
 
     fn record_heartbeat_ack(&mut self, at: Instant) {
         self.last_heartbeat_ack = Some(at);
+        self.ack_seq = self.ack_seq.saturating_add(1);
     }
 
     fn last_heartbeat_sent(&self) -> Option<Instant> {
@@ -363,6 +389,14 @@ impl StreamingSession for InMemoryStreamingSession {
 
     fn last_heartbeat_ack(&self) -> Option<Instant> {
         self.last_heartbeat_ack
+    }
+
+    fn heartbeat_seq(&self) -> u64 {
+        self.heartbeat_seq
+    }
+
+    fn ack_seq(&self) -> u64 {
+        self.ack_seq
     }
 
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -490,6 +524,448 @@ impl PollingCursor for InMemoryPollingCursor {
     fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // In-memory: nothing to restore
         Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CursorStore (mesh-backed cursor state helper)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lease metadata required for cursor state writes.
+#[derive(Debug, Clone, Copy)]
+pub struct CursorLease {
+    /// Fencing token from the authorizing lease.
+    pub lease_seq: u64,
+    /// Lease object ID granting write authority.
+    pub lease_object_id: ObjectId,
+}
+
+/// Errors returned by cursor store operations.
+#[derive(Debug, thiserror::Error)]
+pub enum CursorStoreError {
+    /// Underlying storage failed.
+    #[error("cursor store backend error: {0}")]
+    Storage(String),
+
+    /// Lease fencing token regressed.
+    #[error("stale lease_seq (current {current}, incoming {incoming})")]
+    StaleLeaseSeq {
+        /// Current lease sequence.
+        current: u64,
+        /// Incoming lease sequence.
+        incoming: u64,
+    },
+
+    /// Offset moved backwards.
+    #[error("offset regression (current {current}, incoming {incoming})")]
+    OffsetRegression {
+        /// Current offset value.
+        current: i64,
+        /// Incoming offset value.
+        incoming: i64,
+    },
+
+    /// Watermark moved backwards.
+    #[error("watermark regression (current {current}, incoming {incoming})")]
+    WatermarkRegression {
+        /// Current watermark.
+        current: u64,
+        /// Incoming watermark.
+        incoming: u64,
+    },
+
+    /// Cursor encoding failed.
+    #[error("cursor encoding failed: {0}")]
+    CursorEncoding(String),
+
+    /// Cursor decoding failed.
+    #[error("cursor decoding failed: {0}")]
+    CursorDecoding(String),
+}
+
+/// Backend for storing and retrieving connector state objects.
+pub trait CursorStoreBackend: Send + Sync {
+    /// Load the latest state object (head) and its object id.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError::Storage`] if the backend cannot load state.
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError>;
+
+    /// Persist a new state object and return its object id.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError::Storage`] if the backend cannot persist state.
+    fn store_state_object(&self, state: ConnectorStateObject)
+    -> Result<ObjectId, CursorStoreError>;
+}
+
+/// Cursor store helper that builds lease-fenced state objects.
+#[derive(Debug)]
+pub struct CursorStore<B: CursorStoreBackend> {
+    backend: B,
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    instance_id: Option<InstanceId>,
+    head: Option<ObjectId>,
+    seq: u64,
+    last_cursor: Option<CursorState>,
+    last_lease_seq: u64,
+}
+
+impl<B: CursorStoreBackend> CursorStore<B> {
+    /// Create a new cursor store helper.
+    pub const fn new(backend: B, connector_id: ConnectorId, zone_id: ZoneId) -> Self {
+        Self {
+            backend,
+            connector_id,
+            zone_id,
+            instance_id: None,
+            head: None,
+            seq: 0,
+            last_cursor: None,
+            last_lease_seq: 0,
+        }
+    }
+
+    /// Attach an instance id to state objects produced by this store.
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: InstanceId) -> Self {
+        self.instance_id = Some(instance_id);
+        self
+    }
+
+    /// Load the latest cursor state from the backend.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError`] if the backend fails or the cursor payload is invalid.
+    pub fn load_cursor(&mut self) -> Result<Option<CursorState>, CursorStoreError> {
+        let Some((head_id, head)) = self.backend.load_head()? else {
+            return Ok(None);
+        };
+
+        let cursor = CursorState::from_cbor(&head.state_cbor)
+            .map_err(|err| CursorStoreError::CursorDecoding(err.to_string()))?;
+
+        self.head = Some(head_id);
+        self.seq = head.seq;
+        self.last_cursor = Some(cursor.clone());
+        self.last_lease_seq = head.lease_seq;
+
+        Ok(Some(cursor))
+    }
+
+    /// Commit a new cursor state, enforcing lease fencing and monotonic rules.
+    ///
+    /// # Errors
+    /// Returns [`CursorStoreError`] if monotonicity checks fail, the cursor cannot be
+    /// encoded, or the backend cannot persist the state object.
+    pub fn commit_cursor(
+        &mut self,
+        cursor: CursorState,
+        mut header: ObjectHeader,
+        lease: CursorLease,
+        signature: Signature,
+    ) -> Result<ObjectId, CursorStoreError> {
+        self.validate_commit(&cursor, lease.lease_seq)?;
+
+        if !header.refs.contains(&lease.lease_object_id) {
+            header.refs.push(lease.lease_object_id);
+        }
+
+        let state_cbor = cursor
+            .to_cbor()
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+
+        let next_seq = if self.head.is_some() { self.seq + 1 } else { 0 };
+        let prev = self.head;
+
+        let updated_at = header.created_at;
+        let state_obj = ConnectorStateObject {
+            header,
+            connector_id: self.connector_id.clone(),
+            instance_id: self.instance_id.clone(),
+            zone_id: self.zone_id.clone(),
+            prev,
+            seq: next_seq,
+            state_cbor,
+            updated_at,
+            lease_seq: lease.lease_seq,
+            lease_object_id: lease.lease_object_id,
+            signature,
+        };
+
+        let object_id = self.backend.store_state_object(state_obj)?;
+        self.head = Some(object_id);
+        self.seq = next_seq;
+        self.last_cursor = Some(cursor);
+        self.last_lease_seq = lease.lease_seq;
+
+        Ok(object_id)
+    }
+
+    /// Return the current head object id, if any.
+    #[must_use]
+    pub const fn head(&self) -> Option<ObjectId> {
+        self.head
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    fn validate_commit(
+        &self,
+        cursor: &CursorState,
+        lease_seq: u64,
+    ) -> Result<(), CursorStoreError> {
+        if lease_seq < self.last_lease_seq {
+            return Err(CursorStoreError::StaleLeaseSeq {
+                current: self.last_lease_seq,
+                incoming: lease_seq,
+            });
+        }
+
+        if let Some(previous) = &self.last_cursor {
+            if let (Some(current), Some(incoming)) = (previous.offset, cursor.offset)
+                && incoming < current
+            {
+                return Err(CursorStoreError::OffsetRegression { current, incoming });
+            }
+
+            if let (Some(current), Some(incoming)) = (previous.watermark, cursor.watermark)
+                && incoming < current
+            {
+                return Err(CursorStoreError::WatermarkRegression { current, incoming });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// In-memory cursor store backend for tests and local development.
+#[derive(Debug, Default)]
+pub struct InMemoryCursorStoreBackend {
+    state: Mutex<InMemoryCursorStoreState>,
+}
+
+#[derive(Debug, Default)]
+struct InMemoryCursorStoreState {
+    next_id: u64,
+    objects: Vec<(ObjectId, ConnectorStateObject)>,
+}
+
+impl InMemoryCursorStoreBackend {
+    /// Create a new in-memory backend.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl CursorStoreBackend for InMemoryCursorStoreBackend {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| CursorStoreError::Storage("cursor store mutex poisoned".into()))?;
+        Ok(state.objects.last().cloned())
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| CursorStoreError::Storage("cursor store mutex poisoned".into()))?;
+        let byte = u8::try_from(state.next_id % 256).unwrap_or(0);
+        let object_id = ObjectId::from_bytes([byte; 32]);
+        state.next_id = state.next_id.wrapping_add(1);
+        state.objects.push((object_id, state_obj));
+        drop(state);
+        Ok(object_id)
+    }
+}
+
+impl CursorStoreBackend for Arc<InMemoryCursorStoreBackend> {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        self.as_ref().load_head()
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        self.as_ref().store_state_object(state_obj)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ObjectStore-backed cursor store
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cursor store backend backed by an `ObjectStore` (mesh persistence).
+#[cfg(feature = "cursor-store-object-store")]
+#[derive(Clone)]
+pub struct ObjectStoreCursorBackend {
+    object_store: Arc<dyn fcp_store::ObjectStore>,
+    object_id_key: ObjectIdKey,
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    retention: RetentionClass,
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+impl ObjectStoreCursorBackend {
+    /// Create a new backend that stores connector state objects in an `ObjectStore`.
+    #[must_use]
+    pub fn new(
+        object_store: Arc<dyn fcp_store::ObjectStore>,
+        object_id_key: ObjectIdKey,
+        connector_id: ConnectorId,
+        zone_id: ZoneId,
+    ) -> Self {
+        Self {
+            object_store,
+            object_id_key,
+            connector_id,
+            zone_id,
+            retention: RetentionClass::Pinned,
+        }
+    }
+
+    /// Override retention class for stored state objects.
+    #[must_use]
+    pub const fn with_retention(mut self, retention: RetentionClass) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    #[allow(clippy::missing_const_for_fn)]
+    fn schema_id() -> fcp_cbor::SchemaId {
+        fcp_cbor::SchemaId::new(
+            "fcp.connector_state",
+            "state_object",
+            semver::Version::new(1, 0, 0),
+        )
+    }
+
+    fn block_on_store<T>(
+        fut: impl std::future::Future<Output = Result<T, fcp_store::ObjectStoreError>>,
+    ) -> Result<T, CursorStoreError> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                return tokio::task::block_in_place(|| handle.block_on(fut))
+                    .map_err(|err| CursorStoreError::Storage(err.to_string()));
+            }
+        } else {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| CursorStoreError::Storage(err.to_string()))?;
+            return runtime
+                .block_on(fut)
+                .map_err(|err| CursorStoreError::Storage(err.to_string()));
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| CursorStoreError::Storage(err.to_string()))?;
+        runtime
+            .block_on(fut)
+            .map_err(|err| CursorStoreError::Storage(err.to_string()))
+    }
+
+    fn decode_state_object(
+        stored: &StoredObject,
+    ) -> Result<ConnectorStateObject, CursorStoreError> {
+        CanonicalSerializer::deserialize(&stored.body, &stored.header.schema)
+            .map_err(|err| CursorStoreError::CursorDecoding(err.to_string()))
+    }
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+impl CursorStoreBackend for ObjectStoreCursorBackend {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        let object_ids =
+            Self::block_on_store(async { Ok(self.object_store.list_zone(&self.zone_id).await) })?;
+
+        let mut best: Option<(ObjectId, ConnectorStateObject)> = None;
+
+        for object_id in object_ids {
+            let stored = match Self::block_on_store(self.object_store.get(&object_id)) {
+                Ok(obj) => obj,
+                Err(err) => {
+                    tracing::warn!(error = %err, object_id = %object_id, "Failed to load state object");
+                    continue;
+                }
+            };
+
+            if stored.header.schema != Self::schema_id() {
+                continue;
+            }
+
+            let state = match Self::decode_state_object(&stored) {
+                Ok(state) => state,
+                Err(err) => {
+                    tracing::warn!(error = %err, object_id = %object_id, "Failed to decode state object");
+                    continue;
+                }
+            };
+
+            if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
+                continue;
+            }
+
+            let replace = match &best {
+                None => true,
+                Some((_id, current)) => {
+                    state.seq > current.seq
+                        || (state.seq == current.seq && state.lease_seq > current.lease_seq)
+                }
+            };
+
+            if replace {
+                best = Some((object_id, state));
+            }
+        }
+
+        Ok(best)
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        if state_obj.connector_id != self.connector_id || state_obj.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "connector_id/zone_id mismatch in state object".into(),
+            ));
+        }
+
+        if state_obj.header.schema != Self::schema_id() {
+            return Err(CursorStoreError::Storage(
+                "unexpected schema for connector state object".into(),
+            ));
+        }
+
+        let body = CanonicalSerializer::serialize(&state_obj, &state_obj.header.schema)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        let object_id = StoredObject::derive_id(&state_obj.header, &body, &self.object_id_key)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+
+        let header = state_obj.header;
+        let stored = StoredObject {
+            object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: self.retention,
+            },
+        };
+
+        Self::block_on_store(self.object_store.put(stored))?;
+        Ok(object_id)
     }
 }
 
@@ -789,6 +1265,459 @@ impl HealthTracker {
 impl Default for HealthTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// StreamingSupervisor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Streaming supervisor errors (boxed trait object for flexibility).
+pub type StreamingError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Handle for an active streaming connection.
+#[derive(Debug)]
+pub struct StreamingConnection<E> {
+    /// Stream of events emitted by the connection.
+    pub events: mpsc::Receiver<E>,
+    /// Join handle for the underlying stream task.
+    pub join_handle: tokio::task::JoinHandle<Result<(), StreamingError>>,
+}
+
+/// Statistics from a streaming supervisor run.
+#[derive(Debug, Clone, Default)]
+pub struct StreamingSupervisorStats {
+    /// Total number of connection attempts.
+    pub connection_attempts: u64,
+    /// Number of successful connections.
+    pub successful_connections: u64,
+    /// Number of failed connection attempts.
+    pub failed_connections: u64,
+    /// Number of events processed.
+    pub events_processed: u64,
+    /// Total time spent in backoff (milliseconds).
+    pub backoff_time_ms: u64,
+    /// Heartbeat timeouts detected.
+    pub missed_heartbeats: u64,
+}
+
+/// Streaming-specific health state details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingHealthState {
+    /// Last heartbeat sent time in milliseconds since supervisor start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_at: Option<u64>,
+    /// Last heartbeat ack time in milliseconds since supervisor start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ack_at: Option<u64>,
+    /// Total reconnect attempts after the first successful connection.
+    pub reconnect_count: u64,
+    /// Total missed heartbeat timeouts.
+    pub missed_heartbeats: u64,
+}
+
+/// Supervised streaming loop with backoff, health tracking, and session resumption.
+///
+/// The supervisor provides:
+/// - Connection lifecycle management with retry/backoff
+/// - Optional heartbeat timeout detection
+/// - Health state transitions based on success/failure patterns
+/// - Session persistence hooks for resume support
+#[derive(Debug)]
+pub struct StreamingSupervisor<S: StreamingSession> {
+    config: SupervisorConfig,
+    session: S,
+    health: HealthTracker,
+    stats: StreamingSupervisorStats,
+}
+
+impl<S: StreamingSession> StreamingSupervisor<S> {
+    /// Create a new streaming supervisor.
+    pub fn new(config: SupervisorConfig, session: S) -> Self {
+        Self {
+            config,
+            session,
+            health: HealthTracker::new(),
+            stats: StreamingSupervisorStats::default(),
+        }
+    }
+
+    /// Get a reference to the session.
+    pub const fn session(&self) -> &S {
+        &self.session
+    }
+
+    /// Get mutable access to the session.
+    pub const fn session_mut(&mut self) -> &mut S {
+        &mut self.session
+    }
+
+    /// Get the current health tracker.
+    pub const fn health(&self) -> &HealthTracker {
+        &self.health
+    }
+
+    /// Get the current statistics.
+    pub const fn stats(&self) -> &StreamingSupervisorStats {
+        &self.stats
+    }
+
+    /// Get the supervisor configuration.
+    pub const fn config(&self) -> &SupervisorConfig {
+        &self.config
+    }
+
+    fn compute_backoff_delay(&self, attempt: u32) -> Duration {
+        let jitter = (f64::from(attempt) * 0.1).fract();
+        let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
+        Duration::from_millis(backoff)
+    }
+
+    fn health_log_fields(&self) -> (u64, u64, u64, u64) {
+        let reconnect_count = self.stats.connection_attempts.saturating_sub(1);
+        (
+            self.session.heartbeat_seq(),
+            self.session.ack_seq(),
+            self.stats.missed_heartbeats,
+            reconnect_count,
+        )
+    }
+
+    fn elapsed_ms(&self, instant: Instant) -> u64 {
+        let elapsed = instant.saturating_duration_since(self.health.started_at);
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Get streaming-specific health state details.
+    #[must_use]
+    pub fn streaming_health_state(&self) -> StreamingHealthState {
+        StreamingHealthState {
+            last_heartbeat_at: self
+                .session
+                .last_heartbeat_sent()
+                .map(|instant| self.elapsed_ms(instant)),
+            last_ack_at: self
+                .session
+                .last_heartbeat_ack()
+                .map(|instant| self.elapsed_ms(instant)),
+            reconnect_count: self.stats.connection_attempts.saturating_sub(1),
+            missed_heartbeats: self.stats.missed_heartbeats,
+        }
+    }
+
+    /// Build a `HealthSnapshot` that includes streaming health details.
+    #[must_use]
+    pub fn streaming_health_snapshot(&self) -> HealthSnapshot {
+        let mut snapshot = self.health.snapshot();
+        let mut details = match snapshot.details.take() {
+            Some(serde_json::Value::Object(map)) => map,
+            Some(other) => {
+                let mut map = serde_json::Map::new();
+                map.insert("tracker".to_string(), other);
+                map
+            }
+            None => serde_json::Map::new(),
+        };
+
+        let streaming = self.streaming_health_state();
+        if let Some(last_heartbeat_at) = streaming.last_heartbeat_at {
+            details.insert(
+                "last_heartbeat_at".to_string(),
+                serde_json::Value::from(last_heartbeat_at),
+            );
+        }
+        if let Some(last_ack_at) = streaming.last_ack_at {
+            details.insert(
+                "last_ack_at".to_string(),
+                serde_json::Value::from(last_ack_at),
+            );
+        }
+        details.insert(
+            "reconnect_count".to_string(),
+            serde_json::Value::from(streaming.reconnect_count),
+        );
+        details.insert(
+            "missed_heartbeats".to_string(),
+            serde_json::Value::from(streaming.missed_heartbeats),
+        );
+
+        snapshot.details = Some(serde_json::Value::Object(details));
+        snapshot
+    }
+
+    /// Run the streaming supervisor loop.
+    ///
+    /// # Arguments
+    ///
+    /// * `shutdown` - Watch channel receiver that signals shutdown when `true`
+    /// * `connect_fn` - Async function that establishes a streaming connection
+    /// * `handle_event` - Async function that handles incoming events
+    #[allow(clippy::too_many_lines)]
+    pub async fn run<E, ConnectF, ConnectFut, HandleF, HandleFut>(
+        &mut self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        connect_fn: ConnectF,
+        mut handle_event: HandleF,
+    ) -> SupervisorOutcome
+    where
+        ConnectF: Fn(&mut S) -> ConnectFut,
+        ConnectFut: std::future::Future<Output = Result<StreamingConnection<E>, StreamingError>>,
+        HandleF: FnMut(E, &mut S) -> HandleFut,
+        HandleFut: std::future::Future<Output = Result<(), StreamingError>>,
+    {
+        let mut consecutive_failures: u32 = 0;
+
+        if let Err(e) = self.session.restore() {
+            let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                self.health_log_fields();
+            tracing::warn!(
+                error = %e,
+                heartbeat_seq,
+                ack_seq,
+                missed_heartbeats,
+                reconnect_count,
+                "Failed to restore streaming session state"
+            );
+        }
+
+        // Transition to healthy on start
+        self.health.record_success();
+        self.health.evaluate(&self.config);
+
+        loop {
+            if *shutdown.borrow() {
+                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                    self.health_log_fields();
+                tracing::info!(
+                    heartbeat_seq,
+                    ack_seq,
+                    missed_heartbeats,
+                    reconnect_count,
+                    "Streaming supervisor received shutdown signal"
+                );
+                if let Err(e) = self.session.persist() {
+                    let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                        self.health_log_fields();
+                    tracing::error!(
+                        error = %e,
+                        heartbeat_seq,
+                        ack_seq,
+                        missed_heartbeats,
+                        reconnect_count,
+                        "Failed to persist session on shutdown"
+                    );
+                }
+                return SupervisorOutcome::Shutdown;
+            }
+
+            self.stats.connection_attempts += 1;
+            let connection = match connect_fn(&mut self.session).await {
+                Ok(connection) => {
+                    self.stats.successful_connections += 1;
+                    consecutive_failures = 0;
+                    self.health.record_success();
+                    self.health.evaluate(&self.config);
+                    connection
+                }
+                Err(err) => {
+                    self.stats.failed_connections += 1;
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    let message = err.to_string();
+
+                    self.health.record_failure(&message);
+                    self.health.evaluate(&self.config);
+
+                    let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                        self.health_log_fields();
+                    tracing::warn!(
+                        error = %message,
+                        consecutive_failures,
+                        heartbeat_seq,
+                        ack_seq,
+                        missed_heartbeats,
+                        reconnect_count,
+                        "Streaming connection attempt failed"
+                    );
+
+                    if consecutive_failures >= self.config.max_consecutive_failures {
+                        if let Err(e) = self.session.persist() {
+                            tracing::error!(error = %e, "Failed to persist session");
+                        }
+                        return SupervisorOutcome::MaxFailuresReached {
+                            failures: consecutive_failures,
+                        };
+                    }
+
+                    let delay = self.compute_backoff_delay(consecutive_failures - 1);
+                    self.stats.backoff_time_ms +=
+                        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                if let Err(e) = self.session.persist() {
+                                    tracing::error!(
+                                        error = %e,
+                                        heartbeat_seq,
+                                        ack_seq,
+                                        missed_heartbeats,
+                                        reconnect_count,
+                                        "Failed to persist session on shutdown"
+                                    );
+                                }
+                                return SupervisorOutcome::Shutdown;
+                            }
+                        }
+                    }
+
+                    continue;
+                }
+            };
+
+            let mut events = connection.events;
+            let mut join_handle = connection.join_handle;
+            let mut heartbeat_interval =
+                self.config.heartbeat_interval().map(tokio::time::interval);
+
+            let mut exit_message = "stream ended".to_string();
+            let mut exit_fatal = false;
+
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                self.health_log_fields();
+                            tracing::info!(
+                                heartbeat_seq,
+                                ack_seq,
+                                missed_heartbeats,
+                                reconnect_count,
+                                "Streaming supervisor received shutdown signal"
+                            );
+                            join_handle.abort();
+                            if let Err(e) = self.session.persist() {
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                tracing::error!(
+                                    error = %e,
+                                    heartbeat_seq,
+                                    ack_seq,
+                                    missed_heartbeats,
+                                    reconnect_count,
+                                    "Failed to persist session on shutdown"
+                                );
+                            }
+                            return SupervisorOutcome::Shutdown;
+                        }
+                    }
+                    maybe_event = events.recv() => {
+                        if let Some(event) = maybe_event {
+                            self.stats.events_processed += 1;
+                            if let Err(err) = handle_event(event, &mut self.session).await {
+                                let message = err.to_string();
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                tracing::error!(
+                                    error = %message,
+                                    heartbeat_seq,
+                                    ack_seq,
+                                    missed_heartbeats,
+                                    reconnect_count,
+                                    "Streaming event handler failed"
+                                );
+                                exit_message = message;
+                                exit_fatal = true;
+                                break;
+                            }
+                            self.health.record_success();
+                            self.health.evaluate(&self.config);
+                        } else {
+                            break;
+                        }
+                    }
+                    result = &mut join_handle => {
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                exit_message = err.to_string();
+                            }
+                            Err(err) => {
+                                exit_message = err.to_string();
+                            }
+                        }
+                        break;
+                    }
+                    () = async {
+                        if let Some(interval) = &mut heartbeat_interval {
+                            interval.tick().await;
+                        }
+                    }, if heartbeat_interval.is_some() => {
+                        if let Some(timeout) = self.config.heartbeat_timeout() {
+                            if self.session.is_heartbeat_timeout(timeout) {
+                                self.stats.missed_heartbeats = self.stats.missed_heartbeats.saturating_add(1);
+                                let (heartbeat_seq, ack_seq, missed_heartbeats, reconnect_count) =
+                                    self.health_log_fields();
+                                tracing::warn!(
+                                    heartbeat_seq,
+                                    ack_seq,
+                                    missed_heartbeats,
+                                    reconnect_count,
+                                    "Streaming heartbeat timeout"
+                                );
+                                exit_message = "heartbeat timeout".to_string();
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if exit_fatal {
+                self.health.transition(HealthTransition::ToUnhealthy {
+                    reason: exit_message.clone(),
+                });
+                join_handle.abort();
+                if let Err(e) = self.session.persist() {
+                    tracing::error!(error = %e, "Failed to persist session");
+                }
+                return SupervisorOutcome::FatalError {
+                    message: exit_message,
+                };
+            }
+
+            self.health.record_failure(&exit_message);
+            self.health.evaluate(&self.config);
+            join_handle.abort();
+
+            consecutive_failures = consecutive_failures.saturating_add(1);
+            if consecutive_failures >= self.config.max_consecutive_failures {
+                if let Err(e) = self.session.persist() {
+                    tracing::error!(error = %e, "Failed to persist session");
+                }
+                return SupervisorOutcome::MaxFailuresReached {
+                    failures: consecutive_failures,
+                };
+            }
+
+            let delay = self.compute_backoff_delay(consecutive_failures - 1);
+            self.stats.backoff_time_ms += u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        if let Err(e) = self.session.persist() {
+                            tracing::error!(error = %e, "Failed to persist session on shutdown");
+                        }
+                        return SupervisorOutcome::Shutdown;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1172,6 +2101,160 @@ impl<C: PollingCursor> PollingSupervisor<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::{Duration, Instant};
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
+
+    fn boxed_err(message: &str) -> StreamingError {
+        Box::new(io::Error::other(message))
+    }
+
+    #[derive(Clone, Default)]
+    #[allow(dead_code)]
+    struct LogCapture {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl LogCapture {
+        #[allow(dead_code)]
+        fn install_json(&self, filter: EnvFilter) -> tracing::subscriber::DefaultGuard {
+            let layer = tracing_subscriber::fmt::layer()
+                .with_writer(self.clone())
+                .json()
+                .with_ansi(false)
+                .with_level(false)
+                .with_target(false)
+                .with_file(false)
+                .with_line_number(false)
+                .with_current_span(false)
+                .flatten_event(true);
+
+            let subscriber = tracing_subscriber::registry().with(filter).with(layer);
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        #[allow(dead_code)]
+        fn jsonl(&self) -> String {
+            let guard = self
+                .bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            String::from_utf8_lossy(&guard).to_string()
+        }
+    }
+
+    #[allow(dead_code)]
+    struct LogCaptureWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for LogCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogCaptureWriter {
+                bytes: Arc::clone(&self.bytes),
+            }
+        }
+    }
+
+    #[derive(Debug, Default, Clone)]
+    struct TestStreamingSession {
+        resume_token: Option<String>,
+        sequence: u64,
+        last_heartbeat_sent: Option<Instant>,
+        last_heartbeat_ack: Option<Instant>,
+        heartbeat_seq: u64,
+        ack_seq: u64,
+        persist_calls: Arc<AtomicUsize>,
+        restore_calls: Arc<AtomicUsize>,
+    }
+
+    impl TestStreamingSession {
+        fn persist_calls(&self) -> usize {
+            self.persist_calls.load(Ordering::SeqCst)
+        }
+
+        fn restore_calls(&self) -> usize {
+            self.restore_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl StreamingSession for TestStreamingSession {
+        fn resume_token(&self) -> Option<String> {
+            self.resume_token.clone()
+        }
+
+        fn set_resume_token(&mut self, token: String) {
+            self.resume_token = Some(token);
+        }
+
+        fn clear_resume_token(&mut self) {
+            self.resume_token = None;
+        }
+
+        fn sequence(&self) -> u64 {
+            self.sequence
+        }
+
+        fn set_sequence(&mut self, seq: u64) {
+            self.sequence = seq;
+        }
+
+        fn record_heartbeat_sent(&mut self, at: Instant) {
+            self.last_heartbeat_sent = Some(at);
+            self.heartbeat_seq = self.heartbeat_seq.saturating_add(1);
+        }
+
+        fn record_heartbeat_ack(&mut self, at: Instant) {
+            self.last_heartbeat_ack = Some(at);
+            self.ack_seq = self.ack_seq.saturating_add(1);
+        }
+
+        fn last_heartbeat_sent(&self) -> Option<Instant> {
+            self.last_heartbeat_sent
+        }
+
+        fn last_heartbeat_ack(&self) -> Option<Instant> {
+            self.last_heartbeat_ack
+        }
+
+        fn heartbeat_seq(&self) -> u64 {
+            self.heartbeat_seq
+        }
+
+        fn ack_seq(&self) -> u64 {
+            self.ack_seq
+        }
+
+        fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.persist_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.restore_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     #[test]
     fn supervisor_config_defaults() {
@@ -1224,6 +2307,8 @@ mod tests {
         let mut session = InMemoryStreamingSession::new();
         assert!(session.resume_token().is_none());
         assert_eq!(session.sequence(), 0);
+        assert_eq!(session.heartbeat_seq(), 0);
+        assert_eq!(session.ack_seq(), 0);
 
         session.set_resume_token("token123".to_string());
         assert_eq!(session.resume_token(), Some("token123".to_string()));
@@ -1234,6 +2319,65 @@ mod tests {
 
         session.clear_resume_token();
         assert!(session.resume_token().is_none());
+
+        let now = Instant::now();
+        session.record_heartbeat_sent(now);
+        session.record_heartbeat_ack(now);
+        assert_eq!(session.heartbeat_seq(), 1);
+        assert_eq!(session.ack_seq(), 1);
+    }
+
+    #[test]
+    fn streaming_session_heartbeat_timeout_logic() {
+        let mut session = InMemoryStreamingSession::new();
+
+        let now = Instant::now();
+        let sent = now.checked_sub(Duration::from_millis(25)).unwrap_or(now);
+        session.record_heartbeat_sent(sent);
+        assert!(session.is_heartbeat_timeout(Duration::from_millis(10)));
+
+        session.record_heartbeat_ack(Instant::now());
+        assert!(!session.is_heartbeat_timeout(Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn streaming_health_snapshot_includes_streaming_details() {
+        let config = SupervisorConfig::default();
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let now = Instant::now();
+        supervisor.session_mut().record_heartbeat_sent(now);
+        supervisor.session_mut().record_heartbeat_ack(now);
+
+        let snapshot = supervisor.streaming_health_snapshot();
+        let details = snapshot.details.expect("streaming details");
+        let details = details.as_object().expect("details map");
+
+        assert!(
+            details
+                .get("last_heartbeat_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert!(
+            details
+                .get("last_ack_at")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+        );
+        assert_eq!(
+            details
+                .get("reconnect_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
+        assert_eq!(
+            details
+                .get("missed_heartbeats")
+                .and_then(serde_json::Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1328,6 +2472,263 @@ mod tests {
         // Ready -> Starting is always valid (reset)
         assert!(tracker.transition(HealthTransition::ToStarting));
         assert!(matches!(tracker.state(), HealthState::Starting));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // StreamingSupervisor tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn streaming_supervisor_shutdown_signal() {
+        let config = SupervisorConfig::default();
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+        let _ = shutdown_tx;
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("should not connect")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_restores_and_persists_on_shutdown() {
+        let config = SupervisorConfig::default();
+        let session = TestStreamingSession::default();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+        let _ = shutdown_tx;
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("should not connect")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+        assert_eq!(supervisor.session().restore_calls(), 1);
+        assert_eq!(supervisor.session().persist_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_max_failures() {
+        let config = SupervisorConfig::default()
+            .with_max_consecutive_failures(2)
+            .with_base_backoff_ms(1);
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("connect failed")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 2 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_persists_on_max_failures() {
+        let config = SupervisorConfig::default()
+            .with_max_consecutive_failures(1)
+            .with_base_backoff_ms(1);
+        let session = TestStreamingSession::default();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run::<i32, _, _, _, _>(
+                shutdown_rx,
+                |_session| async { Err(boxed_err("connect failed")) },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 1 }
+        ));
+        assert_eq!(supervisor.session().restore_calls(), 1);
+        assert_eq!(supervisor.session().persist_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_fatal_event_handler() {
+        let config = SupervisorConfig::default().with_base_backoff_ms(1);
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run(
+                shutdown_rx,
+                |_session| async {
+                    let (tx, rx) = mpsc::channel(1);
+                    let _ = tx.send(42).await;
+                    let join_handle = tokio::spawn(async { Ok(()) });
+                    Ok(StreamingConnection {
+                        events: rx,
+                        join_handle,
+                    })
+                },
+                |_event, _session| async { Err(boxed_err("handler failed")) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::FatalError { message } if message == "handler failed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_heartbeat_timeout_transitions_and_logs() {
+        let config = SupervisorConfig {
+            heartbeat_interval_ms: 10,
+            heartbeat_timeout_multiplier: 1.1,
+            max_consecutive_failures: 1,
+            base_backoff_ms: 1,
+            jitter_enabled: false,
+            ..Default::default()
+        };
+
+        let session = InMemoryStreamingSession::new();
+        let mut supervisor = StreamingSupervisor::new(config, session);
+        supervisor
+            .session_mut()
+            .record_heartbeat_sent(Instant::now());
+
+        let capture = LogCapture::default();
+        let _guard = capture.install_json(EnvFilter::new("warn"));
+
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let outcome = supervisor
+            .run::<(), _, _, _, _>(
+                shutdown_rx,
+                |_session| async {
+                    let (tx, rx) = mpsc::channel(1);
+                    let join_handle = tokio::spawn(async move {
+                        let _tx = tx;
+                        std::future::pending::<Result<(), StreamingError>>().await
+                    });
+                    Ok(StreamingConnection {
+                        events: rx,
+                        join_handle,
+                    })
+                },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(
+            outcome,
+            SupervisorOutcome::MaxFailuresReached { failures: 1 }
+        ));
+        assert_eq!(supervisor.stats().missed_heartbeats, 1);
+        assert!(supervisor.health().is_unhealthy());
+
+        let logs = capture.jsonl();
+        let mut heartbeat_log = None;
+        for line in logs.lines() {
+            let value: serde_json::Value =
+                serde_json::from_str(line).expect("valid heartbeat log json");
+            if value.get("message").and_then(|message| message.as_str())
+                == Some("Streaming heartbeat timeout")
+            {
+                heartbeat_log = Some(value);
+                break;
+            }
+        }
+
+        let log = heartbeat_log.expect("missing heartbeat timeout log");
+        assert_eq!(log["heartbeat_seq"], 1);
+        assert_eq!(log["ack_seq"], 0);
+        assert_eq!(log["missed_heartbeats"], 1);
+        assert_eq!(log["reconnect_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_supervisor_resume_fallback_to_full_connect() {
+        let config = SupervisorConfig::default()
+            .with_base_backoff_ms(1)
+            .with_max_consecutive_failures(3);
+        let mut session = InMemoryStreamingSession::new();
+        session.set_resume_token("resume-token".to_string());
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let resume_attempts = Arc::new(AtomicUsize::new(0));
+        let full_attempts = Arc::new(AtomicUsize::new(0));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_tx = Arc::new(shutdown_tx);
+
+        let mut supervisor = StreamingSupervisor::new(config, session);
+
+        let attempts_cloned = Arc::clone(&attempts);
+        let resume_attempts_cloned = Arc::clone(&resume_attempts);
+        let full_attempts_cloned = Arc::clone(&full_attempts);
+        let shutdown_tx_cloned = Arc::clone(&shutdown_tx);
+
+        let outcome = supervisor
+            .run::<(), _, _, _, _>(
+                shutdown_rx,
+                move |session| {
+                    let attempts = Arc::clone(&attempts_cloned);
+                    let resume_attempts = Arc::clone(&resume_attempts_cloned);
+                    let full_attempts = Arc::clone(&full_attempts_cloned);
+                    let shutdown_tx = Arc::clone(&shutdown_tx_cloned);
+
+                    attempts.fetch_add(1, Ordering::SeqCst);
+
+                    let result = if session.resume_token().is_some() {
+                        resume_attempts.fetch_add(1, Ordering::SeqCst);
+                        session.clear_resume_token();
+                        Err(boxed_err("resume failed"))
+                    } else {
+                        full_attempts.fetch_add(1, Ordering::SeqCst);
+                        let _ = shutdown_tx.send(true);
+
+                        let (tx, rx) = mpsc::channel(1);
+                        drop(tx);
+                        let join_handle = tokio::spawn(async { Ok(()) });
+                        Ok(StreamingConnection {
+                            events: rx,
+                            join_handle,
+                        })
+                    };
+
+                    std::future::ready(result)
+                },
+                |_event, _session| async { Ok(()) },
+            )
+            .await;
+
+        assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+        assert_eq!(resume_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(full_attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(supervisor.stats().connection_attempts, 2);
+        assert_eq!(supervisor.streaming_health_state().reconnect_count, 1);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fcp_core::{ObjectId, ObjectPlacementPolicy, ZoneId};
+use fcp_telemetry::metrics;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -112,17 +113,42 @@ impl RateLimiter {
         // We need to lock both to update atomically
         let mut last = self.last_refill.write();
         let mut tokens = self.tokens.write();
+        self.refill_locked(&mut last, &mut tokens);
 
+        if *tokens > 0 {
+            *tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn available(&self) -> u32 {
+        if self.max_tokens == 0 {
+            return 0;
+        }
+
+        let mut last = self.last_refill.write();
+        let mut tokens = self.tokens.write();
+        self.refill_locked(&mut last, &mut tokens);
+        *tokens
+    }
+
+    fn refill_locked(&self, last: &mut std::time::Instant, tokens: &mut u32) {
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(*last);
-        let nanos_per_token = 60_000_000_000 / u64::from(self.max_tokens);
 
-        // Add tokens based on elapsed time
+        let nanos_per_token = 60_000_000_000u64 / u64::from(self.max_tokens);
+        if nanos_per_token == 0 {
+            *tokens = self.max_tokens;
+            *last = now;
+            return;
+        }
+
         if let Some(new_tokens) = (elapsed.as_nanos() as u64).checked_div(nanos_per_token) {
             if new_tokens > 0 {
                 // Determine new token count, capped at max
-                let current = *tokens;
-                let updated = current.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
+                let updated = tokens.saturating_add(u32::try_from(new_tokens).unwrap_or(u32::MAX));
 
                 if updated >= self.max_tokens {
                     *tokens = self.max_tokens;
@@ -138,17 +164,6 @@ impl RateLimiter {
             *tokens = self.max_tokens;
             *last = now;
         }
-
-        if *tokens > 0 {
-            *tokens -= 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn available(&self) -> u32 {
-        *self.tokens.read()
     }
 }
 
@@ -257,12 +272,14 @@ impl RepairController {
         policy: &ObjectPlacementPolicy,
     ) -> bool {
         let health = coverage.health(policy);
+        let diversity_deficit = coverage.diversity_deficit(policy.min_source_diversity);
 
         match health {
             CoverageHealth::Unavailable => true,
             CoverageHealth::Degraded => {
-                coverage.coverage_deficit_bps(policy.target_coverage_bps)
-                    >= self.config.min_deficit_bps
+                diversity_deficit > 0
+                    || coverage.coverage_deficit_bps(policy.target_coverage_bps)
+                        >= self.config.min_deficit_bps
             }
             CoverageHealth::Healthy => false,
         }
@@ -276,6 +293,7 @@ impl RepairController {
         policy: &ObjectPlacementPolicy,
     ) -> u32 {
         let health = coverage.health(policy);
+        let diversity_deficit = coverage.diversity_deficit(policy.min_source_diversity);
 
         match health {
             CoverageHealth::Unavailable => {
@@ -287,7 +305,11 @@ impl RepairController {
             CoverageHealth::Degraded => {
                 // Priority based on deficit
                 let deficit = coverage.coverage_deficit_bps(policy.target_coverage_bps);
-                100 + deficit / 100 // 100-199 range
+                if diversity_deficit > 0 {
+                    200 + (diversity_deficit as u32) * 10 + deficit / 100
+                } else {
+                    100 + deficit / 100 // 100-199 range
+                }
             }
             CoverageHealth::Healthy => 0,
         }
@@ -313,6 +335,25 @@ impl RepairController {
             };
 
             let coverage = CoverageEvaluation::from_distribution(object_id, &dist);
+            let diversity_bps = coverage.diversity_bps(policy.min_source_diversity);
+
+            metrics::record_symbol_coverage(
+                zone_id.as_ref(),
+                coverage.distinct_nodes,
+                coverage.coverage_bps,
+                coverage.max_node_fraction_bps,
+                diversity_bps,
+            );
+            if coverage.is_available
+                && policy.min_source_diversity > 0
+                && coverage.distinct_nodes < policy.min_source_diversity as usize
+            {
+                metrics::record_diversity_violation(
+                    zone_id.as_ref(),
+                    policy.min_source_diversity,
+                    coverage.distinct_nodes,
+                );
+            }
 
             if self.needs_repair(&coverage, &policy) {
                 let priority = self.calculate_priority(&coverage, &policy);
@@ -401,11 +442,13 @@ impl TargetedRepairRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::panic::{self, AssertUnwindSafe};
     use std::time::Instant;
 
     use bytes::Bytes;
     use chrono::Utc;
+    use fcp_testkit::LogCapture;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use serde_json::json;
     use uuid::Uuid;
@@ -517,6 +560,7 @@ mod tests {
             preferred_devices: vec![],
             excluded_devices: vec![],
             target_coverage_bps: 10000, // 100%
+            min_source_diversity: 0,
         }
     }
 
@@ -541,6 +585,117 @@ mod tests {
         let policy = test_policy();
 
         assert!(controller.needs_repair(&coverage, &policy));
+    }
+
+    #[test]
+    fn needs_repair_diversity_deficit() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let coverage = test_coverage(10, 10); // fully available
+        let mut policy = test_policy();
+        policy.min_source_diversity = 2;
+
+        assert!(controller.needs_repair(&coverage, &policy));
+    }
+
+    #[test]
+    fn repair_queued_for_diversity_deficit() {
+        run_store_test(
+            "repair_queued_for_diversity_deficit",
+            "verify",
+            "repair",
+            4,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                    max_bytes: 1024 * 1024,
+                    local_node_id: 1,
+                });
+
+                let zone_id: ZoneId = "z:test".parse().unwrap();
+                let object_id = ObjectId::from_bytes([9; 32]);
+                let oti = ObjectTransmissionInfo {
+                    transfer_length: 256,
+                    symbol_size: 64,
+                    source_blocks: 1,
+                    sub_blocks: 1,
+                    alignment: 8,
+                };
+                let meta = ObjectSymbolMeta {
+                    object_id,
+                    zone_id: zone_id.clone(),
+                    oti,
+                    source_symbols: 4,
+                    first_symbol_at: 1_000_000,
+                };
+                store.put_object_meta(meta).await.unwrap();
+
+                for esi in 0..4 {
+                    let symbol = StoredSymbol {
+                        meta: SymbolMeta {
+                            object_id,
+                            esi,
+                            zone_id: zone_id.clone(),
+                            source_node: Some(1),
+                            stored_at: 1_000_000 + u64::from(esi),
+                        },
+                        data: Bytes::from(vec![0_u8; 64]),
+                    };
+                    store.put_symbol(symbol).await.unwrap();
+                }
+
+                let policy = ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 2,
+                };
+                let mut policies = HashMap::new();
+                policies.insert(object_id, policy.clone());
+
+                let controller = RepairController::new(RepairControllerConfig::default());
+                controller.evaluate_zone(&zone_id, &store, &policies).await;
+
+                assert_eq!(controller.queue_depth(), 1);
+                let request = controller.next_repair().expect("repair queued");
+                assert_eq!(request.object_id, object_id);
+                assert_eq!(request.coverage.distinct_nodes, 1);
+                assert!(!request.coverage.meets_diversity_for_reconstruction(&policy));
+
+                let capture = LogCapture::new();
+                let entry = json!({
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "test_name": "repair_queued_for_diversity_deficit",
+                    "module": "fcp-store",
+                    "phase": "verify",
+                    "correlation_id": Uuid::new_v4().to_string(),
+                    "result": "pass",
+                    "duration_ms": 0,
+                    "assertions": { "passed": 4, "failed": 0 },
+                    "details": {
+                        "object_id": object_id.to_string(),
+                        "source_count": request.coverage.distinct_nodes,
+                        "diversity_bps": request.coverage.diversity_bps(policy.min_source_diversity),
+                        "repair_queued": true
+                    }
+                });
+                capture.push_value(&entry).expect("serialize log entry");
+                capture.assert_valid();
+
+                let dist = store.get_distribution(&object_id).await.unwrap();
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    symbol_count: Some(dist.total_symbols),
+                    coverage_bps: Some(request.coverage.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&dist)),
+                    details: Some(json!({
+                        "source_count": request.coverage.distinct_nodes,
+                        "diversity_bps": request.coverage.diversity_bps(policy.min_source_diversity)
+                    })),
+                }
+            },
+        );
     }
 
     #[test]
@@ -577,6 +732,14 @@ mod tests {
         };
         let priority = controller.calculate_priority(&degraded, &policy);
         assert!((100..200).contains(&priority));
+
+        let mut diversity_policy = test_policy();
+        diversity_policy.min_source_diversity = 3;
+        let diversity_priority = controller.calculate_priority(&degraded, &diversity_policy);
+        assert!(
+            diversity_priority >= 200,
+            "diversity deficits should elevate priority"
+        );
 
         // Healthy = no priority
         let healthy = test_coverage(10, 10);
@@ -809,6 +972,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 let controller = RepairController::new(RepairControllerConfig {
@@ -947,6 +1111,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 let controller = RepairController::new(RepairControllerConfig {
@@ -1109,6 +1274,7 @@ mod tests {
                     preferred_devices: vec![],
                     excluded_devices: vec![],
                     target_coverage_bps: 10000,
+                    min_source_diversity: 0,
                 };
 
                 let controller = RepairController::new(RepairControllerConfig {

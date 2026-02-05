@@ -41,7 +41,7 @@ pub struct StoredSymbol {
 /// Serializable object transmission information.
 ///
 /// This is a serializable wrapper around raptorq's `ObjectTransmissionInformation`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectTransmissionInfo {
     /// Transfer length (object size in bytes).
     pub transfer_length: u64,
@@ -94,7 +94,7 @@ impl From<ObjectTransmissionInfo> for ObjectTransmissionInformation {
 }
 
 /// Object metadata for symbol reconstruction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectSymbolMeta {
     /// Object ID.
     pub object_id: ObjectId,
@@ -176,6 +176,16 @@ pub trait SymbolStore: Send + Sync {
 
     /// Check if object can be reconstructed (has enough symbols).
     async fn can_reconstruct(&self, object_id: &ObjectId) -> bool;
+
+    /// Check if object can be reconstructed with diversity enforcement.
+    ///
+    /// Unlike `can_reconstruct`, this method also verifies that symbols come from
+    /// at least `min_source_diversity` distinct nodes when the policy requires it.
+    async fn can_reconstruct_with_policy(
+        &self,
+        object_id: &ObjectId,
+        policy: &fcp_core::ObjectPlacementPolicy,
+    ) -> bool;
 }
 
 /// Configuration for in-memory symbol store.
@@ -231,22 +241,30 @@ impl MemorySymbolStore {
 #[async_trait]
 impl SymbolStore for MemorySymbolStore {
     async fn put_symbol(&self, symbol: StoredSymbol) -> Result<(), SymbolStoreError> {
-        let size = Self::symbol_size(&symbol);
-
-        {
-            let used = *self.used_bytes.read();
-            if used + size > self.config.max_bytes {
-                return Err(SymbolStoreError::QuotaExceeded {
-                    used,
-                    max: self.config.max_bytes,
-                });
-            }
-        }
-
         let mut objects = self.objects.write();
         let obj = objects
             .get_mut(&symbol.meta.object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(symbol.meta.object_id))?;
+
+        // Check symbol size against OTI
+        let expected_size = obj.meta.oti.symbol_size as usize;
+        if symbol.data.len() != expected_size {
+            return Err(SymbolStoreError::InvalidSymbol {
+                reason: format!(
+                    "Symbol size mismatch: expected {}, got {}",
+                    expected_size,
+                    symbol.data.len()
+                ),
+            });
+        }
+        if symbol.meta.zone_id != obj.meta.zone_id {
+            return Err(SymbolStoreError::InvalidSymbol {
+                reason: format!(
+                    "Symbol zone mismatch: expected {}, got {}",
+                    obj.meta.zone_id, symbol.meta.zone_id
+                ),
+            });
+        }
 
         // Check for duplicate ESI
         if obj.symbols.contains_key(&symbol.meta.esi) {
@@ -254,8 +272,17 @@ impl SymbolStore for MemorySymbolStore {
             return Ok(());
         }
 
+        let size = Self::symbol_size(&symbol);
+        let mut used = self.used_bytes.write();
+        if *used + size > self.config.max_bytes {
+            return Err(SymbolStoreError::QuotaExceeded {
+                used: *used,
+                max: self.config.max_bytes,
+            });
+        }
+
         obj.symbols.insert(symbol.meta.esi, symbol);
-        *self.used_bytes.write() += size;
+        *used += size;
 
         Ok(())
     }
@@ -263,9 +290,13 @@ impl SymbolStore for MemorySymbolStore {
     async fn put_object_meta(&self, meta: ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
         let mut objects = self.objects.write();
 
-        // If already exists, just update metadata
-        if let Some(obj) = objects.get_mut(&meta.object_id) {
-            obj.meta = meta;
+        // If already exists, check consistency
+        if let Some(obj) = objects.get(&meta.object_id) {
+            if obj.meta != meta {
+                return Err(SymbolStoreError::InvalidSymbol {
+                    reason: format!("Metadata mismatch for object {}", meta.object_id),
+                });
+            }
             return Ok(());
         }
 
@@ -398,6 +429,20 @@ impl SymbolStore for MemorySymbolStore {
             false
         }
     }
+
+    async fn can_reconstruct_with_policy(
+        &self,
+        object_id: &ObjectId,
+        policy: &fcp_core::ObjectPlacementPolicy,
+    ) -> bool {
+        // Get distribution and evaluate against policy
+        if let Some(dist) = self.get_distribution(object_id).await {
+            let eval = crate::coverage::CoverageEvaluation::from_distribution(*object_id, &dist);
+            eval.meets_diversity_for_reconstruction(policy)
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -408,6 +453,7 @@ mod tests {
     use super::*;
     use crate::coverage::CoverageEvaluation;
     use chrono::Utc;
+    use fcp_testkit::LogCapture;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -631,6 +677,88 @@ mod tests {
     }
 
     #[test]
+    fn can_reconstruct_with_policy_diversity() {
+        run_store_test(
+            "can_reconstruct_with_policy_diversity",
+            "verify",
+            "repair",
+            2,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+                let mut meta = test_object_meta();
+                meta.source_symbols = 4;
+                store.put_object_meta(meta).await.unwrap();
+
+                for esi in 0..4 {
+                    let mut symbol = test_symbol(esi);
+                    symbol.meta.source_node = Some(1);
+                    store.put_symbol(symbol).await.unwrap();
+                }
+
+                let policy = fcp_core::ObjectPlacementPolicy {
+                    min_nodes: 1,
+                    max_node_fraction_bps: 10_000,
+                    preferred_devices: vec![],
+                    excluded_devices: vec![],
+                    target_coverage_bps: 10_000,
+                    min_source_diversity: 2,
+                };
+
+                assert!(
+                    !store
+                        .can_reconstruct_with_policy(&test_object_id(), &policy)
+                        .await
+                );
+
+                let mut symbol = test_symbol(4);
+                symbol.meta.source_node = Some(2);
+                store.put_symbol(symbol).await.unwrap();
+
+                assert!(
+                    store
+                        .can_reconstruct_with_policy(&test_object_id(), &policy)
+                        .await
+                );
+
+                let dist = store.get_distribution(&test_object_id()).await.unwrap();
+                let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
+
+                let capture = LogCapture::new();
+                let entry = json!({
+                    "timestamp": Utc::now().to_rfc3339(),
+                    "test_name": "can_reconstruct_with_policy_diversity",
+                    "module": "fcp-store",
+                    "phase": "verify",
+                    "correlation_id": Uuid::new_v4().to_string(),
+                    "result": "pass",
+                    "duration_ms": 0,
+                    "assertions": { "passed": 3, "failed": 0 },
+                    "details": {
+                        "object_id": test_object_id().to_string(),
+                        "source_count": eval.distinct_nodes,
+                        "diversity_bps": eval.diversity_bps(policy.min_source_diversity)
+                    }
+                });
+                capture.push_value(&entry).expect("serialize log entry");
+                capture.assert_valid();
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    symbol_count: Some(dist.total_symbols),
+                    coverage_bps: Some(eval.coverage_bps),
+                    nodes_holding: Some(nodes_from_distribution(&dist)),
+                    details: Some(json!({
+                        "source_count": eval.distinct_nodes,
+                        "diversity_bps": eval.diversity_bps(policy.min_source_diversity)
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
     fn get_distribution() {
         run_store_test("get_distribution", "verify", "placement", 2, || async {
             let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
@@ -687,6 +815,35 @@ mod tests {
     }
 
     #[test]
+    fn symbol_zone_mismatch_rejected() {
+        run_store_test(
+            "symbol_zone_mismatch_rejected",
+            "verify",
+            "write",
+            1,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                store.put_object_meta(test_object_meta()).await.unwrap();
+
+                let mut bad_symbol = test_symbol(0);
+                bad_symbol.meta.zone_id = "z:other".parse().expect("zone parse");
+
+                let result = store.put_symbol(bad_symbol).await;
+                assert!(matches!(
+                    result,
+                    Err(SymbolStoreError::InvalidSymbol { .. })
+                ));
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    details: Some(json!({"error": "zone_mismatch"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
     fn delete_object() {
         run_store_test("delete_object_symbols", "verify", "delete", 2, || async {
             let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
@@ -737,6 +894,45 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn duplicate_symbol_does_not_hit_quota() {
+        run_store_test(
+            "symbol_duplicate_does_not_hit_quota",
+            "verify",
+            "write",
+            2,
+            || async {
+                let sample = test_symbol(0);
+                let size = MemorySymbolStore::symbol_size(&sample);
+                let config = MemorySymbolStoreConfig {
+                    max_bytes: size,
+                    local_node_id: 0,
+                };
+                let store = MemorySymbolStore::new(config);
+
+                store.put_object_meta(test_object_meta()).await.unwrap();
+                store.put_symbol(sample).await.unwrap();
+
+                let used_before = store.storage_used().await;
+                let duplicate = store.put_symbol(test_symbol(0)).await;
+                assert!(duplicate.is_ok());
+
+                let used_after = store.storage_used().await;
+                assert_eq!(used_before, used_after);
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    symbol_count: Some(1),
+                    details: Some(json!({
+                        "used_bytes": used_after,
+                        "duplicate_insert": "ignored"
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

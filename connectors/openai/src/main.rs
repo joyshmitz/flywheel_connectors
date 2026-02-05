@@ -4,6 +4,7 @@
 //! Provides access to GPT models with cost tracking and streaming support.
 
 #![forbid(unsafe_code)]
+#![allow(dead_code)] // Connector API types/methods wired incrementally
 
 use std::io::{BufRead, Write};
 
@@ -83,6 +84,8 @@ async fn handle_message(connector: &mut OpenAIConnector, message: &str) -> serde
         "configure" => connector.handle_configure(params).await,
         "handshake" => connector.handle_handshake(params).await,
         "health" => connector.handle_health().await,
+        "doctor" => connector.handle_doctor().await,
+        "self_check" => connector.handle_self_check().await,
         "introspect" => connector.handle_introspect().await,
         "invoke" => connector.handle_invoke(params).await,
         "simulate" => connector.handle_simulate(params).await,

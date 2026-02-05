@@ -21,9 +21,10 @@ use crate::retry::{RetryDecision, RetryPolicy};
 use crate::schema::SchemaCache;
 
 /// Schema validation policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchemaValidationMode {
     /// Disable schema validation.
+    #[default]
     Off,
     /// Validate response schema only.
     ResponseOnly,
@@ -31,14 +32,11 @@ pub enum SchemaValidationMode {
     VariablesAndResponse,
 }
 
-impl Default for SchemaValidationMode {
-    fn default() -> Self {
-        Self::Off
-    }
-}
+type SharedRequestFuture = Shared<BoxFuture<'static, Result<Vec<u8>, GraphqlClientError>>>;
 
 /// GraphQL client metrics.
 #[derive(Debug, Default)]
+#[allow(clippy::struct_field_names)]
 pub struct GraphqlClientMetrics {
     requests_total: AtomicU64,
     requests_success: AtomicU64,
@@ -61,6 +59,7 @@ impl GraphqlClientMetrics {
 
 /// Metrics snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_field_names)]
 pub struct GraphqlClientMetricsSnapshot {
     /// Total requests.
     pub requests_total: u64,
@@ -74,11 +73,7 @@ pub struct GraphqlClientMetricsSnapshot {
 
 #[derive(Debug, Clone)]
 struct DedupState {
-    inner: Arc<
-        tokio::sync::Mutex<
-            HashMap<u64, Shared<BoxFuture<'static, Result<Vec<u8>, GraphqlClientError>>>>,
-        >,
-    >,
+    inner: Arc<tokio::sync::Mutex<HashMap<u64, SharedRequestFuture>>>,
 }
 
 impl DedupState {
@@ -166,28 +161,28 @@ impl GraphqlClientBuilder {
 
     /// Set timeout.
     #[must_use]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
         self.config.timeout = timeout;
         self
     }
 
     /// Set retry policy.
     #[must_use]
-    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+    pub const fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.config.retry = retry;
         self
     }
 
     /// Enable in-flight deduplication.
     #[must_use]
-    pub fn with_dedup_in_flight(mut self, enabled: bool) -> Self {
+    pub const fn with_dedup_in_flight(mut self, enabled: bool) -> Self {
         self.config.dedup_in_flight = enabled;
         self
     }
 
     /// Set schema validation mode.
     #[must_use]
-    pub fn with_validation_mode(mut self, mode: SchemaValidationMode) -> Self {
+    pub const fn with_validation_mode(mut self, mode: SchemaValidationMode) -> Self {
         self.config.validation = mode;
         self
     }
@@ -289,7 +284,7 @@ impl GraphqlClient {
                 errors: response.errors,
             });
         }
-        response.data.ok_or(GraphqlClientError::Protocol {
+        response.data.ok_or_else(|| GraphqlClientError::Protocol {
             message: "missing GraphQL data".to_string(),
         })
     }
@@ -331,7 +326,7 @@ impl GraphqlClient {
         let body = serde_json::Value::Object(body_map);
 
         let bytes = self.execute_bytes(body, idempotent).await?;
-        let mut response: GraphqlResponse<R> = serde_json::from_slice(&bytes)?;
+        let response: GraphqlResponse<R> = serde_json::from_slice(&bytes)?;
 
         if let (
             SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly,
@@ -399,7 +394,7 @@ impl GraphqlClient {
 
         let body = serde_json::to_value(&items)?;
         let bytes = self.execute_bytes(body, idempotent).await?;
-        let mut response: Vec<GraphqlResponse<R>> = serde_json::from_slice(&bytes)?;
+        let response: Vec<GraphqlResponse<R>> = serde_json::from_slice(&bytes)?;
 
         if let (
             SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly,
@@ -435,7 +430,7 @@ impl GraphqlClient {
 
         if let Some(state) = &self.dedup_state {
             let key = hash_bytes(&body_bytes);
-            let mut guard = state.inner.lock().await;
+            let guard = state.inner.lock().await;
             let existing = guard.get(&key).cloned();
             drop(guard);
             if let Some(shared) = existing {
@@ -451,8 +446,7 @@ impl GraphqlClient {
             guard.insert(key, future.clone());
             drop(guard);
             let result = future.await;
-            let mut guard = state.inner.lock().await;
-            guard.remove(&key);
+            state.inner.lock().await.remove(&key);
             return result;
         }
 
@@ -479,7 +473,6 @@ impl GraphqlClient {
                             debug!("retrying GraphQL request after {:?}", delay);
                             tokio::time::sleep(delay).await;
                             attempt += 1;
-                            continue;
                         }
                         RetryDecision::DoNotRetry => return Err(err),
                     }
@@ -528,7 +521,7 @@ fn truncate_body(bytes: &[u8]) -> String {
     let mut body = String::from_utf8_lossy(bytes).to_string();
     if body.len() > MAX_LEN {
         body.truncate(MAX_LEN);
-        body.push_str("…");
+        body.push('…');
     }
     body
 }
@@ -541,6 +534,7 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 impl GraphqlClient {
     /// Convert GraphQL errors to a client error.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn graphql_errors(errors: Vec<GraphqlError>) -> GraphqlClientError {
         GraphqlClientError::GraphqlErrors { errors }
     }

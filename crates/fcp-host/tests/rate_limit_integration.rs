@@ -16,6 +16,7 @@ use fcp_core::{
     AgentHint, ApprovalMode, CapabilityId, ConnectorHealth, ConnectorId, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RateLimit, RateLimitConfig, RateLimitDeclarations,
     RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RiskLevel, SafetyTier,
+    SelfCheckReport,
 };
 use fcp_host::{
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint, PolicyEngine,
@@ -110,6 +111,11 @@ impl ConnectorRegistry for MockConnectorRegistry {
 
     async fn get_rate_limits(&self, id: &ConnectorId) -> Option<RateLimitDeclarations> {
         self.connectors.get(id).and_then(|c| c.rate_limits.clone())
+    }
+
+    async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+        self.connectors.get(id)?;
+        Some(SelfCheckReport::ok())
     }
 
     fn version(&self) -> u64 {
@@ -223,6 +229,11 @@ async fn test_introspect_returns_rate_limits() {
             "Tool {} should reference discord_api rate limit",
             tool.name
         );
+        assert_eq!(tool.risk_level, RiskLevel::Low);
+        assert_eq!(tool.safety_tier, SafetyTier::Safe);
+        assert_eq!(tool.idempotency, IdempotencyClass::None);
+        assert_eq!(tool.approval_mode, Some(ApprovalMode::None));
+        assert!(tool.ai_hints.is_some());
     }
 }
 

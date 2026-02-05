@@ -12,16 +12,21 @@ clear compatibility between harness and script outputs.
 Canonical Schema
 ----------------
 
-The canonical JSON Schema lives at:
+The canonical JSON Schemas live at:
 
 - `crates/fcp-conformance/src/schemas/E2E_Log_v1.schema.json`
+- `crates/fcp-conformance/src/schemas/E2E_Log_v2.schema.json`
+
+Versioning rules:
+- If `log_version` is **missing**, the validator treats the entry as **v1**.
+- If `log_version` is present, it MUST be `v1` or `v2` and the matching schema is used.
 
 It accepts **three entry shapes** (all are valid under the single schema).
 
 1. Conformance Harness Entry (fcp-conformance)
 ----------------------------------------------
 
-Required fields:
+Required fields (v1 allows `log_version` optional; v2 requires `log_version: \"v2\"`):
 
 - `timestamp` (string, RFC3339 UTC)
 - `real_time` (string, RFC3339 UTC)
@@ -35,7 +40,7 @@ Required fields:
 2. fcp-e2e Harness Entry (fcp-e2e)
 ----------------------------------
 
-Required fields:
+Required fields (v1 allows `log_version` optional; v2 requires `log_version: \"v2\"`):
 
 - `timestamp` (string, RFC3339 UTC)
 - `test_name` (string)
@@ -49,7 +54,7 @@ Required fields:
 3. Script Entry (scripts/e2e/*.sh)
 ----------------------------------
 
-Required fields:
+Required fields (v1 allows `log_version` optional; v2 requires `log_version: \"v2\"`):
 
 - `timestamp` (string, RFC3339 UTC)
 - `script` (string)
@@ -76,6 +81,7 @@ Compatibility Rules
 3. Script logs use `script` + `step`.
 4. `result` is strictly `pass` or `fail` where present.
 5. Any secrets in `context`/`details` are redacted by the harness.
+6. v2 entries MUST include `log_version: \"v2\"` (v1 entries may omit it).
 
 Harness Example (fcp-e2e)
 -------------------------
@@ -136,3 +142,20 @@ fcp-e2e --validate-log scripts/e2e/out/e2e_happy_path.jsonl
 
 The CLI will exit non-zero on the first invalid line and print a line number
 plus the schema violation.
+
+Scenario Matrix Runner
+----------------------
+
+Run the full E2E script matrix via:
+
+```bash
+./scripts/e2e/run_matrix.sh
+```
+
+The runner writes:
+- `out/e2e_matrix_runner/summary.jsonl` (one record per scenario)
+- `out/e2e_matrix_runner/summary.json` (aggregate summary)
+
+Required scenarios are listed in `scripts/e2e/run_matrix.sh` and should exit
+`pass` with schema-valid JSONL logs. Optional scenarios may be skipped until
+the underlying harness APIs are implemented.

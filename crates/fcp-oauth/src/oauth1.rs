@@ -210,8 +210,7 @@ impl OAuth1Client {
     ) -> OAuthResult<String> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|_| "0".to_string());
+            .map_or_else(|_| "0".to_string(), |d| d.as_secs().to_string());
 
         let nonce = generate_nonce();
 
@@ -334,8 +333,7 @@ fn parse_request_token(body: &str) -> OAuthResult<RequestToken> {
 
     let callback_confirmed = params
         .get("oauth_callback_confirmed")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+        .is_some_and(|v| v == "true");
 
     Ok(RequestToken {
         token,
@@ -377,12 +375,13 @@ fn generate_nonce() -> String {
 
 /// Percent-encode a string per RFC 3986.
 fn percent_encode(s: &str) -> String {
+    use std::fmt::Write;
     let mut result = String::new();
     for byte in s.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             result.push(byte as char);
         } else {
-            result.push_str(&format!("%{byte:02X}"));
+            let _ = write!(result, "%{byte:02X}");
         }
     }
     result
@@ -471,5 +470,85 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_oauth1_config_fields() {
+        let config = test_config();
+        assert_eq!(config.consumer_key, "consumer_key");
+        assert_eq!(config.consumer_secret, "consumer_secret");
+        assert!(config.request_token_url.contains("request_token"));
+        assert!(config.authorization_url.contains("authorize"));
+        assert!(config.access_token_url.contains("access_token"));
+        assert_eq!(
+            config.callback_url,
+            Some("https://localhost:3000/callback".to_string())
+        );
+    }
+
+    #[test]
+    fn test_oauth1_config_no_callback() {
+        let config = OAuth1Config::new(
+            "key",
+            "secret",
+            "https://example.com/request",
+            "https://example.com/authorize",
+            "https://example.com/access",
+        );
+        assert!(config.callback_url.is_none());
+    }
+
+    #[test]
+    fn test_oauth1_client_config_accessor() {
+        let config = test_config();
+        let client = OAuth1Client::new(config);
+        assert_eq!(client.config().consumer_key, "consumer_key");
+    }
+
+    #[test]
+    fn test_parse_request_token_missing_token() {
+        let body = "oauth_token_secret=secret456";
+        let result = parse_request_token(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_request_token_missing_secret() {
+        let body = "oauth_token=abc123";
+        let result = parse_request_token(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_access_token_missing_fields() {
+        let body = "oauth_token=abc123";
+        let result = parse_access_token(body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_access_token_without_optional_fields() {
+        let body = "oauth_token=access123&oauth_token_secret=secret789";
+        let tokens = parse_access_token(body).unwrap();
+        assert_eq!(tokens.token, "access123");
+        assert_eq!(tokens.token_secret, "secret789");
+        assert!(tokens.user_id.is_none());
+        assert!(tokens.screen_name.is_none());
+    }
+
+    #[test]
+    fn test_parse_request_token_callback_not_confirmed() {
+        let body = "oauth_token=abc&oauth_token_secret=def&oauth_callback_confirmed=false";
+        let token = parse_request_token(body).unwrap();
+        assert!(!token.callback_confirmed);
+    }
+
+    #[test]
+    fn test_percent_encode_special_chars() {
+        assert_eq!(percent_encode("a+b"), "a%2Bb");
+        assert_eq!(percent_encode("/path"), "%2Fpath");
+        assert_eq!(percent_encode("100%"), "100%25");
     }
 }
