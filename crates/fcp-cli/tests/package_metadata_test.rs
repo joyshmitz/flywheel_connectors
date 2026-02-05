@@ -6,7 +6,7 @@
 //! - SBOM schema basics
 //! - Structured JSONL logging
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use chrono::Utc;
 use fcp_testkit::LogCapture;
 use serde_json::Value;
@@ -14,6 +14,7 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn package_metadata_roundtrip_and_sbom() {
     let capture = LogCapture::new();
     let correlation_id = format!("pkg-{}", std::process::id());
@@ -37,7 +38,7 @@ version = "0.1.0"
     fs::write(crate_path.join("manifest.toml"), manifest).expect("write manifest");
 
     let output_dir = crate_path.join("out");
-    let mut cmd = Command::cargo_bin("fcp").expect("fcp bin");
+    let mut cmd = cargo_bin_cmd!("fcp");
     let output = cmd
         .args([
             "package",
@@ -80,16 +81,14 @@ version = "0.1.0"
         metadata
             .get("cargo_version")
             .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
+            .is_some_and(|s| !s.is_empty()),
         "cargo_version present"
     );
     assert!(
         metadata
             .get("rust_version")
             .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false),
+            .is_some_and(|s| !s.is_empty()),
         "rust_version present"
     );
     assert_eq!(

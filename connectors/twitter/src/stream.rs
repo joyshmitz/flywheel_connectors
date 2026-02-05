@@ -8,7 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     config::TwitterConfig,
@@ -42,6 +42,12 @@ pub struct FilteredStream {
     bearer_token: String,
 }
 
+/// Handle for a single stream connection attempt.
+pub struct StreamHandle {
+    pub events: mpsc::Receiver<StreamEvent>,
+    pub join_handle: tokio::task::JoinHandle<TwitterResult<()>>,
+}
+
 impl FilteredStream {
     /// Create a new filtered stream connection.
     pub fn new(config: TwitterConfig) -> TwitterResult<Self> {
@@ -56,93 +62,60 @@ impl FilteredStream {
         })
     }
 
-    /// Connect to the filtered stream and return a receiver for stream events.
-    ///
-    /// The stream will automatically reconnect on disconnection with exponential backoff.
-    pub async fn connect(&self) -> TwitterResult<mpsc::Receiver<StreamEvent>> {
+    /// Connect to the filtered stream once and return a handle for stream events.
+    pub async fn connect_once(&self) -> TwitterResult<StreamHandle> {
         let (event_tx, event_rx) = mpsc::channel(256);
 
         let config = self.config.clone();
         let bearer_token = self.bearer_token.clone();
 
-        tokio::spawn(async move {
-            run_stream_loop(config, bearer_token, event_tx).await;
-        });
+        let join_handle =
+            tokio::spawn(async move { run_stream_once(config, bearer_token, event_tx).await });
 
-        Ok(event_rx)
+        Ok(StreamHandle {
+            events: event_rx,
+            join_handle,
+        })
     }
 }
 
-/// Run the stream connection loop with automatic reconnection.
-async fn run_stream_loop(
+/// Run a single stream connection attempt.
+async fn run_stream_once(
     config: TwitterConfig,
     bearer_token: String,
     event_tx: mpsc::Sender<StreamEvent>,
-) {
-    let mut backoff = Duration::from_secs(1);
-    let max_backoff = Duration::from_secs(60 * 16); // Max 16 minutes per Twitter docs
-    let linear_backoff_threshold = Duration::from_secs(60);
+) -> TwitterResult<()> {
+    let url = format!(
+        "{}/2/tweets/search/stream?tweet.fields=id,text,author_id,created_at,public_metrics,entities&expansions=author_id&user.fields=id,name,username,profile_image_url",
+        config.api_url.trim_end_matches('/')
+    );
 
-    loop {
-        let url = format!(
-            "{}/2/tweets/search/stream?tweet.fields=id,text,author_id,created_at,public_metrics,entities&expansions=author_id&user.fields=id,name,username,profile_image_url",
-            config.api_url.trim_end_matches('/')
-        );
+    info!(url = %url, "Connecting to Twitter filtered stream");
 
-        info!(url = %url, "Connecting to Twitter filtered stream");
-
-        match connect_stream(&url, &bearer_token).await {
-            Ok(response) => {
-                // Reset backoff on successful connection
-                backoff = Duration::from_secs(1);
-
-                if event_tx.send(StreamEvent::Connected).await.is_err() {
-                    info!("Event receiver dropped, stopping stream");
-                    return;
-                }
-
-                // Process the stream
-                if let Err(e) = process_stream(response, &event_tx).await {
-                    warn!(error = %e, "Stream processing error");
-
-                    if event_tx
-                        .send(StreamEvent::Disconnected {
-                            reason: e.to_string(),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        info!("Event receiver dropped, stopping stream");
-                        return;
-                    }
-                }
-            }
-            Err(e) => {
-                error!(error = %e, "Failed to connect to stream");
-
-                if event_tx
-                    .send(StreamEvent::Error(e.to_string()))
-                    .await
-                    .is_err()
-                {
-                    info!("Event receiver dropped, stopping stream");
-                    return;
-                }
-            }
+    let response = match connect_stream(&url, &bearer_token).await {
+        Ok(response) => response,
+        Err(err) => {
+            let _ = event_tx.send(StreamEvent::Error(err.to_string())).await;
+            return Err(err);
         }
+    };
 
-        // Wait before reconnecting
-        info!(delay_secs = backoff.as_secs(), "Reconnecting after delay");
-        tokio::time::sleep(backoff).await;
-
-        // Increase backoff
-        // Twitter recommends: linear backoff up to 1 minute, then exponential up to 16 minutes
-        if backoff < linear_backoff_threshold {
-            backoff += Duration::from_secs(1);
-        } else {
-            backoff = std::cmp::min(backoff * 2, max_backoff);
-        }
+    if event_tx.send(StreamEvent::Connected).await.is_err() {
+        info!("Event receiver dropped, stopping stream");
+        return Ok(());
     }
+
+    if let Err(e) = process_stream(response, &event_tx).await {
+        warn!(error = %e, "Stream processing error");
+        let _ = event_tx
+            .send(StreamEvent::Disconnected {
+                reason: e.to_string(),
+            })
+            .await;
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 /// Connect to the stream endpoint.
@@ -153,7 +126,7 @@ async fn connect_stream(url: &str, bearer_token: &str) -> TwitterResult<reqwest:
 
     let response = client
         .get(url)
-        .header("Authorization", format!("Bearer {}", bearer_token))
+        .header("Authorization", format!("Bearer {bearer_token}"))
         .send()
         .await?;
 
@@ -184,7 +157,7 @@ async fn process_stream(
         let chunk: Bytes = chunk_result?;
 
         // Handle empty chunks (heartbeats)
-        if chunk.is_empty() || (chunk.len() == 2 && chunk[..] == b"\r\n"[..]) {
+        if is_heartbeat_chunk(&chunk) {
             debug!("Received heartbeat");
             if event_tx.send(StreamEvent::Heartbeat).await.is_err() {
                 return Ok(());
@@ -200,43 +173,61 @@ async fn process_stream(
             let line: Vec<u8> = buffer.drain(..=newline_pos).collect();
             let line_str = String::from_utf8_lossy(&line).trim().to_string();
 
-            if line_str.is_empty() {
-                continue;
-            }
-
-            // Parse as JSON
-            match serde_json::from_str::<StreamTweet>(&line_str) {
-                Ok(tweet) => {
-                    debug!(tweet_id = %tweet.data.id, "Received stream tweet");
-                    if event_tx.send(StreamEvent::Tweet(tweet)).await.is_err() {
+            match parse_stream_line(&line_str) {
+                Ok(Some(event)) => {
+                    if let StreamEvent::Tweet(tweet) = &event {
+                        debug!(tweet_id = %tweet.data.id, "Received stream tweet");
+                    }
+                    if event_tx.send(event).await.is_err() {
                         return Ok(());
                     }
                 }
+                Ok(None) => {}
                 Err(e) => {
                     // Could be an error response or malformed data
                     warn!(error = %e, data = %line_str, "Failed to parse stream data");
-
-                    // Try to parse as error
-                    if let Ok(error) = serde_json::from_str::<serde_json::Value>(&line_str) {
-                        if error.get("errors").is_some() || error.get("title").is_some() {
-                            let msg = error
-                                .get("detail")
-                                .or(error.get("title"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("Unknown stream error")
-                                .to_string();
-
-                            if event_tx.send(StreamEvent::Error(msg)).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn parse_stream_line(line_str: &str) -> Result<Option<StreamEvent>, serde_json::Error> {
+    if line_str.is_empty() {
+        return Ok(None);
+    }
+
+    match serde_json::from_str::<StreamTweet>(line_str) {
+        Ok(tweet) => Ok(Some(StreamEvent::Tweet(tweet))),
+        Err(err) => {
+            if let Some(msg) = extract_stream_error(line_str) {
+                return Ok(Some(StreamEvent::Error(msg)));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn extract_stream_error(line_str: &str) -> Option<String> {
+    let error = serde_json::from_str::<serde_json::Value>(line_str).ok()?;
+    if error.get("errors").is_some() || error.get("title").is_some() {
+        Some(
+            error
+                .get("detail")
+                .or_else(|| error.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown stream error")
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+fn is_heartbeat_chunk(chunk: &Bytes) -> bool {
+    chunk.is_empty() || (chunk.len() == 2 && chunk[..] == b"\r\n"[..])
 }
 
 #[cfg(test)]
@@ -282,5 +273,50 @@ mod tests {
 
         let result = FilteredStream::new(config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_stream_line_tweet() {
+        let payload = serde_json::json!({
+            "data": {
+                "id": "123",
+                "text": "hello"
+            }
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        let tweet = match event {
+            Some(StreamEvent::Tweet(tweet)) => tweet,
+            other => panic!("expected tweet event, got {other:?}"),
+        };
+
+        assert_eq!(tweet.data.id, "123");
+        assert_eq!(tweet.data.text, "hello");
+    }
+
+    #[test]
+    fn test_parse_stream_line_error() {
+        let payload = serde_json::json!({
+            "title": "Unauthorized",
+            "detail": "bad token"
+        })
+        .to_string();
+
+        let event = parse_stream_line(&payload).unwrap();
+        assert!(matches!(event, Some(StreamEvent::Error(msg)) if msg == "bad token"));
+    }
+
+    #[test]
+    fn test_parse_stream_line_invalid_json() {
+        let payload = "not-json";
+        assert!(parse_stream_line(payload).is_err());
+    }
+
+    #[test]
+    fn test_is_heartbeat_chunk() {
+        assert!(is_heartbeat_chunk(&Bytes::from("")));
+        assert!(is_heartbeat_chunk(&Bytes::from("\r\n")));
+        assert!(!is_heartbeat_chunk(&Bytes::from("data")));
     }
 }

@@ -13,16 +13,28 @@ workspace = true
 
 [dependencies]
 fcp-core = { path = "../fcp-core" }
+fcp-cbor = { path = "../fcp-cbor", optional = true }
 fcp-manifest = { path = "../fcp-manifest" }
+fcp-store = { path = "../fcp-store", optional = true }
 jsonschema.workspace = true
+semver = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt", "rt-multi-thread"] }
 tracing.workspace = true
 
+[features]
+cursor-store-object-store = ["dep:fcp-store", "dep:fcp-cbor", "dep:semver"]
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+fcp-cbor = { path = "../fcp-cbor" }
+semver = { workspace = true }
+reqwest = { workspace = true }
+wiremock = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

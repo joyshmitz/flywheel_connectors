@@ -1,9 +1,11 @@
 //! OpenAI API client.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use fcp_core::CredentialId;
 use futures_util::StreamExt;
 use reqwest::{Client, Response, StatusCode};
 use tokio_stream::Stream;
@@ -18,13 +20,52 @@ use crate::{
 };
 
 /// Default API base URL.
-const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+
+/// Authentication mode for OpenAI API access.
+#[derive(Clone)]
+pub enum OpenAIAuth {
+    /// Direct API key (legacy; avoided in secretless deployments).
+    ApiKey(String),
+    /// Secretless credential reference (egress proxy injection).
+    CredentialId(CredentialId),
+}
+
+impl OpenAIAuth {
+    /// Render a redacted label suitable for logs/diagnostics.
+    #[must_use]
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::CredentialId(id) => {
+                let id_str = id.to_string();
+                let prefix = id_str.chars().take(8).collect::<String>();
+                format!("credential_id:{prefix}…")
+            }
+        }
+    }
+
+    /// True if this uses secretless credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+impl fmt::Debug for OpenAIAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
 
 /// OpenAI API client.
 #[derive(Debug)]
 pub struct OpenAIClient {
     client: Client,
-    api_key: String,
+    auth: OpenAIAuth,
     base_url: String,
     organization: Option<String>,
     max_retries: u32,
@@ -38,6 +79,11 @@ pub struct OpenAIClient {
 impl OpenAIClient {
     /// Create a new OpenAI client.
     pub fn new(api_key: impl Into<String>) -> OpenAIResult<Self> {
+        Self::new_with_auth(OpenAIAuth::ApiKey(api_key.into()))
+    }
+
+    /// Create a new OpenAI client with explicit auth mode.
+    pub fn new_with_auth(auth: OpenAIAuth) -> OpenAIResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -45,7 +91,7 @@ impl OpenAIClient {
 
         Ok(Self {
             client,
-            api_key: api_key.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             organization: None,
             max_retries: 3,
@@ -100,6 +146,40 @@ impl OpenAIClient {
     pub fn reset_token_counts(&self) {
         self.total_prompt_tokens.store(0, Ordering::Relaxed);
         self.total_completion_tokens.store(0, Ordering::Relaxed);
+    }
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = match &self.auth {
+            OpenAIAuth::ApiKey(key) => request.header("Authorization", format!("Bearer {key}")),
+            OpenAIAuth::CredentialId(credential_id) => {
+                request.header("X-FCP-Credential-ID", credential_id.to_string())
+            }
+        };
+
+        if let Some(org) = &self.organization {
+            request.header("OpenAI-Organization", org)
+        } else {
+            request
+        }
+    }
+
+    /// Perform a lightweight credentials/availability check.
+    pub async fn health_check(&self) -> OpenAIResult<()> {
+        let url = format!("{}/v1/models", self.base_url);
+        let request = self
+            .client
+            .get(&url)
+            .header("Content-Type", "application/json");
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(parse_error_response(status, &bytes))
+        }
     }
 
     /// Track usage from a response.
@@ -223,15 +303,12 @@ impl OpenAIClient {
             attempts += 1;
             debug!(attempt = attempts, endpoint, "Making OpenAI API request");
 
-            let mut request = self
+            let request = self
                 .client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json");
 
-            if let Some(org) = &self.organization {
-                request = request.header("OpenAI-Organization", org);
-            }
+            let request = self.apply_auth(request);
 
             let result = request.json(body).send().await;
 
@@ -279,15 +356,12 @@ impl OpenAIClient {
     {
         let url = format!("{}{endpoint}", self.base_url);
 
-        let mut request = self
+        let request = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json");
 
-        if let Some(org) = &self.organization {
-            request = request.header("OpenAI-Organization", org);
-        }
+        let request = self.apply_auth(request);
 
         let response = request.json(body).send().await?;
 
@@ -432,6 +506,7 @@ fn parse_sse_event(event_str: &str) -> Option<OpenAIResult<ChatCompletionChunk>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -540,6 +615,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_overloaded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "Server overloaded",
+                    "type": "server_error",
+                    "param": null,
+                    "code": null
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OpenAIError::Overloaded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_context_length_exceeded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "maximum context length exceeded",
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": null
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OpenAIError::ContextLengthExceeded { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_content_filtered() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "Content filtered",
+                    "type": "invalid_request_error",
+                    "param": null,
+                    "code": "content_filter"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri())
+            .with_retry_config(1, 10, 100);
+
+        let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            OpenAIError::ContentFiltered { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_logs_redact_api_key_and_prompt() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("Authorization", "Bearer test_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-123",
+                "object": "chat.completion",
+                "created": 1677652288,
+                "model": "gpt-4o",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello! How can I help you today?"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8,
+                    "total_tokens": 18
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri());
+        let secret_prompt = "TopSecretPrompt";
+        let _ = client
+            .chat(Model::Gpt4o, secret_prompt, None, Some(1024))
+            .await
+            .unwrap();
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("log_capture_ready"),
+            "expected debug logs to be captured"
+        );
+        assert!(
+            !logs.contains("test_key"),
+            "API key should not appear in logs"
+        );
+        assert!(
+            !logs.contains(secret_prompt),
+            "prompt text should not appear in logs"
+        );
+    }
+
+    #[tokio::test]
     async fn test_model_pricing() {
         assert_eq!(Model::Gpt4o.input_price_per_million(), 2.50);
         assert_eq!(Model::Gpt4o.output_price_per_million(), 10.0);
@@ -593,5 +818,18 @@ mod tests {
             .is_retryable()
         );
         assert!(!OpenAIError::InvalidApiKey.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_sse_event_done() {
+        let event = parse_sse_event("data: [DONE]\n");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_invalid_json() {
+        let event = parse_sse_event("data: {not json}\n");
+        let event = event.expect("expected event");
+        assert!(matches!(event, Err(OpenAIError::Json(_))));
     }
 }

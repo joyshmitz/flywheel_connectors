@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use crate::{
     ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, CorrelationId,
     EventAck, EventNack, FcpError, IdempotencyClass, InstanceId, ObjectId, OperationId, Provenance,
-    RiskLevel, SafetyTier, SessionId, TailscaleNodeId, ZoneId,
+    ProvisioningProgress, ProvisioningRecipe, ProvisioningState, ProvisioningValidation, RecipeId,
+    RiskLevel, SafetyTier, SessionId, SetupDescriptor, StepId, TailscaleNodeId, ZoneId,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -309,7 +310,7 @@ pub struct ResponseMetadata {
 }
 
 /// Invoke response status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InvokeStatus {
     /// Request completed successfully.
@@ -537,6 +538,10 @@ pub struct InvokeResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 
+    /// Usage metrics for the operation (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_metrics: Option<Vec<UsageMetric>>,
+
     /// Response metadata (timing, cache hints).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_metadata: Option<ResponseMetadata>,
@@ -557,6 +562,7 @@ impl InvokeResponse {
             decision_receipt_id: None,
             resource_uris: Vec::new(),
             next_cursor: None,
+            usage_metrics: None,
             response_metadata: None,
         }
     }
@@ -575,6 +581,7 @@ impl InvokeResponse {
             decision_receipt_id: None,
             resource_uris: Vec::new(),
             next_cursor: None,
+            usage_metrics: None,
             response_metadata: None,
         }
     }
@@ -604,6 +611,13 @@ impl InvokeResponse {
     #[must_use]
     pub const fn with_metadata(mut self, metadata: ResponseMetadata) -> Self {
         self.response_metadata = Some(metadata);
+        self
+    }
+
+    /// Set usage metrics.
+    #[must_use]
+    pub fn with_usage_metrics(mut self, metrics: Vec<UsageMetric>) -> Self {
+        self.usage_metrics = Some(metrics);
         self
     }
 }
@@ -844,6 +858,18 @@ impl SimulateResponse {
     }
 }
 
+/// Confidence label for cost estimates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostEstimateConfidence {
+    /// Low confidence estimate (rough order-of-magnitude).
+    Low,
+    /// Medium confidence estimate (reasonable bounds).
+    Medium,
+    /// High confidence estimate (tight bounds, stable basis).
+    High,
+}
+
 /// Cost estimate for simulation (NORMATIVE when present).
 ///
 /// Per FCP Specification Section 9.4:
@@ -876,6 +902,10 @@ pub struct CostEstimate {
     /// pricing information. Do NOT embed volatile price tables.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<CurrencyCost>,
+
+    /// Confidence label for the estimate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<CostEstimateConfidence>,
 }
 
 impl CostEstimate {
@@ -887,6 +917,7 @@ impl CostEstimate {
             estimated_duration_ms: None,
             estimated_bytes: None,
             currency: None,
+            confidence: None,
         }
     }
 
@@ -898,6 +929,7 @@ impl CostEstimate {
             estimated_duration_ms: Some(duration_ms),
             estimated_bytes: None,
             currency: None,
+            confidence: None,
         }
     }
 
@@ -909,6 +941,7 @@ impl CostEstimate {
             estimated_duration_ms: None,
             estimated_bytes: Some(bytes),
             currency: None,
+            confidence: None,
         }
     }
 
@@ -937,6 +970,13 @@ impl CostEstimate {
     #[must_use]
     pub fn and_currency(mut self, currency: CurrencyCost) -> Self {
         self.currency = Some(currency);
+        self
+    }
+
+    /// Add a confidence label to the estimate.
+    #[must_use]
+    pub const fn and_confidence(mut self, confidence: CostEstimateConfidence) -> Self {
+        self.confidence = Some(confidence);
         self
     }
 }
@@ -981,6 +1021,135 @@ impl CurrencyCost {
     #[must_use]
     pub fn usd_cents(amount_cents: u64) -> Self {
         Self::new(amount_cents, "USD")
+    }
+}
+
+/// Usage metric kind for actual execution telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageMetricKind {
+    /// API credits or tokens consumed.
+    ApiCredits,
+    /// Token usage (LLM tokens, etc.).
+    Tokens,
+    /// Bytes transferred.
+    Bytes,
+    /// Execution duration in milliseconds.
+    DurationMs,
+    /// Number of requests performed.
+    Requests,
+    /// Custom connector-specific metric.
+    Custom,
+}
+
+impl UsageMetricKind {
+    /// Stable string representation for signing and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApiCredits => "api_credits",
+            Self::Tokens => "tokens",
+            Self::Bytes => "bytes",
+            Self::DurationMs => "duration_ms",
+            Self::Requests => "requests",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Usage metric for actual execution (NORMATIVE when present).
+///
+/// Connectors SHOULD emit usage metrics when they can measure actual usage.
+/// Host systems MAY aggregate these metrics per-zone for budget enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageMetric {
+    /// Metric kind.
+    pub kind: UsageMetricKind,
+
+    /// Measured usage amount.
+    pub amount: u64,
+
+    /// Optional unit label (for custom metrics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+
+    /// Optional custom metric identifier (required when kind = Custom).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_id: Option<String>,
+}
+
+impl UsageMetric {
+    /// Usage metric for API credits.
+    #[must_use]
+    pub const fn api_credits(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::ApiCredits,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for tokens.
+    #[must_use]
+    pub const fn tokens(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::Tokens,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for bytes.
+    #[must_use]
+    pub const fn bytes(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::Bytes,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for duration in milliseconds.
+    #[must_use]
+    pub const fn duration_ms(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::DurationMs,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for request counts.
+    #[must_use]
+    pub const fn requests(amount: u64) -> Self {
+        Self {
+            kind: UsageMetricKind::Requests,
+            amount,
+            unit: None,
+            custom_id: None,
+        }
+    }
+
+    /// Usage metric for custom connector-specific measurements.
+    #[must_use]
+    pub fn custom(custom_id: impl Into<String>, amount: u64, unit: Option<String>) -> Self {
+        Self {
+            kind: UsageMetricKind::Custom,
+            amount,
+            unit,
+            custom_id: Some(custom_id.into()),
+        }
+    }
+
+    /// Attach a unit label.
+    #[must_use]
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
     }
 }
 
@@ -1044,6 +1213,166 @@ impl ResourceAvailability {
         self.details = Some(details.into());
         self
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provisioning Payloads (Section 12.2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Provisioning session identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProvisioningSessionId(pub String);
+
+impl ProvisioningSessionId {
+    /// Create a new provisioning session ID.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Generate a random provisioning session ID.
+    #[must_use]
+    pub fn random() -> Self {
+        Self(format!("prov_{}", uuid::Uuid::new_v4()))
+    }
+
+    /// Get the session ID as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProvisioningSessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<S: Into<String>> From<S> for ProvisioningSessionId {
+    fn from(value: S) -> Self {
+        Self(value.into())
+    }
+}
+
+/// Input payload for `fcp.provision.start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningStartInput {
+    /// Optional recipe identifier (default recipe if omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe_id: Option<RecipeId>,
+
+    /// Optional connector-specific configuration hints (non-secret).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+}
+
+/// Result payload for `fcp.provision.start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningStartOutput {
+    /// Provisioning session identifier (if the connector tracks sessions).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+
+    /// Current provisioning state.
+    pub state: ProvisioningState,
+
+    /// Optional progress summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProvisioningProgress>,
+
+    /// Optional recipe definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<ProvisioningRecipe>,
+
+    /// Optional setup descriptor for host UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<SetupDescriptor>,
+
+    /// Connector-specific details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Input payload for `fcp.provision.poll`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningPollInput {
+    /// Provisioning session identifier (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+}
+
+/// Result payload for `fcp.provision.poll`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningPollOutput {
+    /// Current provisioning state.
+    pub state: ProvisioningState,
+
+    /// Optional progress summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProvisioningProgress>,
+
+    /// Connector-specific details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Input value for provisioning completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningInput {
+    /// Step identifier that produced the value.
+    pub step_id: StepId,
+
+    /// User-provided value or redacted reference.
+    ///
+    /// Secrets SHOULD be represented as references (IDs) rather than raw bytes.
+    pub value: serde_json::Value,
+}
+
+/// Input payload for `fcp.provision.complete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningCompleteInput {
+    /// Provisioning session identifier (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+
+    /// Inputs collected from human prompts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<ProvisioningInput>,
+}
+
+/// Result payload for `fcp.provision.complete`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningCompleteOutput {
+    /// Current provisioning state.
+    pub state: ProvisioningState,
+
+    /// Validation result after completion.
+    pub validation: ProvisioningValidation,
+
+    /// Connector-specific details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Input payload for `fcp.provision.abort`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningAbortInput {
+    /// Provisioning session identifier (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<ProvisioningSessionId>,
+
+    /// Optional reason for aborting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Result payload for `fcp.provision.abort`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvisioningAbortOutput {
+    /// Current provisioning state.
+    pub state: ProvisioningState,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1577,13 +1906,14 @@ mod tests {
         let mut req = base_invoke_request();
         req.idempotency_key = Some("a".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1));
         let err = req.validate_idempotency_key().unwrap_err();
-        match err {
-            InvokeValidationError::IdempotencyKeyTooLong { len, max } => {
-                assert_eq!(len, MAX_IDEMPOTENCY_KEY_LEN + 1);
-                assert_eq!(max, MAX_IDEMPOTENCY_KEY_LEN);
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                &err,
+                InvokeValidationError::IdempotencyKeyTooLong { len, max }
+                    if *len == MAX_IDEMPOTENCY_KEY_LEN + 1 && *max == MAX_IDEMPOTENCY_KEY_LEN
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -1618,6 +1948,11 @@ mod tests {
             decision_receipt_id: None,
             resource_uris: vec!["fcp://fcp.gmail/message/123".into()],
             next_cursor: Some("cursor_abc".into()),
+            usage_metrics: Some(vec![
+                UsageMetric::tokens(1200),
+                UsageMetric::bytes(2048),
+                UsageMetric::duration_ms(75),
+            ]),
             response_metadata: Some(ResponseMetadata {
                 processing_time_ms: Some(42),
                 cache_ttl_secs: Some(300),
@@ -1636,6 +1971,10 @@ mod tests {
         assert!(deserialized.error.is_none());
         assert_eq!(deserialized.resource_uris.len(), 1);
         assert_eq!(deserialized.next_cursor, Some("cursor_abc".into()));
+        let usage = deserialized.usage_metrics.unwrap();
+        assert_eq!(usage.len(), 3);
+        assert!(matches!(usage[0].kind, UsageMetricKind::Tokens));
+        assert_eq!(usage[0].amount, 1200);
         let meta = deserialized.response_metadata.unwrap();
         assert_eq!(meta.processing_time_ms, Some(42));
         assert!(!meta.from_cache);
@@ -1657,12 +1996,14 @@ mod tests {
         assert_eq!(deserialized.status, InvokeStatus::Error);
         assert!(deserialized.result.is_none());
         assert!(deserialized.error.is_some());
-        match &deserialized.error {
-            Some(FcpError::CapabilityDenied { capability, .. }) => {
-                assert_eq!(capability, "gmail.send");
-            }
-            _ => panic!("Expected CapabilityDenied error"),
-        }
+        assert!(
+            matches!(
+                &deserialized.error,
+                Some(FcpError::CapabilityDenied { capability, .. }) if capability == "gmail.send"
+            ),
+            "Expected CapabilityDenied error, got {:?}",
+            deserialized.error
+        );
     }
 
     #[test]
@@ -2155,6 +2496,7 @@ mod tests {
         assert!(cost.estimated_duration_ms.is_none());
         assert!(cost.estimated_bytes.is_none());
         assert!(cost.currency.is_none());
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
@@ -2162,12 +2504,14 @@ mod tests {
         let cost = CostEstimate::with_duration_ms(250);
         assert!(cost.api_credits.is_none());
         assert_eq!(cost.estimated_duration_ms, Some(250));
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
     fn cost_estimate_with_bytes() {
         let cost = CostEstimate::with_bytes(8192);
         assert_eq!(cost.estimated_bytes, Some(8192));
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
@@ -2175,12 +2519,14 @@ mod tests {
         let cost = CostEstimate::with_credits(100)
             .and_duration_ms(50)
             .and_bytes(1024)
-            .and_currency(CurrencyCost::usd_cents(5));
+            .and_currency(CurrencyCost::usd_cents(5))
+            .and_confidence(CostEstimateConfidence::High);
 
         assert_eq!(cost.api_credits, Some(100));
         assert_eq!(cost.estimated_duration_ms, Some(50));
         assert_eq!(cost.estimated_bytes, Some(1024));
         assert!(cost.currency.is_some());
+        assert_eq!(cost.confidence, Some(CostEstimateConfidence::High));
         let currency = cost.currency.unwrap();
         assert_eq!(currency.amount_cents, 5);
         assert_eq!(currency.currency_code, "USD");
@@ -2193,6 +2539,7 @@ mod tests {
         assert!(cost.estimated_duration_ms.is_none());
         assert!(cost.estimated_bytes.is_none());
         assert!(cost.currency.is_none());
+        assert!(cost.confidence.is_none());
     }
 
     #[test]
@@ -2200,7 +2547,8 @@ mod tests {
         let cost = CostEstimate::with_credits(1500)
             .and_duration_ms(300)
             .and_bytes(2048)
-            .and_currency(CurrencyCost::new(10, "EUR"));
+            .and_currency(CurrencyCost::new(10, "EUR"))
+            .and_confidence(CostEstimateConfidence::Medium);
 
         let json = serde_json::to_string(&cost).unwrap();
         let deserialized: CostEstimate = serde_json::from_str(&json).unwrap();
@@ -2209,6 +2557,10 @@ mod tests {
         assert_eq!(deserialized.estimated_duration_ms, Some(300));
         assert_eq!(deserialized.estimated_bytes, Some(2048));
         assert!(deserialized.currency.is_some());
+        assert_eq!(
+            deserialized.confidence,
+            Some(CostEstimateConfidence::Medium)
+        );
         let currency = deserialized.currency.unwrap();
         assert_eq!(currency.amount_cents, 10);
         assert_eq!(currency.currency_code, "EUR");

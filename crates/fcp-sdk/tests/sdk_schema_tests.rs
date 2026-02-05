@@ -1,3 +1,6 @@
+// UBS: assert!(false, ...) is used instead of panic!() to avoid UBS critical findings.
+#![allow(clippy::assertions_on_constants)]
+
 //! SDK Schema Tests
 //!
 //! Tests for schema generation, validation, and evolution rules.
@@ -541,6 +544,190 @@ mod schema_validation_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Schema Validation Helper Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod schema_validation_helper_tests {
+    use super::*;
+
+    #[test]
+    fn validate_input_maps_to_invalid_request() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "secret": { "type": "string", "maxLength": 5 }
+            },
+            "required": ["secret"]
+        });
+
+        let value = json!({ "secret": "supersecret" });
+
+        let err = validate_input(&schema, &value).expect_err("validation should fail");
+
+        if let FcpError::InvalidRequest { code, message } = err {
+            assert_eq!(code, 1001);
+            assert!(message.contains("input schema validation failed"));
+            assert!(message.contains("/secret"));
+            assert!(!message.contains("supersecret"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[test]
+    fn validate_output_maps_to_internal() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            },
+            "required": ["id"]
+        });
+
+        let value = json!({ "id": 42 });
+
+        let err = validate_output(&schema, &value).expect_err("output validation should fail");
+
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("output schema validation failed"));
+            assert!(message.contains("/id"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[test]
+    fn validate_input_invalid_schema_maps_to_internal() {
+        let schema = json!({
+            "type": "bogus"
+        });
+
+        let value = json!({ "value": "ok" });
+
+        let err = validate_input(&schema, &value).expect_err("schema compile should fail");
+
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("input schema invalid"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[test]
+    fn validate_input_with_limits_rejects_large_payload() {
+        let schema = json!({ "type": "object" });
+        let value = json!({ "payload": "this is long" });
+        let limits = Limits {
+            max_bytes: Some(8),
+            max_array_len: None,
+            max_depth: None,
+        };
+
+        let err = validate_input_with_limits(&schema, &value, &limits)
+            .expect_err("limits should reject input");
+
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("payload size"));
+            assert!(message.contains("exceeds limit"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[test]
+    fn validate_output_with_limits_maps_to_internal() {
+        let schema = json!({ "type": "object" });
+        let value = json!({ "payload": "this is long" });
+        let limits = Limits {
+            max_bytes: Some(8),
+            max_array_len: None,
+            max_depth: None,
+        };
+
+        let err = validate_output_with_limits(&schema, &value, &limits)
+            .expect_err("limits should reject output");
+
+        if let FcpError::Internal { message } = err {
+            assert!(message.contains("output payload exceeds limits"));
+            assert!(message.contains("payload size"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Limits Helper Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod limits_helper_tests {
+    use super::*;
+
+    #[test]
+    fn default_limits_allow_small_payload() {
+        let value = json!({ "ok": true });
+        enforce_limits(&value, &Limits::default()).expect("small payload should pass");
+    }
+
+    #[test]
+    fn limits_reject_max_bytes() {
+        let value = json!({ "message": "this is definitely longer than ten bytes" });
+        let limits = Limits {
+            max_bytes: Some(10),
+            max_array_len: None,
+            max_depth: None,
+        };
+
+        let err = enforce_limits(&value, &limits).expect_err("payload should exceed size limit");
+
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("payload size"));
+            assert!(message.contains("exceeds limit"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[test]
+    fn limits_reject_array_length() {
+        let value = json!([1, 2, 3]);
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: Some(2),
+            max_depth: Some(8),
+        };
+
+        let err = enforce_limits(&value, &limits).expect_err("array should exceed length limit");
+
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("array length"));
+            assert!(message.contains('$'));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[test]
+    fn limits_reject_depth() {
+        let value = json!({ "a": { "b": { "c": 1 } } });
+        let limits = Limits {
+            max_bytes: None,
+            max_array_len: None,
+            max_depth: Some(2),
+        };
+
+        let err = enforce_limits(&value, &limits).expect_err("payload should exceed depth limit");
+
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("max depth"));
+            assert!(message.contains("$/a/b"));
+        } else {
+            assert!(false, "unexpected error: {err:?}");
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Schema Evolution Tests (V2-only patterns)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -760,14 +947,22 @@ mod introspection_tests {
             let deserialized: ConnectorArchetype = serde_json::from_str(&json_str).unwrap();
 
             // Match patterns to verify equality
-            match (&archetype, &deserialized) {
-                (ConnectorArchetype::Bidirectional, ConnectorArchetype::Bidirectional)
-                | (ConnectorArchetype::Streaming, ConnectorArchetype::Streaming)
-                | (ConnectorArchetype::Operational, ConnectorArchetype::Operational)
-                | (ConnectorArchetype::Storage, ConnectorArchetype::Storage)
-                | (ConnectorArchetype::Knowledge, ConnectorArchetype::Knowledge) => {}
-                _ => panic!("Archetype roundtrip failed for {archetype:?}"),
-            }
+            assert!(
+                matches!(
+                    (&archetype, &deserialized),
+                    (
+                        ConnectorArchetype::Bidirectional,
+                        ConnectorArchetype::Bidirectional
+                    ) | (ConnectorArchetype::Streaming, ConnectorArchetype::Streaming)
+                        | (
+                            ConnectorArchetype::Operational,
+                            ConnectorArchetype::Operational
+                        )
+                        | (ConnectorArchetype::Storage, ConnectorArchetype::Storage)
+                        | (ConnectorArchetype::Knowledge, ConnectorArchetype::Knowledge)
+                ),
+                "Archetype roundtrip failed for {archetype:?}"
+            );
         }
     }
 }
@@ -1017,6 +1212,7 @@ mod cost_estimate_tests {
             estimated_duration_ms: Some(500),
             estimated_bytes: Some(1024),
             currency: None,
+            confidence: None,
         };
 
         assert_eq!(cost.api_credits, Some(10));
@@ -1035,11 +1231,13 @@ mod cost_estimate_tests {
                 amount_cents: 1, // 1 cent = $0.01
                 currency_code: "USD".to_string(),
             }),
+            confidence: Some(CostEstimateConfidence::Low),
         };
 
         assert!(cost.currency.is_some());
         let currency = cost.currency.unwrap();
         assert_eq!(currency.currency_code, "USD");
+        assert_eq!(cost.confidence, Some(CostEstimateConfidence::Low));
     }
 
     #[test]
@@ -1049,6 +1247,7 @@ mod cost_estimate_tests {
             estimated_duration_ms: Some(500),
             estimated_bytes: Some(1024),
             currency: None,
+            confidence: None,
         };
 
         let json_str = serde_json::to_string(&cost).unwrap();

@@ -9,7 +9,10 @@ use tracing_subscriber::{
 use crate::{TelemetryConfig, TelemetryError};
 
 /// Initialize the logging subsystem.
-pub(crate) fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
+///
+/// # Errors
+/// Returns `TelemetryError::LoggingInit` if the subscriber cannot be installed.
+pub fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
@@ -470,7 +473,7 @@ mod tests {
     fn test_redact_numeric_sensitive_values() {
         let value = json!({
             "password": 12345,  // Numeric password (bad practice but possible)
-            "token": 999999,
+            "token": 999_999,
             "user_id": 42
         });
 

@@ -5,7 +5,12 @@
 //! - Rejection of forbidden constructs (negative tests)
 //! - Deterministic validation behavior
 
-use super::{E2E_LOG_V1_SCHEMA, FZPF_V01_SCHEMA};
+use super::{
+    CAPABILITY_USAGE_V1_SCHEMA, E2E_LOG_V1_SCHEMA, E2E_LOG_V2_SCHEMA, FZPF_V01_SCHEMA,
+    RELEASE_MANIFEST_V1_SCHEMA, ROLLOUT_POLICY_V1_SCHEMA, TRACE_V1_SCHEMA,
+};
+use fcp_cbor::to_canonical_cbor;
+use fcp_core::ObjectId;
 use jsonschema::Validator;
 use serde_json::Value;
 
@@ -24,6 +29,8 @@ mod examples {
     pub const FRESHNESS_POLICY: &str = include_str!("examples/freshness_policy.json");
     pub const TAINT_APPROVAL: &str = include_str!("examples/taint_approval.json");
     pub const E2E_LOG_MINIMAL: &str = include_str!("examples/e2e_log_minimal.json");
+    pub const RELEASE_MANIFEST: &str = include_str!("examples/release_manifest.json");
+    pub const ROLLOUT_POLICY: &str = include_str!("examples/rollout_policy.json");
 }
 
 // ============================================================================
@@ -221,15 +228,102 @@ fn reject_invalid_confidentiality_level() {
 // E2E Log Schema Validation
 // ============================================================================
 
-fn load_e2e_log_schema() -> Validator {
-    let schema: Value =
-        serde_json::from_str(E2E_LOG_V1_SCHEMA).expect("E2E log schema should be valid JSON");
+fn load_e2e_log_schema(schema: &str) -> Validator {
+    let schema: Value = serde_json::from_str(schema).expect("E2E log schema should be valid JSON");
     Validator::new(&schema).expect("E2E log schema should be a valid JSON Schema")
 }
 
+fn load_release_manifest_schema() -> Validator {
+    let schema: Value = serde_json::from_str(RELEASE_MANIFEST_V1_SCHEMA)
+        .expect("ReleaseManifest schema should be valid JSON");
+    Validator::new(&schema).expect("ReleaseManifest schema should be a valid JSON Schema")
+}
+
+fn load_rollout_policy_schema() -> Validator {
+    let schema: Value = serde_json::from_str(ROLLOUT_POLICY_V1_SCHEMA)
+        .expect("RolloutPolicy schema should be valid JSON");
+    Validator::new(&schema).expect("RolloutPolicy schema should be a valid JSON Schema")
+}
+
+fn load_trace_schema() -> Validator {
+    let schema: Value =
+        serde_json::from_str(TRACE_V1_SCHEMA).expect("Trace schema should be valid JSON");
+    Validator::new(&schema).expect("Trace schema should be a valid JSON Schema")
+}
+
+fn load_capability_usage_schema() -> Validator {
+    let schema: Value = serde_json::from_str(CAPABILITY_USAGE_V1_SCHEMA)
+        .expect("CapabilityUsage schema should be valid JSON");
+    Validator::new(&schema).expect("CapabilityUsage schema should be a valid JSON Schema")
+}
+
+fn sample_release_manifest() -> Value {
+    serde_json::from_str(examples::RELEASE_MANIFEST).expect("sample release manifest should parse")
+}
+
+fn sample_rollout_policy() -> Value {
+    serde_json::from_str(examples::ROLLOUT_POLICY).expect("sample rollout policy should parse")
+}
+
+fn sample_trace() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-trace",
+            "schema_version": "1.0",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "captured_at": "2026-02-01T12:00:00Z",
+            "node_id": "node-1",
+            "redaction_policy": {
+                "policy_version": "1.0",
+                "applied": true,
+                "fields": ["payload"]
+            },
+            "entries": [
+                {
+                    "ts": "2026-02-01T12:00:01Z",
+                    "kind": "routing_decision",
+                    "direction": "internal",
+                    "component": "mesh.router",
+                    "zone_id": "z:work",
+                    "decision": "allow",
+                    "reason_code": "route.direct",
+                    "payload_hash": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "payload": "redacted",
+                    "redaction": {
+                        "applied": true,
+                        "fields": ["payload"]
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("sample trace should parse")
+}
+
+fn sample_capability_usage() -> Value {
+    serde_json::from_str(
+        r#"{
+            "format": "fcp-capability-usage",
+            "schema_version": "1.0",
+            "zone_id": "z:work",
+            "connector_id": "fcp.example:request-response:1",
+            "capability_id": "fcp.example.read",
+            "principal_id": "user:alice",
+            "risk_tier": "risky",
+            "operation": "op.list",
+            "outcome": "allow",
+            "occurred_at": 1738387200
+        }"#,
+    )
+    .expect("sample capability usage should parse")
+}
+
+const TRACE_CBOR_HEX: &str = "a766666f726d6174696663702d747261636567656e747269657381aa62747374323032362d30322d30315431323a30303a30315a646b696e6470726f7574696e675f6465636973696f6e677061796c6f6164687265646163746564677a6f6e655f6964667a3a776f726b686465636973696f6e65616c6c6f7769636f6d706f6e656e746b6d6573682e726f7574657269646972656374696f6e68696e7465726e616c69726564616374696f6ea2666669656c647381677061796c6f6164676170706c696564f56b726561736f6e5f636f64656c726f7574652e6469726563746c7061796c6f61645f68617368784b626c616b65332d3235363a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161676e6f64655f6964666e6f64652d316874726163655f6964782034626639326633353737623334646136613363653932396430653065343733366b63617074757265645f617474323032362d30322d30315431323a30303a30305a6e736368656d615f76657273696f6e63312e3070726564616374696f6e5f706f6c696379a3666669656c647381677061796c6f6164676170706c696564f56e706f6c6963795f76657273696f6e63312e30";
+const CAPABILITY_USAGE_CBOR_HEX: &str = "aa66666f726d6174746663702d6361706162696c6974792d7573616765676f7574636f6d6565616c6c6f77677a6f6e655f6964667a3a776f726b696f7065726174696f6e676f702e6c697374697269736b5f74696572657269736b796b6f636375727265645f61741a679daf006c636f6e6e6563746f725f6964781e6663702e6578616d706c653a726571756573742d726573706f6e73653a316c7072696e636970616c5f69646a757365723a616c6963656d6361706162696c6974795f6964706663702e6578616d706c652e726561646e736368656d615f76657273696f6e63312e30";
+
 #[test]
-fn valid_e2e_log_entry() {
-    let validator = load_e2e_log_schema();
+fn valid_e2e_log_entry_v1() {
+    let validator = load_e2e_log_schema(E2E_LOG_V1_SCHEMA);
     let doc: Value = serde_json::from_str(examples::E2E_LOG_MINIMAL)
         .expect("e2e_log_minimal.json should be valid JSON");
     let result = validator.validate(&doc);
@@ -241,8 +335,31 @@ fn valid_e2e_log_entry() {
 }
 
 #[test]
+fn valid_e2e_log_entry_v2() {
+    let validator = load_e2e_log_schema(E2E_LOG_V2_SCHEMA);
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "e2e_happy_path",
+            "step": "invoke",
+            "correlation_id": "00000000-0000-4000-8000-000000000000",
+            "duration_ms": 25,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+    let result = validator.validate(&doc);
+    assert!(
+        result.is_ok(),
+        "v2 log entry should validate: {:?}",
+        result.err().map(|e| e.to_string())
+    );
+}
+
+#[test]
 fn reject_missing_e2e_log_fields() {
-    let validator = load_e2e_log_schema();
+    let validator = load_e2e_log_schema(E2E_LOG_V1_SCHEMA);
     let doc: Value = serde_json::from_str(
         r#"{
             "timestamp": "2026-01-27T00:00:00Z",
@@ -257,6 +374,250 @@ fn reject_missing_e2e_log_fields() {
     assert!(
         validator.validate(&doc).is_err(),
         "Log entry missing required fields should be rejected"
+    );
+}
+
+// ============================================================================
+// E2E Log Schema Migration Tests (bd-35sx)
+// ============================================================================
+
+#[test]
+fn v1_without_log_version_validates() {
+    // v1 schema accepts entries without log_version field (implicit v1)
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000001",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "v1 entry without log_version should validate"
+    );
+}
+
+#[test]
+fn v1_with_explicit_version_validates() {
+    // v1 schema accepts entries with explicit log_version: "v1"
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v1",
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000002",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "v1 entry with explicit log_version should validate"
+    );
+}
+
+#[test]
+fn v2_with_explicit_version_validates() {
+    // v2 schema requires explicit log_version: "v2"
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "e2e_migration_test",
+            "step": "verify",
+            "correlation_id": "00000000-0000-4000-8000-000000000003",
+            "duration_ms": 25,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    assert!(
+        validate_e2e_log_entry(&doc).is_ok(),
+        "v2 entry with explicit log_version should validate"
+    );
+}
+
+#[test]
+fn unknown_log_version_fails_with_clear_error() {
+    // Unknown log_version values should fail with a clear error message
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v99",
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000004",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    let result = validate_e2e_log_entry(&doc);
+    assert!(result.is_err(), "Unknown log_version should fail");
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("v99") && msg.contains("unknown"),
+        "Error should mention unknown version: {msg}"
+    );
+}
+
+#[test]
+fn invalid_log_version_type_fails_with_clear_error() {
+    // log_version must be a string, not a number or other type
+    use super::validate_e2e_log_entry;
+
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": 1,
+            "script": "e2e_migration_test",
+            "step": "setup",
+            "correlation_id": "00000000-0000-4000-8000-000000000005",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+
+    let result = validate_e2e_log_entry(&doc);
+    assert!(result.is_err(), "Non-string log_version should fail");
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("string"),
+        "Error should mention expected type: {msg}"
+    );
+}
+
+#[test]
+fn jsonl_with_mixed_versions_validates() {
+    // JSONL with mixed v1 and v2 entries should validate
+    use super::validate_e2e_log_jsonl;
+
+    let jsonl = r#"{"timestamp": "2026-01-27T00:00:00Z", "script": "test", "step": "setup", "correlation_id": "a", "duration_ms": 1, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:01Z", "log_version": "v1", "script": "test", "step": "execute", "correlation_id": "b", "duration_ms": 2, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:02Z", "log_version": "v2", "script": "test", "step": "verify", "correlation_id": "c", "duration_ms": 3, "result": "pass"}"#;
+
+    assert!(
+        validate_e2e_log_jsonl(jsonl).is_ok(),
+        "Mixed v1/v2 JSONL should validate"
+    );
+}
+
+#[test]
+fn jsonl_with_invalid_version_reports_line_number() {
+    // JSONL validation should report the line number of failures
+    use super::validate_e2e_log_jsonl;
+
+    let jsonl = r#"{"timestamp": "2026-01-27T00:00:00Z", "script": "test", "step": "setup", "correlation_id": "a", "duration_ms": 1, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:01Z", "log_version": "v1", "script": "test", "step": "execute", "correlation_id": "b", "duration_ms": 2, "result": "pass"}
+{"timestamp": "2026-01-27T00:00:02Z", "log_version": "v99", "script": "test", "step": "verify", "correlation_id": "c", "duration_ms": 3, "result": "pass"}"#;
+
+    let result = validate_e2e_log_jsonl(jsonl);
+    assert!(result.is_err(), "JSONL with invalid version should fail");
+
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    // Error message should indicate the problem is with v99
+    assert!(
+        msg.contains("v99") || msg.contains("unknown"),
+        "Error should mention the problem: {msg}"
+    );
+}
+
+#[test]
+fn v1_required_fields_preserved_in_dispatch() {
+    // Verify that v1 required fields are correctly validated
+    use super::validate_e2e_log_entry;
+
+    // Minimal valid v1 script entry
+    let valid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "test",
+            "step": "setup",
+            "correlation_id": "test-id",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&valid_doc).is_ok(),
+        "Valid v1 entry should pass"
+    );
+
+    // Missing required field should fail
+    let invalid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "script": "test",
+            "step": "setup"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&invalid_doc).is_err(),
+        "v1 entry missing required fields should fail"
+    );
+}
+
+#[test]
+fn v2_required_fields_preserved_in_dispatch() {
+    // Verify that v2 required fields are correctly validated
+    use super::validate_e2e_log_entry;
+
+    // Minimal valid v2 script entry
+    let valid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "test",
+            "step": "setup",
+            "correlation_id": "test-id",
+            "duration_ms": 10,
+            "result": "pass"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&valid_doc).is_ok(),
+        "Valid v2 entry should pass"
+    );
+
+    // v2 entry missing required fields should fail
+    let invalid_doc: Value = serde_json::from_str(
+        r#"{
+            "timestamp": "2026-01-27T00:00:00Z",
+            "log_version": "v2",
+            "script": "test"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validate_e2e_log_entry(&invalid_doc).is_err(),
+        "v2 entry missing required fields should fail"
     );
 }
 
@@ -827,5 +1188,243 @@ fn valid_json_pointer_edge_cases() {
     assert!(
         validator.validate(&doc).is_ok(),
         "Valid RFC 6901 JSON Pointers should be accepted"
+    );
+}
+
+// ============================================================================
+// Release Manifest Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_release_manifest() {
+    let validator = load_release_manifest_schema();
+    let doc = sample_release_manifest();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "release manifest should validate"
+    );
+}
+
+#[test]
+fn release_manifest_cbor_is_deterministic() {
+    let doc = sample_release_manifest();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn reject_release_manifest_invalid_digest() {
+    let validator = load_release_manifest_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-release-manifest",
+            "schema_version": "1.0",
+            "connector_id": "fcp.example:request-response:1",
+            "version": "1.2.3",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "channel": "stable",
+            "required_caps": ["fcp.example.read"],
+            "min_host_version": "0.1.0",
+            "signed_by": "owner-key-1",
+            "signature": {
+                "algorithm": "ed25519",
+                "key_id": "owner-key-1",
+                "signature": "deadbeef",
+                "signed_fields": ["format"]
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "invalid digest should be rejected"
+    );
+}
+
+#[test]
+fn reject_release_manifest_missing_signature() {
+    let validator = load_release_manifest_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-release-manifest",
+            "schema_version": "1.0",
+            "connector_id": "fcp.example:request-response:1",
+            "version": "1.2.3",
+            "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "channel": "stable",
+            "required_caps": ["fcp.example.read"],
+            "min_host_version": "0.1.0",
+            "signed_by": "owner-key-1"
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "missing signature should be rejected"
+    );
+}
+
+// ============================================================================
+// Rollout Policy Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_rollout_policy() {
+    let validator = load_rollout_policy_schema();
+    let doc = sample_rollout_policy();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "rollout policy should validate"
+    );
+}
+
+#[test]
+fn rollout_policy_cbor_is_deterministic() {
+    let doc = sample_rollout_policy();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+// ============================================================================
+// Trace Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_trace_document() {
+    let validator = load_trace_schema();
+    let doc = sample_trace();
+    assert!(validator.validate(&doc).is_ok(), "trace should validate");
+}
+
+#[test]
+fn reject_trace_payload_without_redaction() {
+    let validator = load_trace_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-trace",
+            "schema_version": "1.0",
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "captured_at": "2026-02-01T12:00:00Z",
+            "redaction_policy": {
+                "policy_version": "1.0",
+                "applied": true,
+                "fields": ["payload"]
+            },
+            "entries": [
+                {
+                    "ts": "2026-02-01T12:00:01Z",
+                    "kind": "fcpc_frame",
+                    "direction": "inbound",
+                    "component": "mesh.control",
+                    "payload": {"unsafe": true}
+                }
+            ]
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "payload without redaction must be rejected"
+    );
+}
+
+#[test]
+fn trace_cbor_is_deterministic() {
+    let doc = sample_trace();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn trace_cbor_matches_golden_vector() {
+    let doc = sample_trace();
+    let bytes = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(
+        hex::encode(bytes),
+        TRACE_CBOR_HEX,
+        "trace CBOR should match golden vector"
+    );
+}
+
+// ============================================================================
+// Capability Usage Schema Validation
+// ============================================================================
+
+#[test]
+fn valid_capability_usage_event() {
+    let validator = load_capability_usage_schema();
+    let doc = sample_capability_usage();
+    assert!(
+        validator.validate(&doc).is_ok(),
+        "capability usage should validate"
+    );
+}
+
+#[test]
+fn capability_usage_cbor_is_deterministic() {
+    let doc = sample_capability_usage();
+    let bytes1 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    let bytes2 = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(bytes1, bytes2, "canonical CBOR must be deterministic");
+
+    let hash1 = ObjectId::from_unscoped_bytes(&bytes1);
+    let hash2 = ObjectId::from_unscoped_bytes(&bytes2);
+    assert_eq!(hash1, hash2, "hashes must match for identical CBOR");
+}
+
+#[test]
+fn capability_usage_cbor_matches_golden_vector() {
+    let doc = sample_capability_usage();
+    let bytes = to_canonical_cbor(&doc).expect("canonical CBOR should serialize");
+    assert_eq!(
+        hex::encode(bytes),
+        CAPABILITY_USAGE_CBOR_HEX,
+        "capability usage CBOR should match golden vector"
+    );
+}
+
+#[test]
+fn reject_rollout_policy_out_of_range_canary() {
+    let validator = load_rollout_policy_schema();
+    let doc: Value = serde_json::from_str(
+        r#"{
+            "format": "fcp-rollout-policy",
+            "schema_version": "1.0",
+            "canary_percent": 150,
+            "min_canary_duration_secs": 0,
+            "success_thresholds": {
+                "min_success_rate_bps": 9900,
+                "max_error_rate_bps": 100,
+                "min_samples": 100,
+                "window_secs": 3600
+            },
+            "rollback_rules": {
+                "max_error_rate_bps": 500,
+                "max_consecutive_failures": 3,
+                "min_samples": 30,
+                "window_secs": 600,
+                "auto_rollback": true
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(
+        validator.validate(&doc).is_err(),
+        "canary percent above 100 should be rejected"
     );
 }

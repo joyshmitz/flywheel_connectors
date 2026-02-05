@@ -143,10 +143,10 @@ pub struct SymbolRequestHandler {
     policy: SymbolRequestPolicy,
     /// Active transfers (object_id -> transfer state).
     active_transfers: HashMap<ObjectId, TransferState>,
-    /// Completed transfers awaiting SymbolAck.
-    completed_awaiting_ack: HashSet<ObjectId>,
-    /// Completed transfers (SymbolAck received).
-    completed_transfers: HashSet<ObjectId>,
+    /// Completed transfers awaiting SymbolAck (object_id -> timestamp_ms).
+    completed_awaiting_ack: HashMap<ObjectId, u64>,
+    /// Completed transfers (SymbolAck received) (object_id -> timestamp_ms).
+    completed_transfers: HashMap<ObjectId, u64>,
 }
 
 /// Policy for symbol request handling.
@@ -162,6 +162,8 @@ pub struct SymbolRequestPolicy {
     pub require_proof_of_need_above: u32,
     /// Whether to allow unauthenticated requests at all.
     pub allow_unauthenticated: bool,
+    /// Timeout for stale transfer state in milliseconds (default: 1 hour).
+    pub transfer_state_ttl_ms: u64,
 }
 
 impl Default for SymbolRequestPolicy {
@@ -172,6 +174,7 @@ impl Default for SymbolRequestPolicy {
             min_bootstrap_symbols: DEFAULT_MIN_BOOTSTRAP_SYMBOLS,
             require_proof_of_need_above: 100, // Require hints for large requests
             allow_unauthenticated: true,      // Zone can override
+            transfer_state_ttl_ms: 3_600_000, // 1 hour
         }
     }
 }
@@ -190,6 +193,8 @@ struct TransferState {
     last_status: Option<DecodeStatusSummary>,
     /// Whether we've been told to stop.
     stopped: bool,
+    /// Last activity timestamp (ms).
+    last_activity: u64,
 }
 
 /// Summary of a decode status for tracking.
@@ -211,8 +216,8 @@ impl SymbolRequestHandler {
         Self {
             policy,
             active_transfers: HashMap::new(),
-            completed_awaiting_ack: HashSet::new(),
-            completed_transfers: HashSet::new(),
+            completed_awaiting_ack: HashMap::new(),
+            completed_transfers: HashMap::new(),
         }
     }
 
@@ -243,12 +248,23 @@ impl SymbolRequestHandler {
             ));
         }
 
+        if request.zone_id != request.header.zone_id {
+            return Err(SymbolRequestError::InvalidRequest {
+                reason: "request zone_id does not match header zone_id".to_string(),
+            });
+        }
+
         // Validate hint bounds
         if let Some(ref hints) = request.missing_hint {
             if hints.len() > MAX_MISSING_HINT_ENTRIES {
                 return Err(SymbolRequestError::HintTooLarge {
                     count: hints.len(),
                     max: MAX_MISSING_HINT_ENTRIES,
+                });
+            }
+            if hints.len() > request.max_symbols as usize {
+                return Err(SymbolRequestError::InvalidRequest {
+                    reason: "missing hint exceeds max_symbols".to_string(),
                 });
             }
         }
@@ -323,7 +339,7 @@ impl SymbolRequestHandler {
     /// Process a decode status update from a peer.
     ///
     /// Updates transfer state based on receiver feedback.
-    pub fn process_decode_status(&mut self, status: &DecodeStatus) {
+    pub fn process_decode_status(&mut self, status: &DecodeStatus, now_ms: u64) {
         let summary = DecodeStatusSummary {
             received_unique: status.received_unique,
             needed: status.needed,
@@ -336,11 +352,13 @@ impl SymbolRequestHandler {
                 received = status.received_unique,
                 "decode complete, awaiting SymbolAck"
             );
-            self.completed_awaiting_ack.insert(status.object_id.clone());
+            self.completed_awaiting_ack
+                .insert(status.object_id.clone(), now_ms);
         }
 
         if let Some(state) = self.active_transfers.get_mut(&status.object_id) {
             state.last_status = Some(summary);
+            state.last_activity = now_ms;
             if status.complete {
                 state.stopped = true;
             }
@@ -352,6 +370,7 @@ impl SymbolRequestHandler {
         &mut self,
         request: &SymbolRequest,
         sent_esis: impl IntoIterator<Item = u32>,
+        now_ms: u64,
     ) {
         let state = self
             .active_transfers
@@ -362,8 +381,10 @@ impl SymbolRequestHandler {
                 sent_esis: HashSet::new(),
                 last_status: None,
                 stopped: false,
+                last_activity: now_ms,
             });
 
+        state.last_activity = now_ms;
         state.total_needed = state.total_needed.max(request.max_symbols);
         state.sent_esis.extend(sent_esis);
     }
@@ -371,7 +392,7 @@ impl SymbolRequestHandler {
     /// Process a symbol acknowledgment (stop condition).
     ///
     /// Stops sending symbols for the acknowledged object.
-    pub fn process_symbol_ack(&mut self, ack: &SymbolAck) {
+    pub fn process_symbol_ack(&mut self, ack: &SymbolAck, now_ms: u64) {
         info!(
             object_id = %hex::encode(ack.object_id.as_bytes()),
             reason = ?ack.reason,
@@ -380,10 +401,11 @@ impl SymbolRequestHandler {
         );
 
         self.completed_awaiting_ack.remove(&ack.object_id);
-        self.completed_transfers.insert(ack.object_id);
+        self.completed_transfers.insert(ack.object_id, now_ms);
 
         if let Some(state) = self.active_transfers.get_mut(&ack.object_id) {
             state.stopped = true;
+            state.last_activity = now_ms;
         }
 
         // Can clean up transfer state
@@ -393,12 +415,51 @@ impl SymbolRequestHandler {
     /// Check if a transfer should stop.
     #[must_use]
     pub fn should_stop(&self, object_id: &ObjectId) -> bool {
-        if self.completed_transfers.contains(object_id) {
+        if self.completed_transfers.contains_key(object_id) {
             return true;
         }
         self.active_transfers
             .get(object_id)
             .is_some_and(|s| s.stopped)
+    }
+
+    /// Prune stale transfer state.
+    ///
+    /// Removes active and completed transfers that have exceeded the TTL.
+    /// Returns the count of removed entries (active + completed).
+    pub fn prune_stale_state(&mut self, now_ms: u64) -> usize {
+        let ttl = self.policy.transfer_state_ttl_ms;
+        let expired_threshold = now_ms.saturating_sub(ttl);
+        let mut removed = 0;
+
+        self.active_transfers.retain(|_, state| {
+            let keep = state.last_activity >= expired_threshold;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        self.completed_awaiting_ack.retain(|_, timestamp| {
+            let keep = *timestamp >= expired_threshold;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        self.completed_transfers.retain(|_, timestamp| {
+            let keep = *timestamp >= expired_threshold;
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+
+        if removed > 0 {
+            debug!(removed, "pruned stale transfer state");
+        }
+        removed
     }
 
     /// Get the policy.
@@ -460,27 +521,39 @@ impl TargetedRepairEngine {
             None => return vec![],
         };
 
-        let limit = request.max_response_symbols as usize;
+        let limit = request
+            .max_response_symbols
+            .saturating_add(1)
+            .try_into()
+            .unwrap_or(usize::MAX);
 
         // If we have a missing hint, prioritize those
         if let Some(ref hints) = request.request.missing_hint {
-            let mut selected: Vec<u32> = hints
-                .iter()
-                .filter(|esi| available.contains(esi) && !already_sent.contains(esi))
-                .copied()
-                .take(limit)
-                .collect();
+            let mut seen = HashSet::new();
+            let mut selected = Vec::new();
+            for esi in hints.iter().copied() {
+                if selected.len() >= limit {
+                    break;
+                }
+                if !seen.insert(esi) {
+                    continue;
+                }
+                if available.contains(&esi) && !already_sent.contains(&esi) {
+                    selected.push(esi);
+                }
+            }
 
             // If we have room and the hint didn't fill it, add more
             if selected.len() < limit {
                 let remaining = limit - selected.len();
                 let hint_set: HashSet<_> = hints.iter().copied().collect();
-                let additional: Vec<_> = available
+                let mut additional: Vec<_> = available
                     .iter()
                     .filter(|esi| !hint_set.contains(esi) && !already_sent.contains(esi))
                     .copied()
-                    .take(remaining)
                     .collect();
+                additional.sort_unstable();
+                additional.truncate(remaining);
                 selected.extend(additional);
             }
 
@@ -494,12 +567,14 @@ impl TargetedRepairEngine {
             selected
         } else {
             // No hints, select any available symbols
-            available
+            let mut candidates: Vec<u32> = available
                 .iter()
                 .filter(|esi| !already_sent.contains(esi))
                 .copied()
-                .take(limit)
-                .collect()
+                .collect();
+            candidates.sort_unstable();
+            candidates.truncate(limit);
+            candidates
         }
     }
 
@@ -577,9 +652,11 @@ impl SymbolResponseBuilder {
 
     /// Build the response.
     #[must_use]
-    pub fn build(self, total_available: u32) -> SymbolResponse {
+    pub fn build(self, total_available: u32, already_sent: usize) -> SymbolResponse {
         let sent_count = self.selected_esis.len() as u32;
-        let is_final = sent_count >= total_available || self.selected_esis.is_empty();
+        let already_sent = u32::try_from(already_sent).unwrap_or(u32::MAX);
+        let total_sent = sent_count.saturating_add(already_sent);
+        let is_final = total_sent >= total_available || self.selected_esis.is_empty();
 
         SymbolResponse {
             object_id: self.object_id,
@@ -664,6 +741,10 @@ mod tests {
         "z:test-zone".parse().expect("zone parse")
     }
 
+    fn test_zone_id_alt() -> ZoneId {
+        "z:alt-zone".parse().expect("zone parse")
+    }
+
     fn test_object_header() -> ObjectHeader {
         let zone_id = test_zone_id();
         ObjectHeader {
@@ -709,6 +790,30 @@ mod tests {
         assert!(validated.is_authenticated);
         assert_eq!(validated.max_response_symbols, 100);
         assert!(!validated.has_proof_of_need);
+    }
+
+    #[test]
+    fn reject_zone_id_mismatch() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-zone-mismatch");
+
+        let header = test_object_header();
+        let request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0x11; 32]),
+            test_zone_id_alt(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            10,
+            0,
+        );
+
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::InvalidRequest { .. })
+        ));
     }
 
     #[test]
@@ -778,6 +883,21 @@ mod tests {
     }
 
     #[test]
+    fn reject_hint_exceeding_max_symbols() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-hint-max");
+
+        let request = test_symbol_request(2, Some(vec![1, 2, 3]));
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
     fn targeted_repair_selects_from_hints() {
         let mut engine = TargetedRepairEngine::new();
         let object_id = ObjectId::from_bytes([0x11; 32]);
@@ -827,6 +947,44 @@ mod tests {
     }
 
     #[test]
+    fn targeted_repair_dedups_hints_and_orders_additional() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..20);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(4, Some(vec![10, 5, 10, 3])),
+            is_authenticated: true,
+            max_response_symbols: 4,
+            has_proof_of_need: true,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+
+        assert_eq!(selected, vec![10, 5, 3, 0, 1]);
+    }
+
+    #[test]
+    fn targeted_repair_is_deterministic_without_hints() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..10);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(5, None),
+            is_authenticated: true,
+            max_response_symbols: 5,
+            has_proof_of_need: false,
+        };
+
+        let selected = engine.select_symbols(&request, &HashSet::new());
+
+        assert_eq!(selected, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
     fn process_symbol_ack_stops_transfer() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
@@ -845,7 +1003,7 @@ mod tests {
             500,
         );
 
-        handler.process_symbol_ack(&ack);
+        handler.process_symbol_ack(&ack, 0);
 
         // Transfer state should be removed
         assert_eq!(handler.active_transfer_count(), 0);
@@ -873,12 +1031,222 @@ mod tests {
             25, // Builder limit smaller than request limit (50) to force bounding
         )
         .add_from_repair_engine(&engine, &request, &HashSet::new())
-        .build(1000);
+        .build(1000, 0);
 
         // Should be bounded to 25
         assert_eq!(response.symbol_count(), 25);
         assert!(response.was_bounded);
         assert!(!response.is_final); // More available
+    }
+
+    #[test]
+    fn response_builder_marks_bounded_when_request_limit_hits() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        let zone_id = test_zone_id();
+
+        engine.register_available(object_id.clone(), 0..100);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(10, None),
+            is_authenticated: true,
+            max_response_symbols: 10,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            request.max_response_symbols,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(100, 0);
+
+        assert_eq!(response.symbol_count(), 10);
+        assert!(response.was_bounded);
+        assert!(!response.is_final);
+    }
+
+    #[test]
+    fn response_builder_marks_final_when_all_symbols_sent() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+        let zone_id = test_zone_id();
+
+        engine.register_available(object_id.clone(), 0..2);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(1, None),
+            is_authenticated: true,
+            max_response_symbols: 1,
+            has_proof_of_need: false,
+        };
+
+        let already_sent: HashSet<_> = vec![0].into_iter().collect();
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            zone_id,
+            ZoneKeyId::from_bytes([0x22; 8]),
+            request.max_response_symbols,
+        )
+        .add_from_repair_engine(&engine, &request, &already_sent)
+        .build(2, already_sent.len());
+
+        assert_eq!(response.symbol_count(), 1);
+        assert!(response.is_final);
+    }
+
+    #[test]
+    fn decode_status_complete_stops_transfer() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        // Start a transfer
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..10, 0);
+        assert_eq!(handler.active_transfer_count(), 1);
+
+        // Process decode status marking transfer complete
+        let status = DecodeStatus {
+            header: test_object_header(),
+            object_id: object_id.clone(),
+            zone_id: test_zone_id(),
+            zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+            epoch_id: 1000,
+            received_unique: 50,
+            needed: 0,
+            complete: true,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        handler.process_decode_status(&status, 0);
+
+        // Transfer should be stopped
+        assert!(handler.should_stop(&object_id));
+    }
+
+    #[test]
+    fn track_transfer_accumulates_sent_esis() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let request = test_symbol_request(100, None);
+
+        handler.track_transfer(&request, 0..5, 0);
+        assert_eq!(handler.active_transfer_count(), 1);
+
+        // Track more symbols for the same object
+        handler.track_transfer(&request, 5..10, 0);
+        assert_eq!(handler.active_transfer_count(), 1); // Same transfer
+    }
+
+    #[test]
+    fn should_stop_after_ack() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        // Initially not stopped
+        assert!(!handler.should_stop(&object_id));
+
+        // Start tracking then ack
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5, 0);
+
+        let ack = SymbolAck::new(
+            test_object_header(),
+            object_id.clone(),
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            SymbolAckReason::Complete,
+            5,
+        );
+        handler.process_symbol_ack(&ack, 0);
+
+        // Should stop and be fully cleaned up
+        assert!(handler.should_stop(&object_id));
+        assert_eq!(handler.active_transfer_count(), 0);
+    }
+
+    #[test]
+    fn policy_disallow_unauthenticated_rejects() {
+        let policy = SymbolRequestPolicy {
+            allow_unauthenticated: false,
+            ..SymbolRequestPolicy::default()
+        };
+        let handler = SymbolRequestHandler::new(policy);
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-no-auth");
+
+        let request = test_symbol_request(10, None);
+        let result = handler.validate_request(&request, false, &mut admission, &peer, 0, 64);
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::AdmissionRejected(_))
+        ));
+    }
+
+    #[test]
+    fn targeted_repair_remove_object() {
+        let mut engine = TargetedRepairEngine::new();
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        engine.register_available(object_id.clone(), 0..10);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(10, None),
+            is_authenticated: true,
+            max_response_symbols: 10,
+            has_proof_of_need: false,
+        };
+
+        // Should have symbols
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert!(!selected.is_empty());
+
+        // Remove and verify gone
+        engine.remove_object(&object_id);
+        let selected = engine.select_symbols(&request, &HashSet::new());
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn response_builder_empty_availability() {
+        let engine = TargetedRepairEngine::new(); // No symbols registered
+        let object_id = ObjectId::from_bytes([0x11; 32]);
+
+        let request = ValidatedRequest {
+            request: test_symbol_request(50, None),
+            is_authenticated: true,
+            max_response_symbols: 50,
+            has_proof_of_need: false,
+        };
+
+        let response = SymbolResponseBuilder::new(
+            object_id,
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            50,
+        )
+        .add_from_repair_engine(&engine, &request, &HashSet::new())
+        .build(0, 0);
+
+        assert_eq!(response.symbol_count(), 0);
+        assert!(response.is_final);
+    }
+
+    #[test]
+    fn authenticated_request_bounded_by_request_max() {
+        let handler = SymbolRequestHandler::with_default_policy();
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-bounded");
+
+        // Request max_symbols (50) < policy max (1000)
+        let request = test_symbol_request(50, None);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+
+        let validated = result.unwrap();
+        // Should be bounded to the request's max, not the policy's max
+        assert_eq!(validated.max_response_symbols, 50);
     }
 
     #[test]

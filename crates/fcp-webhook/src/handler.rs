@@ -158,8 +158,8 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         // Clean up old entries
         self.cleanup_seen_events();
 
-        let seen = self.seen_events.read();
-        if seen.contains_key(event_id) {
+        let is_replay = self.seen_events.read().contains_key(event_id);
+        if is_replay {
             return Err(WebhookError::ReplayDetected {
                 event_id: event_id.to_string(),
             });
@@ -186,14 +186,16 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         // Clean up old entries
         self.cleanup_seen_events();
 
-        let mut seen = self.seen_events.write();
-        if seen.contains_key(event_id) {
-            return Err(WebhookError::ReplayDetected {
-                event_id: event_id.to_string(),
-            });
-        }
+        {
+            let mut seen = self.seen_events.write();
+            if seen.contains_key(event_id) {
+                return Err(WebhookError::ReplayDetected {
+                    event_id: event_id.to_string(),
+                });
+            }
 
-        seen.insert(event_id.to_string(), Utc::now());
+            seen.insert(event_id.to_string(), Utc::now());
+        }
         Ok(())
     }
 
@@ -269,7 +271,7 @@ pub struct DeadLetterQueue {
 impl DeadLetterQueue {
     /// Create a new dead letter queue.
     #[must_use]
-    pub fn new(max_size: usize) -> Self {
+    pub const fn new(max_size: usize) -> Self {
         Self {
             events: RwLock::new(Vec::new()),
             max_size,
@@ -456,5 +458,134 @@ mod tests {
             !(r1 && r2),
             "Race condition detected: both threads processed the same event"
         );
+    }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_webhook_config_default() {
+        let config = WebhookConfig::default();
+        assert_eq!(config.max_payload_size, DEFAULT_MAX_PAYLOAD_SIZE);
+        assert!(config.idempotency_enabled);
+        assert_eq!(config.idempotency_ttl, Duration::from_secs(86400));
+        assert!(config.ip_allowlist.is_empty());
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.retry_delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_webhook_config_builder() {
+        let config = WebhookConfig::new()
+            .with_max_payload_size(1024)
+            .with_idempotency(false)
+            .with_idempotency_ttl(Duration::from_secs(3600))
+            .with_ip_allowlist(vec!["1.2.3.4".into()])
+            .with_max_retries(5);
+
+        assert_eq!(config.max_payload_size, 1024);
+        assert!(!config.idempotency_enabled);
+        assert_eq!(config.idempotency_ttl, Duration::from_secs(3600));
+        assert_eq!(config.ip_allowlist, vec!["1.2.3.4"]);
+        assert_eq!(config.max_retries, 5);
+    }
+
+    #[test]
+    fn test_webhook_handler_accessors() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "github");
+
+        assert_eq!(handler.provider(), "github");
+        assert_eq!(handler.config().max_payload_size, DEFAULT_MAX_PAYLOAD_SIZE);
+    }
+
+    #[test]
+    fn test_empty_allowlist_allows_all() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "test");
+
+        // Empty allowlist should allow any IP
+        assert!(handler.check_ip("1.2.3.4").is_ok());
+        assert!(handler.check_ip("10.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn test_claim_event_first_and_replay() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "test");
+
+        assert!(handler.claim_event("evt_1").is_ok());
+        assert!(matches!(
+            handler.claim_event("evt_1"),
+            Err(WebhookError::ReplayDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn test_idempotency_disabled_allows_replay() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_idempotency(false);
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+
+        handler.record_event("evt_1");
+        assert!(handler.check_replay("evt_1").is_ok());
+        assert!(handler.claim_event("evt_1").is_ok());
+    }
+
+    #[test]
+    fn test_event_router_empty() {
+        let router = EventRouter::new();
+        let event = crate::WebhookEvent::new("1", "push", "github");
+        assert!(router.route(&event).is_empty());
+    }
+
+    #[test]
+    fn test_dead_letter_queue_max_size_eviction() {
+        let dlq = DeadLetterQueue::new(2);
+
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("2", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("3", "test", "p"));
+
+        assert_eq!(dlq.len(), 2);
+        // Oldest (id "1") should have been evicted
+        let all = dlq.all();
+        assert_eq!(all[0].id, "2");
+        assert_eq!(all[1].id, "3");
+    }
+
+    #[test]
+    fn test_dead_letter_queue_sets_dead_lettered_status() {
+        let dlq = DeadLetterQueue::new(10);
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+
+        let all = dlq.all();
+        assert_eq!(all[0].metadata.status, DeliveryStatus::DeadLettered);
+    }
+
+    #[test]
+    fn test_dead_letter_queue_clear() {
+        let dlq = DeadLetterQueue::new(10);
+        dlq.push(crate::WebhookEvent::new("1", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("2", "test", "p"));
+        assert_eq!(dlq.len(), 2);
+
+        dlq.clear();
+        assert!(dlq.is_empty());
+    }
+
+    #[test]
+    fn test_dead_letter_queue_remove_nonexistent() {
+        let dlq = DeadLetterQueue::new(10);
+        assert!(dlq.remove("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_webhook_handler_debug() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "github");
+        let debug = format!("{handler:?}");
+        assert!(debug.contains("WebhookHandler"));
+        assert!(debug.contains("github"));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

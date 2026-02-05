@@ -12,7 +12,7 @@
 //! use fcp_telemetry::{TelemetryConfig, init_telemetry};
 //!
 //! // Initialize with defaults
-//! init_telemetry(TelemetryConfig::default()).await?;
+//! init_telemetry(TelemetryConfig::default())?;
 //!
 //! // Use tracing macros as normal
 //! tracing::info!(connector_id = "my-connector", "Starting up");
@@ -29,11 +29,14 @@ mod context;
 mod export;
 mod logging;
 pub mod metrics;
+pub mod trace_capture;
 mod tracing_layer;
+mod usage;
 
 pub use context::*;
 pub use export::*;
 pub use logging::*;
+pub use usage::*;
 // Re-export tracing_layer items explicitly to avoid TraceContext collision
 // (we prefer context::TraceContext which is the proper W3C binary implementation)
 pub use tracing_layer::{
@@ -169,7 +172,7 @@ impl TelemetryConfig {
 /// # Errors
 ///
 /// Returns an error if telemetry initialization fails.
-pub async fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
+pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
     // Initialize logging
     init_logging(&config)?;
 
@@ -181,7 +184,7 @@ pub async fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryErro
     // Initialize OTLP tracing if enabled
     if config.otlp_enabled {
         if let Some(ref endpoint) = config.otlp_endpoint {
-            init_otlp_tracer(&config.service_name, endpoint).await?;
+            init_otlp_tracer(&config.service_name, endpoint)?;
         }
     }
 
@@ -238,7 +241,7 @@ pub enum TelemetryError {
 /// Shutdown telemetry gracefully.
 ///
 /// This flushes any pending metrics and traces.
-pub async fn shutdown_telemetry() {
+pub fn shutdown_telemetry() {
     // Shutdown OpenTelemetry if initialized
     opentelemetry::global::shutdown_tracer_provider();
 }

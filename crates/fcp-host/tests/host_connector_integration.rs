@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use fcp_core::{
     CapabilityToken, ConnectorHealth, ConnectorId, CorrelationId, HandshakeRequest, HealthSnapshot,
-    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId, ZoneId,
+    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, RequestId,
+    SelfCheckReport, ZoneId,
 };
 use fcp_e2e::{AssertionsSummary, ConnectorProcessRunner, E2eLogEntry, E2eLogger};
 use fcp_host::{
@@ -102,6 +103,12 @@ impl SubprocessConnector {
 
     async fn health(&self) -> std::io::Result<HealthSnapshot> {
         let result = self.rpc("health", json!({})).await?;
+        serde_json::from_value(result)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+    }
+
+    async fn self_check(&self) -> std::io::Result<SelfCheckReport> {
+        let result = self.rpc("self_check", json!({})).await?;
         serde_json::from_value(result)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }
@@ -203,6 +210,11 @@ impl ConnectorRegistry for SubprocessRegistry {
         Some(fcp_core::RateLimitDeclarations::default())
     }
 
+    async fn self_check(&self, id: &ConnectorId) -> Option<SelfCheckReport> {
+        let connector = self.connectors.get(id)?;
+        connector.self_check().await.ok()
+    }
+
     fn version(&self) -> u64 {
         self.version
     }
@@ -296,6 +308,15 @@ async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::
             .receipt_id
             .as_ref()
             .map(|id| id.to_string()),
+    }));
+
+    let self_check = endpoint.self_check(&connector_a_id).await?;
+    assert_eq!(self_check.report.status, fcp_core::SelfCheckStatus::Ok);
+    logs.push(json!({
+        "step": "self_check",
+        "correlation_id": CorrelationId::new().to_string(),
+        "connector_id": connector_a_id.as_str(),
+        "status": format!("{:?}", self_check.report.status),
     }));
 
     for entry in &logs {

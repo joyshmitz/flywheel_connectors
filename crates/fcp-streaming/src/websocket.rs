@@ -80,6 +80,9 @@ impl WsMessage {
     }
 
     /// Parse text as JSON.
+    ///
+    /// # Errors
+    /// Returns a JSON parsing error if the payload is not valid JSON.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         match self {
             Self::Text(s) => serde_json::from_str(s),
@@ -108,14 +111,14 @@ impl From<Message> for WsMessage {
 impl From<WsMessage> for Message {
     fn from(msg: WsMessage) -> Self {
         match msg {
-            WsMessage::Text(s) => Message::Text(s.into()),
-            WsMessage::Binary(b) => Message::Binary(b.into()),
-            WsMessage::Ping(b) => Message::Ping(b.into()),
-            WsMessage::Pong(b) => Message::Pong(b.into()),
+            WsMessage::Text(s) => Self::Text(s.into()),
+            WsMessage::Binary(b) => Self::Binary(b.into()),
+            WsMessage::Ping(b) => Self::Ping(b.into()),
+            WsMessage::Pong(b) => Self::Pong(b.into()),
             WsMessage::Close(frame) => {
                 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
                 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-                Message::Close(frame.map(|f| CloseFrame {
+                Self::Close(frame.map(|f| CloseFrame {
                     code: CloseCode::from(f.code),
                     reason: f.reason.into(),
                 }))
@@ -261,6 +264,9 @@ impl WsClient {
     }
 
     /// Connect to the WebSocket server.
+    ///
+    /// # Errors
+    /// Returns an error if the connection attempt fails or times out.
     pub async fn connect(&self) -> StreamResult<WsConnection> {
         let url = Url::parse(&self.url)
             .map_err(|e: url::ParseError| StreamError::ConnectionFailed(e.to_string()))?;
@@ -268,9 +274,8 @@ impl WsClient {
         let connect_result =
             tokio::time::timeout(self.config.connect_timeout, connect_async(url.as_str())).await;
 
-        let ws_result = match connect_result {
-            Ok(result) => result,
-            Err(_) => return Err(StreamError::Timeout(self.config.connect_timeout)),
+        let Ok(ws_result) = connect_result else {
+            return Err(StreamError::Timeout(self.config.connect_timeout));
         };
 
         let (ws_stream, _response) =
@@ -303,7 +308,7 @@ pub struct WsConnection {
 
 impl WsConnection {
     /// Create a new connection wrapper.
-    fn new(
+    const fn new(
         stream: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
         config: WsConfig,
     ) -> Self {
@@ -315,6 +320,9 @@ impl WsConnection {
     }
 
     /// Send a message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the message cannot be sent.
     pub async fn send(&mut self, message: WsMessage) -> StreamResult<()> {
         if self.closed {
             return Err(StreamError::InvalidState("Connection is closed".into()));
@@ -327,23 +335,35 @@ impl WsConnection {
     }
 
     /// Send a text message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the message cannot be sent.
     pub async fn send_text(&mut self, text: impl Into<String>) -> StreamResult<()> {
         self.send(WsMessage::text(text)).await
     }
 
     /// Send a binary message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the message cannot be sent.
     pub async fn send_binary(&mut self, data: impl Into<Vec<u8>>) -> StreamResult<()> {
         self.send(WsMessage::binary(data)).await
     }
 
     /// Send JSON data.
-    pub async fn send_json<T: serde::Serialize>(&mut self, data: &T) -> StreamResult<()> {
+    ///
+    /// # Errors
+    /// Returns a stream error if serialization or send fails.
+    pub async fn send_json<T: serde::Serialize + Sync>(&mut self, data: &T) -> StreamResult<()> {
         let json =
             serde_json::to_string(data).map_err(|e| StreamError::ParseError(e.to_string()))?;
         self.send_text(json).await
     }
 
     /// Receive the next message.
+    ///
+    /// # Errors
+    /// Returns a stream error if the underlying socket fails.
     pub async fn recv(&mut self) -> StreamResult<Option<WsMessage>> {
         if self.closed {
             return Ok(None);
@@ -366,6 +386,9 @@ impl WsConnection {
     }
 
     /// Close the connection.
+    ///
+    /// # Errors
+    /// Returns a stream error if the close frame fails to send.
     pub async fn close(&mut self) -> StreamResult<()> {
         if !self.closed {
             self.closed = true;
@@ -378,6 +401,9 @@ impl WsConnection {
     }
 
     /// Close with a specific frame.
+    ///
+    /// # Errors
+    /// Returns a stream error if the close frame fails to send.
     pub async fn close_with_frame(&mut self, frame: WsCloseFrame) -> StreamResult<()> {
         if !self.closed {
             self.closed = true;
@@ -449,13 +475,12 @@ mod tests {
 
     #[test]
     fn test_ws_message_json() {
-        let msg = WsMessage::text(r#"{"key": "value"}"#);
-
         #[derive(serde::Deserialize)]
         struct Data {
             key: String,
         }
 
+        let msg = WsMessage::text(r#"{"key": "value"}"#);
         let data: Data = msg.json().unwrap();
         assert_eq!(data.key, "value");
     }
@@ -482,5 +507,141 @@ mod tests {
         assert_eq!(config.ping_interval, Some(Duration::from_secs(15)));
         assert_eq!(config.max_message_size, 1024);
         assert!(!config.auto_reconnect);
+    }
+
+    // ── New tests ──
+
+    #[test]
+    fn test_ws_message_is_close() {
+        let msg = WsMessage::Close(None);
+        assert!(msg.is_close());
+        assert!(!msg.is_text());
+        assert!(!msg.is_binary());
+    }
+
+    #[test]
+    fn test_ws_message_as_text_on_binary() {
+        let msg = WsMessage::binary(vec![1, 2, 3]);
+        assert_eq!(msg.as_text(), None);
+    }
+
+    #[test]
+    fn test_ws_message_as_binary_on_text() {
+        let msg = WsMessage::text("hello");
+        assert_eq!(msg.as_binary(), None);
+    }
+
+    #[test]
+    fn test_ws_message_json_from_binary() {
+        #[derive(serde::Deserialize)]
+        struct Data {
+            key: String,
+        }
+
+        let msg = WsMessage::binary(br#"{"key": "value"}"#.to_vec());
+        let data: Data = msg.json().unwrap();
+        assert_eq!(data.key, "value");
+    }
+
+    #[test]
+    fn test_ws_message_json_parse_failure() {
+        let msg = WsMessage::text("not json");
+        let result: Result<serde_json::Value, _> = msg.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ws_message_json_on_close() {
+        let msg = WsMessage::Close(None);
+        let result: Result<serde_json::Value, _> = msg.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ws_close_frame_custom() {
+        let frame = WsCloseFrame::new(4000, "Custom reason");
+        assert_eq!(frame.code, 4000);
+        assert_eq!(frame.reason, "Custom reason");
+    }
+
+    #[test]
+    fn test_ws_config_default() {
+        let config = WsConfig::default();
+        assert_eq!(config.connect_timeout, Duration::from_secs(30));
+        assert_eq!(config.ping_interval, Some(Duration::from_secs(30)));
+        assert_eq!(config.pong_timeout, Duration::from_secs(10));
+        assert_eq!(config.max_message_size, 64 * 1024 * 1024);
+        assert!(config.headers.is_empty());
+        assert!(config.auto_reconnect);
+        assert_eq!(config.max_reconnect_attempts, Some(10));
+        assert_eq!(config.reconnect_delay, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_ws_client_accessors() {
+        let client = WsClient::new("ws://localhost:8080");
+        assert_eq!(client.url(), "ws://localhost:8080");
+        assert_eq!(client.config().connect_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_ws_client_with_config() {
+        let config = WsConfig::new().with_connect_timeout(Duration::from_secs(60));
+        let client = WsClient::with_config("ws://localhost:8080", config);
+        assert_eq!(client.url(), "ws://localhost:8080");
+        assert_eq!(client.config().connect_timeout, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_ws_message_ping_pong() {
+        let ping = WsMessage::Ping(vec![1, 2, 3]);
+        assert!(!ping.is_text());
+        assert!(!ping.is_binary());
+        assert!(!ping.is_close());
+
+        let pong = WsMessage::Pong(vec![4, 5, 6]);
+        assert!(!pong.is_text());
+        assert!(!pong.is_binary());
+        assert!(!pong.is_close());
+    }
+
+    #[test]
+    fn test_ws_message_close_with_frame() {
+        let frame = WsCloseFrame::normal();
+        let msg = WsMessage::Close(Some(frame.clone()));
+        assert!(msg.is_close());
+        assert_eq!(frame.code, 1000);
+    }
+
+    #[test]
+    fn test_ws_message_from_tungstenite_text() {
+        let msg: WsMessage = Message::Text("hello".into()).into();
+        assert!(msg.is_text());
+        assert_eq!(msg.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn test_ws_message_from_tungstenite_binary() {
+        let msg: WsMessage = Message::Binary(vec![1, 2, 3].into()).into();
+        assert!(msg.is_binary());
+        assert_eq!(msg.as_binary(), Some(&[1, 2, 3][..]));
+    }
+
+    #[test]
+    fn test_ws_message_to_tungstenite_roundtrip_text() {
+        let original = WsMessage::text("roundtrip");
+        let tungstenite: Message = original.into();
+        let back: WsMessage = tungstenite.into();
+        assert!(back.is_text());
+        assert_eq!(back.as_text(), Some("roundtrip"));
+    }
+
+    #[test]
+    fn test_ws_message_to_tungstenite_roundtrip_binary() {
+        let original = WsMessage::binary(vec![10, 20, 30]);
+        let tungstenite: Message = original.into();
+        let back: WsMessage = tungstenite.into();
+        assert!(back.is_binary());
+        assert_eq!(back.as_binary(), Some(&[10, 20, 30][..]));
     }
 }

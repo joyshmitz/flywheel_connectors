@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
 use crate::admission::ObjectAdmissionClass;
 use fcp_core::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
@@ -574,6 +575,12 @@ impl GossipRequest {
         self.object_ids.len() <= MAX_OBJECT_IDS_PER_REQUEST
             && self.symbols.len() <= MAX_OBJECT_IDS_PER_REQUEST
     }
+
+    /// Validate request bounds against configured limits.
+    #[must_use]
+    pub fn is_valid_with_limits(&self, max_objects: usize, max_symbols: usize) -> bool {
+        self.object_ids.len() <= max_objects && self.symbols.len() <= max_symbols
+    }
 }
 
 /// Response to a gossip request.
@@ -730,6 +737,10 @@ pub struct GossipConfig {
     pub max_objects_per_summary: usize,
     /// Maximum symbols per summary.
     pub max_symbols_per_summary: usize,
+    /// Maximum objects per request.
+    pub max_objects_per_request: usize,
+    /// Maximum symbols per request.
+    pub max_symbols_per_request: usize,
     /// Summary TTL in seconds.
     pub summary_ttl_secs: u64,
     /// Reconciliation batch size.
@@ -741,6 +752,8 @@ impl Default for GossipConfig {
         Self {
             max_objects_per_summary: DEFAULT_MAX_OBJECTS_PER_SUMMARY,
             max_symbols_per_summary: DEFAULT_MAX_SYMBOLS_PER_SUMMARY,
+            max_objects_per_request: MAX_OBJECT_IDS_PER_REQUEST,
+            max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
             summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
             reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
         }
@@ -798,11 +811,26 @@ impl MeshGossip {
     ) -> bool {
         // NORMATIVE: Quarantined objects MUST NOT pollute gossip
         if admission_class == ObjectAdmissionClass::Quarantined {
+            warn!(
+                component = "mesh.gossip",
+                event = "quarantine_blocked",
+                zone_id = %zone_id,
+                object_id = %object_id,
+                reason = "gossip_propagation_denied"
+            );
             return false;
         }
 
         let state = self.get_or_create_zone(zone_id);
         state.announce_object(object_id, now);
+        info!(
+            component = "mesh.gossip",
+            event = "object_announced",
+            node_id = %self.local_node.as_str(),
+            zone_id = %zone_id,
+            object_id = %object_id,
+            timestamp = now
+        );
         true
     }
 
@@ -817,32 +845,115 @@ impl MeshGossip {
     ) -> bool {
         // NORMATIVE: Quarantined objects MUST NOT pollute gossip
         if admission_class == ObjectAdmissionClass::Quarantined {
+            warn!(
+                component = "mesh.gossip",
+                event = "quarantine_blocked",
+                zone_id = %zone_id,
+                object_id = %object_id,
+                reason = "gossip_propagation_denied"
+            );
             return false;
         }
 
         let state = self.get_or_create_zone(zone_id);
         state.announce_symbol(object_id, esi, now);
+        debug!(
+            component = "mesh.gossip",
+            event = "symbol_announced",
+            node_id = %self.local_node.as_str(),
+            zone_id = %zone_id,
+            object_id = %object_id,
+            esi,
+            timestamp = now
+        );
         true
     }
 
     /// Create a summary for a zone.
     #[must_use]
     pub fn create_summary(&self, zone_id: &ZoneId, epoch_id: EpochId) -> Option<GossipSummary> {
-        self.zone_states
-            .get(zone_id)
-            .map(|state| state.create_summary(self.local_node.clone(), epoch_id))
+        self.zone_states.get(zone_id).map(|state| {
+            let epoch_label = epoch_id.as_str().to_string();
+            let mut summary = state.create_summary(self.local_node.clone(), epoch_id);
+            summary.object_count = summary
+                .object_count
+                .min(self.config.max_objects_per_summary as u32);
+            summary.symbol_count = summary
+                .symbol_count
+                .min(self.config.max_symbols_per_summary as u32);
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let object_digest = hex::encode(summary.object_filter_digest);
+                let symbol_digest = hex::encode(summary.symbol_filter_digest);
+                debug!(
+                    component = "mesh.gossip",
+                    event = "summary_created",
+                    node_id = %self.local_node.as_str(),
+                    zone_id = %zone_id,
+                    epoch_id = %epoch_label,
+                    object_count = summary.object_count,
+                    symbol_count = summary.symbol_count,
+                    reconciliation_batch_size = self.config.reconciliation_batch_size,
+                    object_digest = %object_digest,
+                    symbol_digest = %symbol_digest
+                );
+            }
+            summary
+        })
     }
 
     /// Handle received summary from a peer.
     pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) {
+        if summary.is_stale(now, self.config.summary_ttl_secs) {
+            let age_secs = now.saturating_sub(summary.timestamp);
+            warn!(
+                component = "mesh.gossip",
+                event = "summary_rejected",
+                reason = "stale",
+                peer_id = %summary.from.as_str(),
+                zone_id = %summary.zone_id,
+                object_count = summary.object_count,
+                symbol_count = summary.symbol_count,
+                age_seconds = age_secs,
+                ttl_seconds = self.config.summary_ttl_secs
+            );
+            return;
+        }
+
+        if summary.object_count as usize > self.config.max_objects_per_summary
+            || summary.symbol_count as usize > self.config.max_symbols_per_summary
+        {
+            warn!(
+                component = "mesh.gossip",
+                event = "summary_rejected",
+                reason = "oversized",
+                peer_id = %summary.from.as_str(),
+                zone_id = %summary.zone_id,
+                object_count = summary.object_count,
+                symbol_count = summary.symbol_count,
+                max_objects = self.config.max_objects_per_summary,
+                max_symbols = self.config.max_symbols_per_summary
+            );
+            return;
+        }
+
         let peer_id = summary.from.clone();
+        let object_count = summary.object_count;
+        let symbol_count = summary.symbol_count;
 
         // Update peer state
         let peer_state = self
             .peer_states
             .entry(peer_id.clone())
-            .or_insert_with(|| PeerGossipState::new(peer_id));
+            .or_insert_with(|| PeerGossipState::new(peer_id.clone()));
         peer_state.update_from_summary(summary, now);
+        debug!(
+            component = "mesh.gossip",
+            event = "summary_received",
+            peer_id = %peer_id.as_str(),
+            object_count,
+            symbol_count,
+            accepted = true
+        );
     }
 
     /// Find peers that might have an object.
@@ -889,17 +1000,73 @@ impl MeshGossip {
         object_ids: Vec<ObjectId>,
         now: u64,
     ) -> GossipRequest {
-        GossipRequest::for_objects(self.local_node.clone(), zone_id.clone(), object_ids, now)
+        let max_objects = self
+            .config
+            .max_objects_per_request
+            .min(MAX_OBJECT_IDS_PER_REQUEST);
+        let bounded: Vec<_> = object_ids.into_iter().take(max_objects).collect();
+        debug!(
+            component = "mesh.gossip",
+            event = "request_created",
+            node_id = %self.local_node.as_str(),
+            zone_id = %zone_id,
+            objects_requested = bounded.len(),
+            max_objects
+        );
+        GossipRequest::for_objects(self.local_node.clone(), zone_id.clone(), bounded, now)
     }
 
     /// Handle a request from a peer.
     #[must_use]
     pub fn handle_request(&self, request: &GossipRequest) -> GossipResponse {
+        let max_objects = self
+            .config
+            .max_objects_per_request
+            .min(MAX_OBJECT_IDS_PER_REQUEST);
+        let max_symbols = self
+            .config
+            .max_symbols_per_request
+            .min(MAX_OBJECT_IDS_PER_REQUEST);
+        let objects_requested = request.object_ids.len();
+        let symbols_requested = request.symbols.len();
+        let request_size = objects_requested + symbols_requested;
+
+        if !request.is_valid_with_limits(max_objects, max_symbols) {
+            let reason = if objects_requested > max_objects {
+                "object_count_exceeded"
+            } else if symbols_requested > max_symbols {
+                "symbol_count_exceeded"
+            } else {
+                "invalid_request"
+            };
+            warn!(
+                component = "mesh.gossip",
+                event = "request_rejected",
+                reason,
+                peer_id = %request.from.as_str(),
+                zone_id = %request.zone_id,
+                objects_requested,
+                symbols_requested,
+                max_objects,
+                max_symbols,
+                request_size
+            );
+            return GossipResponse {
+                from: self.local_node.clone(),
+                to: request.from.clone(),
+                zone_id: request.zone_id.clone(),
+                have_objects: Vec::new(),
+                have_symbols: Vec::new(),
+                timestamp: request.timestamp,
+            };
+        }
+
         let zone_state = self.zone_states.get(&request.zone_id);
 
         let have_objects: Vec<ObjectId> = request
             .object_ids
             .iter()
+            .take(max_objects)
             .filter(|id| zone_state.is_some_and(|s| s.has_object(id)))
             .copied()
             .collect();
@@ -907,10 +1074,22 @@ impl MeshGossip {
         let have_symbols: Vec<(ObjectId, u32)> = request
             .symbols
             .iter()
+            .take(max_symbols)
             .filter(|(id, esi)| zone_state.is_some_and(|s| s.has_symbol(id, *esi)))
             .copied()
             .collect();
 
+        debug!(
+            component = "mesh.gossip",
+            event = "request_handled",
+            peer_id = %request.from.as_str(),
+            zone_id = %request.zone_id,
+            objects_requested,
+            symbols_requested,
+            objects_served = have_objects.len(),
+            symbols_served = have_symbols.len(),
+            request_size
+        );
         GossipResponse {
             from: self.local_node.clone(),
             to: request.from.clone(),
@@ -1189,6 +1368,17 @@ mod tests {
         assert_eq!(request.object_ids.len(), MAX_OBJECT_IDS_PER_REQUEST);
     }
 
+    #[test]
+    fn request_bounds_symbols() {
+        let object_id = test_object_id("obj-symbols");
+        let symbols: Vec<(ObjectId, u32)> = (0..200).map(|esi| (object_id, esi)).collect();
+
+        let request = GossipRequest::for_symbols(test_node("node"), test_zone(), symbols, 1000);
+
+        assert!(request.is_valid());
+        assert_eq!(request.symbols.len(), MAX_OBJECT_IDS_PER_REQUEST);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // MeshGossip Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -1235,6 +1425,44 @@ mod tests {
     }
 
     #[test]
+    fn mesh_gossip_create_summary_clamps_counts() {
+        let config = GossipConfig {
+            max_objects_per_summary: 1,
+            max_symbols_per_summary: 1,
+            max_objects_per_request: MAX_OBJECT_IDS_PER_REQUEST,
+            max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
+            summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
+            reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+
+        let obj_id = test_object_id("obj-1");
+        gossip.announce_object(&test_zone(), &obj_id, ObjectAdmissionClass::Admitted, 1000);
+        gossip.announce_symbol(
+            &test_zone(),
+            &obj_id,
+            1,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+        let obj_id2 = test_object_id("obj-2");
+        gossip.announce_object(&test_zone(), &obj_id2, ObjectAdmissionClass::Admitted, 1000);
+        gossip.announce_symbol(
+            &test_zone(),
+            &obj_id2,
+            2,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+
+        let summary = gossip
+            .create_summary(&test_zone(), test_epoch())
+            .expect("summary");
+        assert_eq!(summary.object_count, 1);
+        assert_eq!(summary.symbol_count, 1);
+    }
+
+    #[test]
     fn mesh_gossip_handle_summary_updates_peer() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
 
@@ -1256,6 +1484,58 @@ mod tests {
     }
 
     #[test]
+    fn mesh_gossip_ignores_stale_summary() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let now = 1000u64;
+        let timestamp = now.saturating_sub(DEFAULT_SUMMARY_TTL_SECS + 1);
+
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 50,
+            symbol_count: 500,
+            iblt: vec![],
+            timestamp,
+            signature: None,
+        };
+
+        gossip.handle_summary(summary, now);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
+    fn mesh_gossip_ignores_oversized_summary() {
+        let config = GossipConfig {
+            max_objects_per_summary: 1,
+            max_symbols_per_summary: 1,
+            max_objects_per_request: MAX_OBJECT_IDS_PER_REQUEST,
+            max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
+            summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
+            reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 2,
+            symbol_count: 2,
+            iblt: vec![],
+            timestamp: 1000,
+            signature: None,
+        };
+
+        gossip.handle_summary(summary, 1000);
+        assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
     fn mesh_gossip_handle_request() {
         let mut gossip = MeshGossip::with_defaults(test_node("local"));
         let obj_id = test_object_id("obj-1");
@@ -1274,6 +1554,152 @@ mod tests {
         // Should only include objects we have
         assert_eq!(response.have_objects.len(), 1);
         assert_eq!(response.have_objects[0], obj_id);
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_bounds_results() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+
+        let object_ids: Vec<ObjectId> = (0..MAX_OBJECT_IDS_PER_REQUEST)
+            .map(|i| test_object_id(&format!("obj-{i}")))
+            .collect();
+
+        for object_id in &object_ids {
+            gossip.announce_object(
+                &test_zone(),
+                object_id,
+                ObjectAdmissionClass::Admitted,
+                1000,
+            );
+        }
+
+        let request =
+            GossipRequest::for_objects(test_node("peer"), test_zone(), object_ids.clone(), 1000);
+
+        let response = gossip.handle_request(&request);
+        assert_eq!(response.have_objects.len(), object_ids.len());
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_rejects_invalid_request() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+
+        let object_ids: Vec<ObjectId> = (0..=MAX_OBJECT_IDS_PER_REQUEST)
+            .map(|i| test_object_id(&format!("obj-{i}")))
+            .collect();
+
+        for object_id in &object_ids {
+            gossip.announce_object(
+                &test_zone(),
+                object_id,
+                ObjectAdmissionClass::Admitted,
+                1000,
+            );
+        }
+
+        let request = GossipRequest {
+            from: test_node("peer"),
+            zone_id: test_zone(),
+            object_ids,
+            symbols: vec![],
+            timestamp: 1000,
+            signature: None,
+        };
+
+        let response = gossip.handle_request(&request);
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_rejects_over_config_object_request() {
+        let config = GossipConfig {
+            max_objects_per_request: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+
+        let object_ids: Vec<ObjectId> = (0..2)
+            .map(|i| test_object_id(&format!("obj-{i}")))
+            .collect();
+
+        for object_id in &object_ids {
+            gossip.announce_object(
+                &test_zone(),
+                object_id,
+                ObjectAdmissionClass::Admitted,
+                1000,
+            );
+        }
+
+        let request = GossipRequest::for_objects(test_node("peer"), test_zone(), object_ids, 1000);
+
+        let response = gossip.handle_request(&request);
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_rejects_invalid_symbol_request() {
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let object_id = test_object_id("obj-symbols-invalid");
+
+        gossip.announce_symbol(
+            &test_zone(),
+            &object_id,
+            1,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+
+        let max_esi =
+            u32::try_from(MAX_OBJECT_IDS_PER_REQUEST).expect("max symbols fits u32 in test");
+        let symbols: Vec<(ObjectId, u32)> = (0..=max_esi).map(|esi| (object_id, esi)).collect();
+
+        let request = GossipRequest {
+            from: test_node("peer"),
+            zone_id: test_zone(),
+            object_ids: vec![],
+            symbols,
+            timestamp: 1000,
+            signature: None,
+        };
+
+        let response = gossip.handle_request(&request);
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn mesh_gossip_handle_request_rejects_over_config_symbol_request() {
+        let config = GossipConfig {
+            max_symbols_per_request: 1,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+        let object_id = test_object_id("obj-symbols-config");
+
+        gossip.announce_symbol(
+            &test_zone(),
+            &object_id,
+            1,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+        gossip.announce_symbol(
+            &test_zone(),
+            &object_id,
+            2,
+            ObjectAdmissionClass::Admitted,
+            1000,
+        );
+
+        let symbols = vec![(object_id, 1), (object_id, 2)];
+        let request = GossipRequest::for_symbols(test_node("peer"), test_zone(), symbols, 1000);
+
+        let response = gossip.handle_request(&request);
+        assert!(response.have_objects.is_empty());
+        assert!(response.have_symbols.is_empty());
     }
 
     #[test]

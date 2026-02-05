@@ -25,19 +25,26 @@ pub use crate::{
 };
 
 // Cost and availability
-pub use crate::{CostEstimate, CurrencyCost, ResourceAvailability};
+pub use crate::{
+    CostEstimate, CostEstimateConfidence, CurrencyCost, ResourceAvailability, UsageMetric,
+    UsageMetricKind,
+};
 
 // Rate limits
 pub use crate::{
     RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope,
-    RateLimitUnit,
+    RateLimitStatus, RateLimitUnit,
 };
+
+// Rate limit SDK helpers
+pub use crate::ratelimit::{RateLimitError, RateLimitPoolBuilder, RateLimitTracker};
 
 // Events
 pub use crate::{EventAck, EventCaps, EventData, EventEnvelope, EventNack, EventStream};
+pub use fcp_core::{ThreadInfo, ThreadKind};
 
 // Health
-pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState};
+pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus};
 
 // Identifiers
 pub use crate::{ConnectorId, InstanceId, ObjectId, RequestId, ZoneId};
@@ -53,7 +60,7 @@ pub use crate::Principal;
 
 // Archetypes and state models
 pub use crate::{
-    ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel,
+    ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel, CursorState,
 };
 
 // Streaming helpers
@@ -61,8 +68,29 @@ pub use crate::streaming::{
     AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SubscribeOutcome,
 };
 
+// Runtime supervision helpers
+pub use crate::runtime::{
+    CursorLease, CursorStore, CursorStoreBackend, CursorStoreError, HealthTracker,
+    HealthTransition, InMemoryCursorStoreBackend, InMemoryPollingCursor, InMemoryStreamingSession,
+    PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingConnection,
+    StreamingError, StreamingHealthState, StreamingSession, StreamingSupervisor,
+    StreamingSupervisorStats, SupervisorConfig, SupervisorOutcome,
+};
+
 // Schema validation helpers
-pub use crate::{SchemaValidationError, SchemaValidator, validate_json_schema};
+pub use crate::{
+    Limits, SchemaValidationError, SchemaValidator, enforce_limits, validate_input,
+    validate_input_with_limits, validate_json_schema, validate_output, validate_output_with_limits,
+};
+
+// Formatting helpers
+pub use crate::{
+    ErrorClass, FormatError, FormatMode, Formatter, RenderResult, classify_error_message,
+    is_parse_error_message,
+};
+
+// Retry helpers
+pub use crate::{RetryDecision, RetryPolicy};
 
 // External crates commonly needed
 pub use serde::{Deserialize, Serialize};

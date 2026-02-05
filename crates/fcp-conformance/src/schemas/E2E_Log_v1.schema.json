@@ -33,6 +33,10 @@
       "description": "Optional structured context payload.",
       "type": ["object", "array", "string", "number", "boolean", "null"]
     },
+    "log_version": {
+      "type": "string",
+      "enum": ["v1"]
+    },
     "artifacts": {
       "type": "array",
       "items": { "type": "string" }
@@ -61,6 +65,7 @@
       ],
       "properties": {
         "timestamp": { "$ref": "#/$defs/timestamp" },
+        "log_version": { "$ref": "#/$defs/log_version" },
         "real_time": { "$ref": "#/$defs/timestamp" },
         "node_id": { "$ref": "#/$defs/non_empty_string" },
         "test_name": { "$ref": "#/$defs/non_empty_string" },
@@ -85,6 +90,7 @@
       ],
       "properties": {
         "timestamp": { "$ref": "#/$defs/timestamp" },
+        "log_version": { "$ref": "#/$defs/log_version" },
         "level": { "$ref": "#/$defs/non_empty_string" },
         "test_name": { "$ref": "#/$defs/non_empty_string" },
         "module": { "$ref": "#/$defs/non_empty_string" },
@@ -112,6 +118,7 @@
       ],
       "properties": {
         "timestamp": { "$ref": "#/$defs/timestamp" },
+        "log_version": { "$ref": "#/$defs/log_version" },
         "script": { "$ref": "#/$defs/non_empty_string" },
         "step": { "$ref": "#/$defs/non_empty_string" },
         "step_number": { "type": "integer", "minimum": 0 },

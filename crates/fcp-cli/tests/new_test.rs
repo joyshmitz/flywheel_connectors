@@ -122,6 +122,10 @@ mod scaffold_creation {
             "src/connector.rs should exist"
         );
         assert!(
+            crate_dir.join("src/limits.rs").exists(),
+            "src/limits.rs should exist"
+        );
+        assert!(
             crate_dir.join("src/types.rs").exists(),
             "src/types.rs should exist"
         );
@@ -227,6 +231,34 @@ mod scaffold_creation {
     }
 
     #[test]
+    fn generated_limits_template_contains_placeholders() {
+        let tmp = TempDir::new().unwrap();
+        create_workspace(&tmp);
+
+        fcp_cmd()
+            .current_dir(tmp.path().join("connectors"))
+            .args(["new", "fcp.limits"])
+            .assert()
+            .success();
+
+        let limits_path = tmp.path().join("connectors/limits/src/limits.rs");
+        let content = fs::read_to_string(&limits_path).unwrap();
+
+        assert!(
+            content.contains("MAX_MESSAGE_CHARS"),
+            "limits template should define MAX_MESSAGE_CHARS"
+        );
+        assert!(
+            content.contains("MAX_PAYLOAD_BYTES"),
+            "limits template should define MAX_PAYLOAD_BYTES"
+        );
+        assert!(
+            content.contains("MAX_ATTACHMENT_BYTES"),
+            "limits template should define MAX_ATTACHMENT_BYTES"
+        );
+    }
+
+    #[test]
     fn generates_placeholder_operations() {
         let tmp = TempDir::new().unwrap();
         create_workspace(&tmp);
@@ -329,9 +361,7 @@ mod safety {
 
     /// Tests that `fcp new` fails when the target directory already exists.
     /// This is desired safety behavior to prevent accidental overwrites.
-    /// TODO: Implement directory existence check in `scaffold_connector()`.
     #[test]
-    #[ignore = "safety: directory existence check not yet implemented"]
     fn fails_when_target_directory_exists() {
         let tmp = TempDir::new().unwrap();
         create_workspace(&tmp);
@@ -349,9 +379,7 @@ mod safety {
 
     /// Tests that existing files are preserved even if scaffold fails.
     /// This verifies no-delete behavior for safety.
-    /// TODO: Implement directory existence check in `scaffold_connector()`.
     #[test]
-    #[ignore = "safety: directory existence check not yet implemented"]
     fn does_not_delete_files_on_failure() {
         let tmp = TempDir::new().unwrap();
         create_workspace(&tmp);
@@ -410,7 +438,6 @@ mod safety {
     }
 
     /// Verifies that existing files are not destroyed when scaffold runs.
-    /// Since safety check isn't implemented, this documents current behavior.
     #[test]
     fn existing_files_not_destroyed_when_scaffold_overwrites() {
         let tmp = TempDir::new().unwrap();
@@ -420,19 +447,22 @@ mod safety {
         let custom_file = existing_dir.join("CUSTOM_FILE.txt");
         fs::write(&custom_file, "user-created content").unwrap();
 
-        // Currently scaffolding succeeds and creates files in existing dir
         fcp_cmd()
             .current_dir(tmp.path().join("connectors"))
             .args(["new", "fcp.hasfiles"])
             .assert()
-            .success();
+            .failure()
+            .stderr(predicate::str::contains("already exists"));
 
-        // Custom file should still exist (scaffold doesn't delete files)
         assert!(custom_file.exists(), "custom file should be preserved");
         let content = fs::read_to_string(&custom_file).unwrap();
         assert_eq!(
             content, "user-created content",
             "content should be unchanged"
+        );
+        assert!(
+            !existing_dir.join("Cargo.toml").exists(),
+            "scaffold should not create new files when directory exists"
         );
     }
 }

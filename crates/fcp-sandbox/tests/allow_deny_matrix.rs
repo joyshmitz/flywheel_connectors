@@ -199,11 +199,13 @@ mod default_deny {
         let result = guard.check_ip_constraints(ip, &constraints);
 
         assert!(result.is_err());
-        if let Err(EgressError::Denied { code, .. }) = result {
-            assert_eq!(code, DenyReason::LocalhostDenied);
-        } else {
-            panic!("expected LocalhostDenied");
-        }
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::LocalhostDenied,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -521,14 +523,33 @@ mod allow_list {
     }
 
     #[test]
+    fn test_uppercase_allowlist_pattern_matches() {
+        let guard = EgressGuard::new();
+        let mut constraints = permissive_constraints();
+        constraints.host_allow = vec!["API.EXAMPLE.COM".into()];
+        constraints.port_allow = vec![443];
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://api.example.com/v1/data".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+
+        let decision = guard.evaluate(&request, &constraints).unwrap();
+        assert!(decision.allowed);
+        assert_eq!(decision.canonical_host, "api.example.com");
+    }
+
+    #[test]
     fn test_deep_subdomain_wildcard_allowed() {
         let guard = EgressGuard::new();
         let constraints = strict_constraints();
 
-        // *.trusted.com should match a.b.trusted.com only at one level
-        // This tests the wildcard matching behavior
+        // *.trusted.com should match any subdomain depth under trusted.com
         let request = EgressRequest::Http(EgressHttpRequest {
-            url: "https://deep.trusted.com/path".into(),
+            url: "https://deep.sub.trusted.com/path".into(),
             method: "GET".into(),
             headers: vec![],
             body: None,
@@ -536,7 +557,6 @@ mod allow_list {
         });
 
         let result = guard.evaluate(&request, &constraints);
-        // *.trusted.com matches single-level subdomains
         assert!(result.is_ok());
     }
 
@@ -1251,10 +1271,7 @@ mod edge_cases {
 
         let result = guard.evaluate(&request, &constraints);
         assert!(result.is_err());
-        match result {
-            Err(EgressError::InvalidUrl(_)) => {}
-            _ => panic!("expected InvalidUrl error"),
-        }
+        assert!(matches!(result, Err(EgressError::InvalidUrl(_))));
     }
 
     #[test]

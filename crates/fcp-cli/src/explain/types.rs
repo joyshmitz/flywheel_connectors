@@ -24,6 +24,14 @@ pub struct ExplainReport {
     /// Stable reason code (FCP-XXXX).
     pub reason_code: String,
 
+    /// Operation ID associated with this decision (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+
+    /// Retry-after hint in milliseconds (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+
     /// Human-readable reason code description.
     pub reason_description: String,
 
@@ -48,7 +56,7 @@ impl ExplainReport {
 
 /// Decision outcome (allow/deny).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
+#[serde(rename_all = "lowercase")]
 pub enum DecisionOutcome {
     Allow,
     Deny,
@@ -196,6 +204,7 @@ pub fn reason_code_description(code: &str) -> &'static str {
         "FCP-6001" => "Resource not found",
         "FCP-6002" => "Resource exhausted",
         "FCP-6003" => "Conflict - concurrent modification",
+        "FCP-6004" => "Usage budget exceeded",
 
         // External service errors (FCP-7xxx)
         "FCP-7001" => "External service error",
@@ -266,6 +275,32 @@ impl ExplainError {
             ],
         }
     }
+
+    /// Create a "receipt read failed" error.
+    #[must_use]
+    pub fn receipt_read_failed(path: &std::path::Path, reason: &str) -> Self {
+        Self {
+            code: "FCP-1001".to_string(),
+            message: format!("Failed to read receipt at '{}': {reason}", path.display()),
+            hints: vec![
+                "Verify the receipt path exists and is readable".to_string(),
+                "Ensure the file is not truncated or locked by another process".to_string(),
+            ],
+        }
+    }
+
+    /// Create an "invalid receipt format" error.
+    #[must_use]
+    pub fn receipt_decode_failed(path: &std::path::Path) -> Self {
+        Self {
+            code: "FCP-1002".to_string(),
+            message: format!("Receipt at '{}' is not a supported format", path.display()),
+            hints: vec![
+                "Expected canonical CBOR DecisionReceipt/OperationReceipt".to_string(),
+                "Or CBOR/JSON InvokeResponse or FcpErrorResponse".to_string(),
+            ],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -310,26 +345,28 @@ mod tests {
         let report = ExplainReport {
             schema_version: "1.0.0".to_string(),
             generated_at,
-            request_object_id: "abc123def456".to_string(),
+            request_object_id: "request-id".to_string(),
             decision: DecisionOutcome::Deny,
             reason_code: "FCP-4030".to_string(),
+            operation_id: Some("operation-id".to_string()),
+            retry_after_ms: Some(5000),
             reason_description: "Revocation check failed - token revoked".to_string(),
             evidence: vec![
                 EvidenceItem {
-                    object_id: "cap123".to_string(),
+                    object_id: "evidence-capability".to_string(),
                     evidence_type: EvidenceType::CapabilityToken,
-                    description: "Capability token that was revoked".to_string(),
+                    description: "Capability grant was revoked".to_string(),
                 },
                 EvidenceItem {
-                    object_id: "rev456".to_string(),
+                    object_id: "evidence-revocation".to_string(),
                     evidence_type: EvidenceType::Revocation,
-                    description: "Revocation entry for token".to_string(),
+                    description: "Revocation entry recorded".to_string(),
                 },
             ],
-            explanation: Some("Token was revoked at epoch 42".to_string()),
+            explanation: Some("Demo revocation recorded".to_string()),
             zone_id: "z:work".to_string(),
             signed_by: SignerInfo {
-                node_id: "node-1".to_string(),
+                node_id: "node-demo".to_string(),
                 signed_at: 1_700_000_000,
             },
         };
@@ -338,7 +375,7 @@ mod tests {
 
         // Verify key fields
         assert!(json.contains("\"schema_version\": \"1.0.0\""));
-        assert!(json.contains("\"decision\": \"DENY\""));
+        assert!(json.contains("\"decision\": \"deny\""));
         assert!(json.contains("\"reason_code\": \"FCP-4030\""));
         assert!(json.contains("\"evidence_type\": \"capability_token\""));
 

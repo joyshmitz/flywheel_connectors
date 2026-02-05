@@ -2,9 +2,22 @@
 
 use std::time::Duration;
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tracing::{debug, instrument, warn};
+
+/// Characters that must be percent-encoded in URL query strings.
+/// See RFC 3986 Section 2.2: <https://www.rfc-editor.org/rfc/rfc3986#section-2.2>
+const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'&')
+    .add(b'=')
+    .add(b'+');
 
 use crate::{
     config::{RateLimitInfo, TwitterConfig},
@@ -110,16 +123,19 @@ impl TwitterApiClient {
                 method, endpoint, "Making Twitter API request"
             );
 
-            // Build the full URL with query params for signing
+            // Build the full URL with query params for signing (URL-encode values)
             let full_url = if params.is_empty() {
                 url.clone()
             } else {
                 let query = params
                     .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
+                    .map(|(k, v)| {
+                        let encoded_v = utf8_percent_encode(v, QUERY_ENCODE_SET);
+                        format!("{k}={encoded_v}")
+                    })
                     .collect::<Vec<_>>()
                     .join("&");
-                format!("{}?{}", url, query)
+                format!("{url}?{query}")
             };
 
             // Generate OAuth signature
@@ -203,7 +219,7 @@ impl TwitterApiClient {
                 _ => self.client.get(&url),
             };
 
-            req = req.header("Authorization", format!("Bearer {}", bearer));
+            req = req.header("Authorization", format!("Bearer {bearer}"));
 
             if let Some(b) = body {
                 req = req.json(b);
@@ -262,10 +278,7 @@ impl TwitterApiClient {
 
         // Handle rate limiting
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = rate_limit
-                .time_until_reset()
-                .map(|d| d.as_secs())
-                .unwrap_or(60);
+            let retry_after = rate_limit.time_until_reset().map_or(60, |d| d.as_secs());
 
             return Err(TwitterError::RateLimited { retry_after });
         }
@@ -334,7 +347,7 @@ impl TwitterApiClient {
             "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
                 .to_string(),
         )];
-        self.get_with_params(&format!("/2/users/{}", user_id), &params)
+        self.get_with_params(&format!("/2/users/{user_id}"), &params)
             .await
     }
 
@@ -348,7 +361,7 @@ impl TwitterApiClient {
             "id,name,username,description,profile_image_url,verified,created_at,public_metrics"
                 .to_string(),
         )];
-        self.get_with_params(&format!("/2/users/by/username/{}", username), &params)
+        self.get_with_params(&format!("/2/users/by/username/{username}"), &params)
             .await
     }
 
@@ -375,7 +388,7 @@ impl TwitterApiClient {
                 "media_key,type,url,preview_image_url".to_string(),
             ),
         ];
-        self.get_with_params(&format!("/2/tweets/{}", tweet_id), &params)
+        self.get_with_params(&format!("/2/tweets/{tweet_id}"), &params)
             .await
     }
 
@@ -409,7 +422,7 @@ impl TwitterApiClient {
 
     /// Delete a tweet.
     pub async fn delete_tweet(&self, tweet_id: &str) -> TwitterResult<DeleteTweetResponse> {
-        self.delete(&format!("/2/tweets/{}", tweet_id)).await
+        self.delete(&format!("/2/tweets/{tweet_id}")).await
     }
 
     /// Get user's timeline.
@@ -433,7 +446,7 @@ impl TwitterApiClient {
             params.push(("pagination_token".to_string(), token.to_string()));
         }
 
-        self.get_with_params(&format!("/2/users/{}/tweets", user_id), &params)
+        self.get_with_params(&format!("/2/users/{user_id}/tweets"), &params)
             .await
     }
 
@@ -463,7 +476,7 @@ impl TwitterApiClient {
             params.push(("pagination_token".to_string(), token.to_string()));
         }
 
-        self.get_with_params(&format!("/2/users/{}/mentions", user_id), &params)
+        self.get_with_params(&format!("/2/users/{user_id}/mentions"), &params)
             .await
     }
 
@@ -550,15 +563,15 @@ impl TwitterApiClient {
         &self,
         rules: &[StreamRule],
     ) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self
-            .bearer_token
-            .as_ref()
-            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
-
         #[derive(serde::Serialize)]
         struct AddRulesRequest<'a> {
             add: &'a [StreamRule],
         }
+
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         let body = AddRulesRequest { add: rules };
         self.request_bearer("POST", "/2/tweets/search/stream/rules", Some(&body), bearer)
@@ -570,11 +583,6 @@ impl TwitterApiClient {
         &self,
         rule_ids: &[&str],
     ) -> TwitterResult<StreamRulesResponse> {
-        let bearer = self
-            .bearer_token
-            .as_ref()
-            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
-
         #[derive(serde::Serialize)]
         struct DeleteRulesRequest<'a> {
             delete: DeleteIds<'a>,
@@ -584,6 +592,11 @@ impl TwitterApiClient {
         struct DeleteIds<'a> {
             ids: &'a [&'a str],
         }
+
+        let bearer = self
+            .bearer_token
+            .as_ref()
+            .ok_or_else(|| TwitterError::Config("Bearer token required for stream rules".into()))?;
 
         let body = DeleteRulesRequest {
             delete: DeleteIds { ids: rule_ids },
@@ -597,6 +610,7 @@ impl TwitterApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_testkit::LogCapture;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header_exists, method, path},
@@ -790,5 +804,49 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, TwitterError::Api { status: 401, .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_logs_redact_credentials_and_tweet_text() {
+        let capture = LogCapture::new();
+        let _guard = capture.install_json_with_filter("debug");
+        tracing::debug!("log_capture_ready");
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/2/tweets"))
+            .and(header_exists("Authorization"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "data": {
+                    "id": "1234567890",
+                    "text": "Hello, Twitter!"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = TwitterApiClient::new(&config).unwrap();
+
+        let secret_tweet = "TopSecretTweet";
+        let request = CreateTweetRequest {
+            text: Some(secret_tweet.into()),
+            ..Default::default()
+        };
+
+        let _ = client.create_tweet(&request).await.unwrap();
+
+        let logs = capture.jsonl();
+        assert!(
+            logs.contains("log_capture_ready"),
+            "expected debug logs to be captured"
+        );
+        assert!(!logs.contains("test_consumer_key"));
+        assert!(!logs.contains("test_consumer_secret"));
+        assert!(!logs.contains("test_access_token"));
+        assert!(!logs.contains("test_access_token_secret"));
+        assert!(!logs.contains("test_bearer_token"));
+        assert!(!logs.contains(secret_tweet));
     }
 }
