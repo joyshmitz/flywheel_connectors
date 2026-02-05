@@ -753,18 +753,28 @@ let state_model = ConnectorStateModel::Crdt {
 
 **Путь:** `crates/fcp-manifest/src/lib.rs`
 
-**Структура для Odoo конектора:**
+**Структура для Odoo конектора (на основі `connectors/vectordb/manifest.toml`):**
 
 ```toml
 [manifest]
 format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:<hash>"  # Обчислюється fcp manifest fix
 
 [connector]
 id = "fcp.odoo"
 name = "Odoo v19 Connector"
 version = "0.1.0"
+description = "Odoo v19 Quality/CAPA/KB connector via JSON-2 API with enterprise policy profiles"
 archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
 
 [zones]
 home = "z:work"
@@ -777,7 +787,7 @@ required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = ["storage.state"]
 forbidden = ["system.exec", "network.listen"]
 
-# Приклад операції
+# Приклад read операції
 [provides.operations."odoo.quality.qcp.list"]
 description = "List Quality Control Points"
 capability = "odoo.quality.read"
@@ -786,12 +796,43 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."odoo.quality.qcp.list".input_schema]
+type = "object"
+required = []
+
+[provides.operations."odoo.quality.qcp.list".input_schema.properties.domain]
+description = "Odoo domain filter (list of tuples)"
+type = "array"
+
+[provides.operations."odoo.quality.qcp.list".input_schema.properties.limit]
+description = "Max records to return"
+type = "integer"
+default = 80
+maximum = 500
+
+[provides.operations."odoo.quality.qcp.list".output_schema]
+type = "object"
+required = ["records"]
+
+[provides.operations."odoo.quality.qcp.list".output_schema.properties.records]
+type = "array"
+
+[provides.operations."odoo.quality.qcp.list".output_schema.properties.total]
+type = "integer"
+
 [provides.operations."odoo.quality.qcp.list".network_constraints]
 host_allow = []  # Визначається при provisioning (URL сервера Odoo)
 port_allow = [443]
 deny_localhost = true
+deny_private_ranges = true
 require_sni = true
+max_redirects = 5
 
+[provides.operations."odoo.quality.qcp.list".rate_limit]
+max = 100
+per_ms = 60000
+
+# Приклад write операції з policy gate
 [provides.operations."odoo.capa.approve"]
 description = "Approve CAPA action"
 capability = "odoo.capa.approve"
@@ -800,6 +841,34 @@ safety_tier = "risky"
 requires_approval = "policy"  # Gate визначається Policy Profile
 idempotency = "strict"
 
+[provides.operations."odoo.capa.approve".input_schema]
+type = "object"
+required = ["capa_id"]
+
+[provides.operations."odoo.capa.approve".input_schema.properties.capa_id]
+type = "integer"
+description = "CAPA record ID in Odoo"
+
+[provides.operations."odoo.capa.approve".input_schema.properties.comment]
+type = "string"
+description = "Approval comment"
+
+[provides.operations."odoo.capa.approve".output_schema]
+type = "object"
+required = ["capa_id", "status"]
+
+[provides.operations."odoo.capa.approve".output_schema.properties.capa_id]
+type = "integer"
+
+[provides.operations."odoo.capa.approve".output_schema.properties.status]
+type = "string"
+enum = ["approved", "rejected", "pending_gate"]
+
+[provides.operations."odoo.capa.approve".rate_limit]
+max = 20
+per_ms = 60000
+
+# Rate limit pools
 [[rate_limits.pools]]
 id = "odoo.quality.read"
 requests = 100
@@ -813,9 +882,13 @@ requests = 30
 window_ms = 60000
 burst = 5
 scope = "instance"
+
+[rate_limits.operation_pools]
+"odoo.quality.qcp.list" = ["odoo.quality.read"]
+"odoo.capa.approve" = ["odoo.quality.write"]
 ```
 
-**Ключове:** Кожна операція з Operations Map (секція 5.4) отримує формальну специфікацію з input/output JSON Schema, network constraints, та safety tier.
+**Ключове:** Кожна операція з Operations Map (секція 5.4) отримує формальну специфікацію з input/output JSON Schema, network constraints, та safety tier. Приклад побудовано на основі `connectors/vectordb/manifest.toml`.
 
 ### 5.6 Provisioning — стандартизований setup конектора (NEW v2.2)
 
